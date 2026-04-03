@@ -1,14 +1,6 @@
 import { Worker, Job } from "bullmq";
-import IORedis from "ioredis";
-import { PrismaClient } from "@prisma/client";
 import { RunwayDirectClient } from "../services/runway.direct";
-import { TokenPool } from "../services/token-pool";
-
-const prisma = new PrismaClient();
-const connection = new IORedis(process.env.REDIS_URL || "redis://localhost:6379", {
-  maxRetriesPerRequest: null,
-});
-const tokenPool = new TokenPool(connection);
+import { prisma, redis as connection, accountPool } from "../services/shared";
 
 // Max BullMQ attempts for transient issues (cooldown / concurrency full)
 const MAX_QUEUE_ATTEMPTS = 60;
@@ -33,7 +25,7 @@ new Worker("runway-submit", async (job: Job) => {
     return;
   }
 
-  // --- Per-user concurrency check (before acquiring token) ---
+  // --- Per-user concurrency check (before acquiring account) ---
   if (dbJob.userId) {
     const user = await prisma.user.findUnique({
       where: { id: dbJob.userId },
@@ -62,27 +54,27 @@ new Worker("runway-submit", async (job: Job) => {
     try { imageUrls = JSON.parse(raw); } catch {}
   }
 
-  // Token cooldown check
-  const tok = await tokenPool.acquire();
-  if (!tok) {
-    console.warn(`[submit-worker] all tokens in cooldown, will retry in 70s`);
+  // Use params from job.data first, fallback to DB (for legacy jobs before param persistence)
+  const finalResolution = resolution ?? (dbJob as any).resolution;
+  const finalQuality = quality ?? (dbJob as any).quality;
+  const finalCfgScale = cfgScale ?? (dbJob as any).cfgScale;
+  const finalSound = sound ?? (dbJob as any).sound;
+  const finalVideoUrl = videoUrl ?? (dbJob as any).videoUrl;
+
+  // Acquire an account from the pool (replaces TokenPool)
+  const account = await accountPool.acquire();
+  if (!account) {
+    console.warn(`[submit-worker] all accounts in cooldown or at max concurrency, will retry`);
     await prisma.runwayJob.update({ where: { id: jobId }, data: { status: "pending" } });
     throw Object.assign(new Error("COOLDOWN"), { name: "COOLDOWN" });
   }
-  const client = new RunwayDirectClient(tok.token, tok.teamId);
 
-  // Global Runway API concurrency check
-  const activeTasks = await client.getActiveConcurrency();
-  if (activeTasks >= 2) {
-    console.log(`[submit-worker] concurrency full (${activeTasks}/2), will retry in 30s`);
-    await prisma.runwayJob.update({ where: { id: jobId }, data: { status: "pending" } });
-    throw Object.assign(new Error("CONCURRENCY_FULL"), { name: "CONCURRENCY_FULL" });
-  }
+  const client = new RunwayDirectClient(account.token, Number(account.teamId), account.proxyUrl || undefined);
 
   try {
     await prisma.runwayJob.update({
       where: { id: jobId },
-      data: { status: "submitted", startedAt: new Date(), usedToken: tok.id } as any,
+      data: { status: "submitted", startedAt: new Date(), usedToken: account.tokenShort, accountId: account.id } as any,
     });
 
     const { remoteTaskId } = await client.createTask({
@@ -93,32 +85,44 @@ new Worker("runway-submit", async (job: Job) => {
       duration:    duration || 5,
       exploreMode: dbJob.exploreMode ?? true,
       modelName:   "kling_3_0_standard",
-      resolution,
-      quality,
-      cfgScale,
-      sound,
-      videoUrl,
+      resolution:  finalResolution,
+      quality:     finalQuality,
+      cfgScale:    finalCfgScale,
+      sound:       finalSound,
+      videoUrl:    finalVideoUrl,
     });
 
     await prisma.runwayJob.update({
       where: { id: jobId },
       data: { remoteTaskId, status: "processing" },
     });
-    console.log(`[submit-worker] jobId=${jobId.slice(0,8)} remoteTaskId=${remoteTaskId}`);
+    console.log(`[submit-worker] jobId=${jobId.slice(0,8)} remoteTaskId=${remoteTaskId} account=${account.label}`);
 
     const { Queue } = await import("bullmq");
     const pollQueue = new Queue("runway-poll", { connection });
-    await pollQueue.add("poll", { jobId, remoteTaskId, duration, resolution, quality, cfgScale, sound, videoUrl }, { jobId: `poll-${jobId}`, delay: 15000 });
+    await pollQueue.add("poll", {
+      jobId, remoteTaskId,
+      accountId: account.id,
+    }, { jobId: `poll-${jobId}`, delay: 15000 });
+
+    // NOTE: concurrency slot is NOT released here — poll worker releases on completion/failure
 
   } catch (err: any) {
     const msg = err.message || String(err);
     if (msg === "COOLDOWN" || msg === "CONCURRENCY_FULL" || msg === "USER_CONCURRENCY") throw err;
     console.error(`[submit-worker] jobId=${jobId.slice(0,8)} error: ${msg}`);
+
+    // Release the concurrency slot on error
+    await accountPool.release(account.id, jobId);
+
     if (msg === "RATE_LIMITED") {
-      await tokenPool.setCooldown(tok.id);
+      await accountPool.setCooldown(account.id);
+      await accountPool.recordError(account.id, "429 Rate Limited");
       await prisma.runwayJob.update({ where: { id: jobId }, data: { status: "pending" } });
       throw Object.assign(new Error("COOLDOWN"), { name: "COOLDOWN" });
     }
+
+    await accountPool.recordError(account.id, msg);
     await prisma.runwayJob.update({
       where: { id: jobId },
       data: { status: "failed", errorMessage: msg, finishedAt: new Date() },
@@ -126,7 +130,7 @@ new Worker("runway-submit", async (job: Job) => {
   }
 }, {
   connection,
-  concurrency: 1,
+  concurrency: Number(process.env.SUBMIT_CONCURRENCY) || 1,
   settings: {
     backoffStrategy: (_attempts: number, _type: string, err: Error) => {
       if (err?.message === "COOLDOWN") return 70000;
@@ -136,4 +140,4 @@ new Worker("runway-submit", async (job: Job) => {
   },
 });
 
-console.log("[submit-worker] listening on runway-submit (kling_3_0_standard)");
+console.log("[submit-worker] listening on runway-submit (multi-account mode)");

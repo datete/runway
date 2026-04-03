@@ -7,13 +7,15 @@ const API_BASE = "https://api.runwayml.com";
 export class RunwayDirectClient implements RunwayProvider {
   private token: string;
   private teamId: number;
+  private proxyUrl?: string;
 
-  constructor(token?: string, teamId?: number) {
+  constructor(token?: string, teamId?: number, proxyUrl?: string) {
     this.token  = token || process.env.RUNWAY_TOKEN || "";
     this.teamId = teamId || Number(process.env.RUNWAY_TEAM_ID) || 0;
+    this.proxyUrl = proxyUrl;
     if (!this.token) throw new Error("RUNWAY_TOKEN is not set");
     if (!this.teamId) throw new Error("RUNWAY_TEAM_ID is not set");
-    console.log(`[runway] client init, teamId=${this.teamId}`);
+    console.log(`[runway] client init, teamId=${this.teamId}${this.proxyUrl ? ', proxy=' + this.proxyUrl.split('@').pop() : ''}`);
   }
 
   private get headers() {
@@ -26,13 +28,30 @@ export class RunwayDirectClient implements RunwayProvider {
     };
   }
 
+  /** Get fetch options with proxy agent if configured */
+  private async getFetchOptions(): Promise<{ agent?: any }> {
+    if (!this.proxyUrl) return {};
+    try {
+      if (this.proxyUrl.startsWith('socks')) {
+        const { SocksProxyAgent } = await import('socks-proxy-agent');
+        return { agent: new SocksProxyAgent(this.proxyUrl) };
+      } else {
+        const { HttpsProxyAgent } = await import('https-proxy-agent');
+        return { agent: new HttpsProxyAgent(this.proxyUrl) };
+      }
+    } catch (e: any) {
+      console.warn(`[runway] proxy agent init failed: ${e.message}, using direct connection`);
+      return {};
+    }
+  }
+
   /** Download an image from any URL, upload to Runway S3, return signed CloudFront URL */
   async uploadImage(sourceUrl: string): Promise<string> {
     // Convert relative /img/ paths to absolute localhost URL
     if (sourceUrl.startsWith("/")) sourceUrl = `http://localhost:5102${sourceUrl}`;
     console.log(`[runway:upload] source: ${sourceUrl}`);
 
-    // Step 1 – download source image
+    // Step 1 – download source image (no proxy needed for local/external image download)
     const imgRes = await fetch(sourceUrl);
     if (!imgRes.ok) throw new Error(`Failed to download image ${imgRes.status}: ${sourceUrl}`);
     const imgBuf = Buffer.from(await imgRes.arrayBuffer());
@@ -46,11 +65,14 @@ export class RunwayDirectClient implements RunwayProvider {
     const filename = `ref_${Date.now()}.${ext}`;
     console.log(`[runway:upload] downloaded ${imgBuf.length} bytes, type=${ct}, file=${filename}`);
 
+    const proxyOpts = await this.getFetchOptions();
+
     // Step 2 – initiate upload
     const initRes = await fetch(`${API_BASE}/v1/uploads`, {
       method: "POST",
       headers: this.headers,
       body: JSON.stringify({ filename, numberOfParts: 1, type: "DATASET", asTeamId: this.teamId }),
+      ...proxyOpts,
     });
     if (!initRes.ok) throw new Error(`Upload init ${initRes.status}: ${await initRes.text()}`);
     const init = await initRes.json() as any;
@@ -58,7 +80,7 @@ export class RunwayDirectClient implements RunwayProvider {
     const s3Url: string    = init.uploadUrls[0];
     console.log(`[runway:upload] initiated uploadId=${uploadId}`);
 
-    // Step 3 – PUT to S3 presigned URL
+    // Step 3 – PUT to S3 presigned URL (S3 direct, no proxy needed)
     const putRes = await fetch(s3Url, {
       method: "PUT",
       headers: { "Content-Type": ct },
@@ -73,6 +95,7 @@ export class RunwayDirectClient implements RunwayProvider {
       method: "POST",
       headers: this.headers,
       body: JSON.stringify({ parts: [{ PartNumber: 1, ETag: etag }], asTeamId: this.teamId }),
+      ...proxyOpts,
     });
     if (!completeRes.ok) throw new Error(`Upload complete ${completeRes.status}: ${await completeRes.text()}`);
     const complete = await completeRes.json() as any;
@@ -147,10 +170,12 @@ export class RunwayDirectClient implements RunwayProvider {
 
     console.log(`[runway:task] POST /v1/tasks, referenceImages=${referenceImages.length}`);
 
+    const proxyOpts = await this.getFetchOptions();
     const res = await fetch(`${API_BASE}/v1/tasks`, {
       method: "POST",
       headers: this.headers,
       body: JSON.stringify(body),
+      ...proxyOpts,
     });
 
     if (res.status === 429) {
@@ -171,9 +196,10 @@ export class RunwayDirectClient implements RunwayProvider {
 
   async getTask(remoteTaskId: string): Promise<RunwayTaskStatus> {
     console.log(`[runway:poll] GET /v1/tasks/${remoteTaskId}`);
+    const proxyOpts = await this.getFetchOptions();
     const res = await fetch(
       `${API_BASE}/v1/tasks/${remoteTaskId}?asTeamId=${this.teamId}`,
-      { headers: this.headers }
+      { headers: this.headers, ...proxyOpts }
     );
     if (!res.ok) throw new Error(`Runway getTask ${res.status}: ${await res.text()}`);
     const data = await res.json() as any;
@@ -205,12 +231,12 @@ export class RunwayDirectClient implements RunwayProvider {
     return buf;
   }
 
-
   /** Check how many tasks are currently RUNNING or THROTTLED (counts toward concurrency limit) */
   async getActiveConcurrency(): Promise<number> {
+    const proxyOpts = await this.getFetchOptions();
     const res = await fetch(
       `${API_BASE}/v1/tasks?asTeamId=${this.teamId}&limit=50`,
-      { headers: this.headers }
+      { headers: this.headers, ...proxyOpts }
     );
     if (!res.ok) return 0; // On error, assume slot is available
     const data = await res.json() as any;
@@ -223,9 +249,11 @@ export class RunwayDirectClient implements RunwayProvider {
 
   async cancelTask(remoteTaskId: string): Promise<void> {
     console.log(`[runway:cancel] taskId=${remoteTaskId}`);
+    const proxyOpts = await this.getFetchOptions();
     await fetch(`${API_BASE}/v1/tasks/${remoteTaskId}/cancel?asTeamId=${this.teamId}`, {
       method: "POST",
       headers: this.headers,
+      ...proxyOpts,
     });
   }
 }

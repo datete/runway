@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, onMounted, ref, watch } from 'vue'
+import { computed, h, onMounted, onUnmounted, ref, watch } from 'vue'
 import {
   NButton, NDataTable, NDrawer, NDrawerContent, NForm, NFormItem,
   NInput, NInputNumber, NModal, NPagination, NProgress, NSelect,
@@ -17,6 +17,7 @@ interface AdminUser {
 interface AdminJob {
   id: string; status: string; prompt: string; duration: number | null
   createdAt: string; user?: { id: string; username: string }
+  account?: { id: string; label: string; tokenShort: string }
 }
 interface AdminLog {
   id: string; action: string; detail: string; ip: string
@@ -25,11 +26,23 @@ interface AdminLog {
 interface UserStat {
   id: string; username: string; role: string; isActive: boolean
   maxConcurrency: number | null; dailyQuota: number | null; totalQuota: number | null
-  totalJobs: number; todayJobs: number; todayCompleted: number; todayFailed: number
+  totalJobs: number; todayJobs: number; todayCompleted: number; todayFailed: number; currentActive: number
 }
 interface DashboardOverview {
   totalUsers: number; activeUsers: number; totalJobs: number; todayJobs: number
   queuedJobs: number; processingJobs: number; completedJobs: number; failedJobs: number
+  totalAccounts: number; activeAccounts: number; totalMaxConcurrency: number; totalCurrentConcurrency: number
+}
+interface AccountInfo {
+  id: string; label: string; tokenShort: string; teamId: string; proxyUrl: string | null
+  maxConcurrency: number; currentConcurrency: number; isActive: boolean; priority: number
+  inCooldown: boolean; totalGenerated: number; lastUsedAt: string | null
+  lastErrorAt: string | null; lastErrorMessage: string | null
+  tokenExpiresAt: string | null; createdAt: string
+}
+interface AccountStat {
+  id: string; label: string; tokenShort: string; isActive: boolean
+  maxConcurrency: number; currentConcurrency: number; totalGenerated: number
 }
 
 /* ── Props / Emits ── */
@@ -40,8 +53,9 @@ const message = useMessage()
 const { headers } = useRunwayJwt()
 
 /* ── State ── */
-const overview = ref<DashboardOverview>({ totalUsers: 0, activeUsers: 0, totalJobs: 0, todayJobs: 0, queuedJobs: 0, processingJobs: 0, completedJobs: 0, failedJobs: 0 })
+const overview = ref<DashboardOverview>({ totalUsers: 0, activeUsers: 0, totalJobs: 0, todayJobs: 0, queuedJobs: 0, processingJobs: 0, completedJobs: 0, failedJobs: 0, totalAccounts: 0, activeAccounts: 0, totalMaxConcurrency: 0, totalCurrentConcurrency: 0 })
 const userStats = ref<UserStat[]>([])
+const accountStatsData = ref<AccountStat[]>([])
 
 const users = ref<AdminUser[]>([])
 const userLoading = ref(false)
@@ -49,6 +63,14 @@ const showUserModal = ref(false)
 const editingUser = ref<AdminUser | null>(null)
 const userSaving = ref(false)
 const userForm = ref({ username: '', password: '', role: 'user' as 'admin' | 'user', isActive: true, maxConcurrency: null as number | null, dailyQuota: null as number | null, totalQuota: null as number | null })
+
+const accounts = ref<AccountInfo[]>([])
+const accountsLoading = ref(false)
+const showAccountModal = ref(false)
+const editingAccount = ref<AccountInfo | null>(null)
+const accountSaving = ref(false)
+const accountForm = ref({ label: '', token: '', teamId: '', proxyUrl: '', maxConcurrency: 2, priority: 0 })
+const accountTesting = ref<string | null>(null)
 
 const adminJobs = ref<AdminJob[]>([])
 const adminJobsTotal = ref(0)
@@ -68,9 +90,9 @@ const userFilterOptions = computed(() => [
   { label: '全部用户', value: '' },
   ...users.value.map(u => ({ label: u.username, value: u.id })),
 ])
-const roleOptions = [{ label: '普���用户', value: 'user' }, { label: '管理员', value: 'admin' }]
+const roleOptions = [{ label: '普通用户', value: 'user' }, { label: '管理员', value: 'admin' }]
 const statusOptions = [{ label: '全部状态', value: '' }, { label: '等待中', value: 'pending' }, { label: '排队中', value: 'queued' }, { label: '处理中', value: 'processing' }, { label: '已完成', value: 'completed' }, { label: '失败', value: 'failed' }]
-const logActionOptions = [{ label: '全部行为', value: '' }, { label: '登录', value: 'login' }, { label: '创建任务', value: 'create_job' }, { label: '删���任务', value: 'delete_job' }, { label: '重试任务', value: 'retry_job' }]
+const logActionOptions = [{ label: '全部行为', value: '' }, { label: '登录', value: 'login' }, { label: '创建任务', value: 'create_job' }, { label: '删除任务', value: 'delete_job' }, { label: '重试任务', value: 'retry_job' }]
 
 const statusType: Record<string, 'default' | 'info' | 'success' | 'warning' | 'error'> = { pending: 'default', queued: 'default', submitted: 'info', processing: 'info', completed: 'success', failed: 'error', cancelled: 'warning' }
 const statusLabel: Record<string, string> = { pending: '等待中', queued: '排队中', submitted: '已提交', processing: '处理中', completed: '已完成', failed: '失败', cancelled: '已取消' }
@@ -83,6 +105,7 @@ const dashCards = computed(() => [
   { icon: 'ri:movie-2-line', label: '总任务', value: overview.value.totalJobs, sub: `完成 ${overview.value.completedJobs}`, color: 'from-violet-500 to-purple-600' },
   { icon: 'ri:sparkling-2-line', label: '今日生成', value: overview.value.todayJobs, sub: `失败 ${overview.value.failedJobs}`, color: 'from-amber-500 to-orange-500' },
   { icon: 'ri:loader-4-line', label: '排队 / 处理中', value: overview.value.queuedJobs + overview.value.processingJobs, sub: `排队 ${overview.value.queuedJobs} · 处理 ${overview.value.processingJobs}`, color: 'from-emerald-500 to-teal-600' },
+  { icon: 'ri:key-2-line', label: '账号', value: `${overview.value.activeAccounts}/${overview.value.totalAccounts}`, sub: `并发 ${overview.value.totalCurrentConcurrency}/${overview.value.totalMaxConcurrency}`, color: 'from-pink-500 to-rose-600' },
 ])
 
 const formatTime = (v: string) => new Date(v).toLocaleString('zh-CN', { hour12: false })
@@ -95,6 +118,7 @@ const fetchDashboard = async () => {
     const data = await res.json()
     overview.value = data.overview
     userStats.value = data.userStats || []
+    accountStatsData.value = data.accountStats || []
   } catch {}
 }
 
@@ -106,6 +130,16 @@ const fetchUsers = async () => {
     users.value = await res.json()
   } catch (e: any) { message.error(e.message) }
   finally { userLoading.value = false }
+}
+
+const fetchAccounts = async () => {
+  accountsLoading.value = true
+  try {
+    const res = await fetch('/api/runway/admin/accounts', { headers: headers() })
+    if (!res.ok) throw new Error('加载失败')
+    accounts.value = await res.json()
+  } catch (e: any) { message.error(e.message) }
+  finally { accountsLoading.value = false }
 }
 
 const fetchAdminJobs = async () => {
@@ -137,7 +171,77 @@ const fetchLogs = async () => {
   finally { logsLoading.value = false }
 }
 
-const refreshAll = () => { fetchDashboard(); fetchUsers(); fetchAdminJobs(); fetchLogs() }
+const refreshAll = () => { fetchDashboard(); fetchUsers(); fetchAccounts(); fetchAdminJobs(); fetchLogs() }
+
+/* ── Account CRUD ── */
+const openCreateAccount = () => {
+  editingAccount.value = null
+  accountForm.value = { label: '', token: '', teamId: '', proxyUrl: '', maxConcurrency: 2, priority: 0 }
+  showAccountModal.value = true
+}
+
+const openEditAccount = (acc: AccountInfo) => {
+  editingAccount.value = acc
+  accountForm.value = { label: acc.label, token: '', teamId: acc.teamId, proxyUrl: acc.proxyUrl || '', maxConcurrency: acc.maxConcurrency, priority: acc.priority }
+  showAccountModal.value = true
+}
+
+const saveAccount = async () => {
+  const f = accountForm.value
+  if (!f.label.trim()) { message.error('请输入账号标签'); return }
+  if (!editingAccount.value && (!f.token.trim() || !f.teamId.trim())) { message.error('新建账号时 Token 和 TeamID 必填'); return }
+
+  accountSaving.value = true
+  try {
+    const payload: Record<string, unknown> = { label: f.label.trim(), maxConcurrency: f.maxConcurrency, priority: f.priority, proxyUrl: f.proxyUrl.trim() || null }
+    if (f.token.trim()) payload.token = f.token.trim()
+    if (f.teamId.trim()) payload.teamId = f.teamId.trim()
+
+    const isEdit = Boolean(editingAccount.value)
+    const url = isEdit ? `/api/runway/admin/accounts/${editingAccount.value?.id}` : '/api/runway/admin/accounts'
+    const res = await fetch(url, { method: isEdit ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json', ...headers() }, body: JSON.stringify(payload) })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error || '保存失败')
+
+    message.success(isEdit ? '账号已更新' : '账号已添加')
+    showAccountModal.value = false
+    fetchAccounts(); fetchDashboard()
+  } catch (e: any) { message.error(e.message) }
+  finally { accountSaving.value = false }
+}
+
+const toggleAccountActive = async (acc: AccountInfo) => {
+  try {
+    const res = await fetch(`/api/runway/admin/accounts/${acc.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json', ...headers() }, body: JSON.stringify({ isActive: !acc.isActive }) })
+    if (!res.ok) throw new Error('操作失败')
+    message.success(!acc.isActive ? '已启用' : '已停用')
+    fetchAccounts(); fetchDashboard()
+  } catch (e: any) { message.error(e.message) }
+}
+
+const deleteAccount = async (id: string) => {
+  if (!window.confirm('确认停用该账号？')) return
+  try {
+    const res = await fetch(`/api/runway/admin/accounts/${id}`, { method: 'DELETE', headers: headers() })
+    if (!res.ok) throw new Error('操作失败')
+    message.success('已停用')
+    fetchAccounts(); fetchDashboard()
+  } catch (e: any) { message.error(e.message) }
+}
+
+const testAccount = async (id: string) => {
+  accountTesting.value = id
+  try {
+    const res = await fetch(`/api/runway/admin/accounts/${id}/test`, { headers: headers() })
+    const data = await res.json()
+    if (data.ok) {
+      message.success(data.message)
+    } else {
+      message.error(data.message)
+    }
+  } catch (e: any) { message.error(e.message) }
+  finally { accountTesting.value = null }
+}
 
 /* ── User CRUD ── */
 const openCreateUser = () => {
@@ -188,7 +292,7 @@ const deleteUser = async (id: string) => {
   if (!window.confirm('确认删除该用户？不可恢复。')) return
   try {
     const res = await fetch(`/api/runway/admin/users/${id}`, { method: 'DELETE', headers: headers() })
-    if (!res.ok) throw new Error('删除失��')
+    if (!res.ok) throw new Error('删除失败')
     message.success('已删除')
     fetchUsers(); fetchDashboard()
   } catch (e: any) { message.error(e.message) }
@@ -197,7 +301,7 @@ const deleteUser = async (id: string) => {
 /* ── Table columns ── */
 const userColumns = [
   { title: '用户名', key: 'username', width: 120 },
-  { title: '角色', key: 'role', width: 90, render: (row: AdminUser) => h(NTag, { type: row.role === 'admin' ? 'error' : 'info', size: 'small', round: true, bordered: false }, () => row.role === 'admin' ? '管理员' : '用���') },
+  { title: '角色', key: 'role', width: 90, render: (row: AdminUser) => h(NTag, { type: row.role === 'admin' ? 'error' : 'info', size: 'small', round: true, bordered: false }, () => row.role === 'admin' ? '管理员' : '用户') },
   { title: '状态', key: 'isActive', width: 80, render: (row: AdminUser) => h(NTag, { type: row.isActive ? 'success' : 'warning', size: 'small', round: true, bordered: false }, () => row.isActive ? '启用' : '停用') },
   { title: '并发', key: 'maxConcurrency', width: 70, render: (row: AdminUser) => String(row.maxConcurrency ?? '默认') },
   { title: '日配额', key: 'dailyQuota', width: 80, render: (row: AdminUser) => String(row.dailyQuota ?? '不限') },
@@ -212,6 +316,7 @@ const userColumns = [
 
 const jobColumns = [
   { title: '用户', key: 'user', width: 100, render: (row: AdminJob) => h(NTag, { size: 'small', round: true, bordered: false, type: 'info' }, () => row.user?.username ?? '—') },
+  { title: '账号', key: 'account', width: 100, render: (row: AdminJob) => row.account ? h(NTag, { size: 'small', round: true, bordered: false, type: 'default' }, () => row.account!.label) : '—' },
   { title: '状态', key: 'status', width: 100, render: (row: AdminJob) => h(NTag, { type: statusType[row.status] ?? 'default', size: 'small', round: true, bordered: false }, () => statusLabel[row.status] || row.status) },
   { title: '时长', key: 'duration', width: 70, render: (row: AdminJob) => row.duration ? `${row.duration}s` : '—' },
   { title: '提示词', key: 'prompt', ellipsis: { tooltip: true } },
@@ -219,17 +324,28 @@ const jobColumns = [
 ]
 
 const logColumns = [
-  { title: '用��', key: 'user', width: 100, render: (row: AdminLog) => h(NTag, { size: 'small', round: true, bordered: false, type: 'info' }, () => row.user?.username ?? '—') },
+  { title: '用户', key: 'user', width: 100, render: (row: AdminLog) => h(NTag, { size: 'small', round: true, bordered: false, type: 'info' }, () => row.user?.username ?? '—') },
   { title: '行为', key: 'action', width: 110, render: (row: AdminLog) => h(NTag, { type: actionType[row.action] ?? 'default', size: 'small', round: true, bordered: false }, () => actionLabel[row.action] || row.action) },
   { title: '详情', key: 'detail', ellipsis: { tooltip: true } },
   { title: 'IP', key: 'ip', width: 140 },
-  { title: '时���', key: 'createdAt', width: 170, render: (row: AdminLog) => formatTime(row.createdAt) },
+  { title: '时间', key: 'createdAt', width: 170, render: (row: AdminLog) => formatTime(row.createdAt) },
 ]
 
 /* ── Watchers ── */
 watch(() => props.show, (v) => { if (v) refreshAll() })
 watch(jobsPage, () => fetchAdminJobs())
 watch(logsPage, () => fetchLogs())
+
+/* Auto-refresh dashboard every 30s when panel is open */
+let autoRefreshTimer: ReturnType<typeof setInterval> | null = null
+watch(() => props.show, (v) => {
+  if (v) {
+    autoRefreshTimer = setInterval(fetchDashboard, 30000)
+  } else {
+    if (autoRefreshTimer) { clearInterval(autoRefreshTimer); autoRefreshTimer = null }
+  }
+})
+onUnmounted(() => { if (autoRefreshTimer) clearInterval(autoRefreshTimer) })
 </script>
 
 <template>
@@ -242,14 +358,14 @@ watch(logsPage, () => fetchLogs())
           </div>
           <div>
             <p class="text-base font-semibold">管理控制台</p>
-            <p class="text-xs text-slate-400">用户管理 · 任务监控 · 审计日志</p>
+            <p class="text-xs text-slate-400">用户管理 · 账号管理 · 任务监控 · 审计日志</p>
           </div>
         </div>
       </template>
 
       <div class="space-y-4">
         <!-- Dashboard overview cards -->
-        <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <div class="grid grid-cols-2 gap-3 sm:grid-cols-5">
           <div
             v-for="card in dashCards"
             :key="card.label"
@@ -283,14 +399,12 @@ watch(logsPage, () => fetchLogs())
               :key="u.id"
               class="flex items-center gap-3 rounded-lg border border-slate-100 bg-slate-50/50 p-2.5 dark:border-slate-700/40 dark:bg-slate-800/40"
             >
-              <!-- Avatar -->
               <div
                 class="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-xs font-bold text-white"
                 :class="u.role === 'admin' ? 'bg-gradient-to-br from-red-500 to-pink-500' : 'bg-gradient-to-br from-cyan-500 to-blue-500'"
               >
                 {{ u.username.charAt(0).toUpperCase() }}
               </div>
-              <!-- Info -->
               <div class="min-w-0 flex-1">
                 <div class="flex items-center gap-1.5">
                   <span class="text-sm font-medium text-slate-800 dark:text-slate-100">{{ u.username }}</span>
@@ -302,10 +416,9 @@ watch(logsPage, () => fetchLogs())
                   <span>今日 <b class="text-slate-700 dark:text-slate-200">{{ u.todayJobs }}</b><template v-if="u.dailyQuota !== null">/{{ u.dailyQuota }}</template></span>
                   <span>今日完成 <b class="text-emerald-600 dark:text-emerald-400">{{ u.todayCompleted }}</b></span>
                   <span v-if="u.todayFailed > 0">失败 <b class="text-red-500">{{ u.todayFailed }}</b></span>
-                  <span>并发上限 <b class="text-slate-700 dark:text-slate-200">{{ u.maxConcurrency ?? '默认' }}</b></span>
+                  <span>并发 <b :class="u.currentActive > 0 ? 'text-orange-500' : 'text-emerald-500'">{{ u.currentActive }}</b>/<b class="text-slate-700 dark:text-slate-200">{{ u.maxConcurrency ?? '不限' }}</b></span>
                 </div>
               </div>
-              <!-- Progress if has totalQuota -->
               <div v-if="u.totalQuota !== null" class="w-20 flex-shrink-0">
                 <NProgress
                   type="line"
@@ -320,16 +433,101 @@ watch(logsPage, () => fetchLogs())
           </div>
         </div>
 
-        <!-- Tabs: Users / Jobs / Logs -->
+        <!-- Account stats (in dashboard area) -->
+        <div v-if="accountStatsData.length > 0" class="rounded-xl border border-slate-200/80 bg-white p-4 dark:border-slate-700/50 dark:bg-slate-800/80">
+          <div class="mb-3 flex items-center justify-between">
+            <p class="text-sm font-semibold text-slate-800 dark:text-slate-100">账号并发概览</p>
+            <NButton size="tiny" quaternary @click="fetchDashboard">
+              <SvgIcon icon="ri:refresh-line" class="mr-1" /> 刷新
+            </NButton>
+          </div>
+          <div class="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
+            <div
+              v-for="a in accountStatsData"
+              :key="a.id"
+              class="rounded-lg border p-3"
+              :class="a.isActive ? 'border-slate-100 bg-slate-50/50 dark:border-slate-700/40 dark:bg-slate-800/40' : 'border-red-100 bg-red-50/50 dark:border-red-900/30 dark:bg-red-900/10'"
+            >
+              <div class="flex items-center justify-between">
+                <span class="text-sm font-medium text-slate-800 dark:text-slate-100">{{ a.label }}</span>
+                <NTag :type="a.isActive ? 'success' : 'warning'" size="tiny" round :bordered="false">
+                  {{ a.isActive ? '活跃' : '停用' }}
+                </NTag>
+              </div>
+              <div class="mt-2">
+                <NProgress
+                  type="line"
+                  :percentage="a.maxConcurrency > 0 ? Math.round(a.currentConcurrency / a.maxConcurrency * 100) : 0"
+                  :status="a.currentConcurrency >= a.maxConcurrency ? 'warning' : 'success'"
+                  :show-indicator="false"
+                  :height="8"
+                />
+                <div class="mt-1 flex justify-between text-[11px] text-slate-500">
+                  <span>并发 {{ a.currentConcurrency }}/{{ a.maxConcurrency }}</span>
+                  <span>已生成 {{ a.totalGenerated }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tabs: Accounts / Users / Jobs / Logs -->
         <div class="rounded-xl border border-slate-200/80 bg-white p-4 dark:border-slate-700/50 dark:bg-slate-800/80">
           <NTabs type="segment" animated>
+            <!-- Accounts Tab -->
+            <NTabPane name="accounts" tab="账号管理">
+              <div class="mb-3 flex gap-2">
+                <NButton type="primary" size="small" @click="openCreateAccount">
+                  <SvgIcon icon="ri:key-2-line" class="mr-1" /> 添加账号
+                </NButton>
+                <NButton size="small" secondary @click="fetchAccounts">刷新</NButton>
+              </div>
+              <div class="space-y-2">
+                <div
+                  v-for="acc in accounts"
+                  :key="acc.id"
+                  class="rounded-lg border p-3"
+                  :class="acc.isActive ? 'border-slate-200 dark:border-slate-700' : 'border-red-200 bg-red-50/30 dark:border-red-900/30 dark:bg-red-900/10'"
+                >
+                  <div class="flex items-start justify-between">
+                    <div class="flex-1">
+                      <div class="flex items-center gap-2">
+                        <span class="text-sm font-semibold text-slate-800 dark:text-slate-100">{{ acc.label }}</span>
+                        <NTag :type="acc.isActive ? 'success' : 'error'" size="tiny" round :bordered="false">{{ acc.isActive ? '活跃' : '停用' }}</NTag>
+                        <NTag v-if="acc.inCooldown" type="warning" size="tiny" round :bordered="false">冷却中</NTag>
+                        <NTag v-if="acc.priority > 0" type="info" size="tiny" round :bordered="false">优先级 {{ acc.priority }}</NTag>
+                      </div>
+                      <div class="mt-1 flex flex-wrap gap-x-4 text-xs text-slate-500 dark:text-slate-400">
+                        <span>Token: ...{{ acc.tokenShort }}</span>
+                        <span>TeamID: {{ acc.teamId }}</span>
+                        <span v-if="acc.proxyUrl">代理: {{ acc.proxyUrl }}</span>
+                        <span>并发: <b :class="acc.currentConcurrency >= acc.maxConcurrency ? 'text-orange-500' : 'text-emerald-500'">{{ acc.currentConcurrency }}</b>/{{ acc.maxConcurrency }}</span>
+                        <span>总生成: <b class="text-slate-700 dark:text-slate-200">{{ acc.totalGenerated }}</b></span>
+                      </div>
+                      <div v-if="acc.lastErrorMessage" class="mt-1 text-xs text-red-500">
+                        最近错误: {{ acc.lastErrorMessage }} ({{ acc.lastErrorAt ? formatTime(acc.lastErrorAt) : '' }})
+                      </div>
+                    </div>
+                    <div class="flex gap-1">
+                      <NButton size="tiny" tertiary :loading="accountTesting === acc.id" @click="testAccount(acc.id)">测试</NButton>
+                      <NButton size="tiny" tertiary @click="openEditAccount(acc)">编辑</NButton>
+                      <NButton size="tiny" tertiary :type="acc.isActive ? 'warning' : 'success'" @click="toggleAccountActive(acc)">{{ acc.isActive ? '停用' : '启用' }}</NButton>
+                    </div>
+                  </div>
+                </div>
+                <div v-if="accounts.length === 0 && !accountsLoading" class="py-8 text-center text-sm text-slate-400">
+                  暂无账号，点击"添加账号"开始
+                </div>
+              </div>
+            </NTabPane>
+
             <!-- Users Tab -->
             <NTabPane name="users" tab="用户管理">
               <div class="mb-3 flex gap-2">
                 <NButton type="primary" size="small" @click="openCreateUser">
-                  <SvgIcon icon="ri:user-add-line" class="mr-1" /> 新建��户
+                  <SvgIcon icon="ri:user-add-line" class="mr-1" /> 新建用户
                 </NButton>
-                <NButton size="small" secondary @click="fetchUsers">刷���</NButton>
+                <NButton size="small" secondary @click="fetchUsers">刷新</NButton>
               </div>
               <div class="overflow-hidden rounded-lg border border-slate-200/80 dark:border-slate-700/40">
                 <NDataTable :columns="userColumns" :data="users" :loading="userLoading" :scroll-x="900" size="small" />
@@ -344,7 +542,7 @@ watch(logsPage, () => fetchLogs())
                 <NButton size="small" secondary @click="fetchAdminJobs">刷新</NButton>
               </div>
               <div class="overflow-hidden rounded-lg border border-slate-200/80 dark:border-slate-700/40">
-                <NDataTable :columns="jobColumns" :data="adminJobs" :loading="jobsLoading" :scroll-x="700" size="small" />
+                <NDataTable :columns="jobColumns" :data="adminJobs" :loading="jobsLoading" :scroll-x="800" size="small" />
               </div>
               <div class="mt-3 flex justify-center">
                 <NPagination v-model:page="jobsPage" :page-count="Math.ceil(adminJobsTotal / 20) || 1" />
@@ -373,7 +571,7 @@ watch(logsPage, () => fetchLogs())
   <!-- User create/edit modal -->
   <NModal v-model:show="showUserModal" preset="card" :title="editingUser ? '编辑用户' : '新建用户'" style="width: min(92vw, 480px)">
     <NForm label-placement="left" label-width="80">
-      <NFormItem label="���户名">
+      <NFormItem label="用户名">
         <NInput v-model:value="userForm.username" :disabled="Boolean(editingUser)" placeholder="请输入用户名" />
       </NFormItem>
       <NFormItem :label="editingUser ? '重置密码' : '密码'">
@@ -401,6 +599,35 @@ watch(logsPage, () => fetchLogs())
     <div class="flex justify-end gap-2">
       <NButton @click="showUserModal = false">取消</NButton>
       <NButton type="primary" :loading="userSaving" @click="saveUser">保存</NButton>
+    </div>
+  </NModal>
+
+  <!-- Account create/edit modal -->
+  <NModal v-model:show="showAccountModal" preset="card" :title="editingAccount ? '编辑账号' : '添加账号'" style="width: min(92vw, 520px)">
+    <NForm label-placement="left" label-width="90">
+      <NFormItem label="账号标签">
+        <NInput v-model:value="accountForm.label" placeholder="例如: 账号1、美区账号" />
+      </NFormItem>
+      <NFormItem label="API Token">
+        <NInput v-model:value="accountForm.token" type="textarea" :autosize="{ minRows: 2, maxRows: 4 }" :placeholder="editingAccount ? '不修改留空' : 'Runway API Token (JWT)'" />
+      </NFormItem>
+      <NFormItem label="Team ID">
+        <NInput v-model:value="accountForm.teamId" :placeholder="editingAccount ? accountForm.teamId || '不修改留空' : 'Runway Team ID'" />
+      </NFormItem>
+      <NFormItem label="代理地址">
+        <NInput v-model:value="accountForm.proxyUrl" placeholder="可选，如 socks5://user:pass@host:port 或 http://host:port" />
+      </NFormItem>
+      <NFormItem label="最大并发">
+        <NInputNumber v-model:value="accountForm.maxConcurrency" :min="1" :max="10" style="width: 100%" />
+      </NFormItem>
+      <NFormItem label="优先级">
+        <NInputNumber v-model:value="accountForm.priority" :min="0" :max="100" style="width: 100%" />
+        <template #feedback>数值越大优先使用</template>
+      </NFormItem>
+    </NForm>
+    <div class="flex justify-end gap-2">
+      <NButton @click="showAccountModal = false">取消</NButton>
+      <NButton type="primary" :loading="accountSaving" @click="saveAccount">保存</NButton>
     </div>
   </NModal>
 </template>

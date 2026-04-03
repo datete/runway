@@ -70,6 +70,11 @@ export class RunwayService {
         provider: "direct",
         duration: input.duration || 5,
         remark: input.remark,
+        resolution: input.resolution || null,
+        quality: input.quality || null,
+        cfgScale: input.cfgScale ?? null,
+        sound: input.sound ?? null,
+        videoUrl: input.videoUrl || null,
       } as any,
     });
 
@@ -114,7 +119,15 @@ export class RunwayService {
     if (existing) await existing.remove().catch(() => {});
     await submitQueue.add(
       "submit",
-      { jobId: id, duration: (job as any).duration || 5 },
+      {
+        jobId: id,
+        duration: (job as any).duration || 5,
+        resolution: (job as any).resolution,
+        quality: (job as any).quality,
+        cfgScale: (job as any).cfgScale,
+        sound: (job as any).sound,
+        videoUrl: (job as any).videoUrl,
+      },
       { jobId: `submit-${id}`, attempts: 60, backoff: { type: "custom" } },
     );
     return prisma.runwayJob.findUnique({ where: { id } });

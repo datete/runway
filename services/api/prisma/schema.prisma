@@ -8,18 +8,18 @@ datasource db {
 }
 
 model User {
-  id           String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  username     String     @unique @db.VarChar(64)
-  passwordHash String     @map("password_hash")
-  role         String     @default("user") @db.VarChar(16)
-  isActive       Boolean    @default(true) @map("is_active")
-  maxConcurrency Int?       @map("max_concurrency")
-  dailyQuota     Int?       @map("daily_quota")
-  totalQuota     Int?       @map("total_quota")
-  createdAt    DateTime   @default(now()) @map("created_at")
-  updatedAt    DateTime   @updatedAt @map("updated_at")
-  jobs         RunwayJob[]
-  logs         UserLog[]
+  id             String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  username       String      @unique @db.VarChar(64)
+  passwordHash   String      @map("password_hash")
+  role           String      @default("user") @db.VarChar(16)
+  createdAt      DateTime    @default(now()) @map("created_at")
+  updatedAt      DateTime    @updatedAt @map("updated_at")
+  dailyQuota     Int?        @map("daily_quota")
+  isActive       Boolean     @default(true) @map("is_active")
+  maxConcurrency Int?        @map("max_concurrency")
+  totalQuota     Int?        @map("total_quota")
+  jobs           RunwayJob[]
+  logs           UserLog[]
 
   @@map("users")
 }
@@ -37,30 +37,37 @@ model UserLog {
 }
 
 model RunwayJob {
-  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId          String?   @map("user_id") @db.Uuid
-  provider        String    @default("useapi") @db.VarChar(32)
-  mode            String    @db.VarChar(32)
+  id              String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId          String?          @map("user_id") @db.Uuid
+  provider        String           @default("useapi") @db.VarChar(32)
+  mode            String           @db.VarChar(32)
   prompt          String
-  imageUrl        String?   @map("image_url")
-  referenceImages String?   @map("reference_images")
-  status          String    @default("pending") @db.VarChar(32)
-  remoteTaskId    String?   @map("remote_task_id") @db.VarChar(128)
-  exploreMode     Boolean   @default(true) @map("explore_mode")
-  modelName       String    @default("gen4") @map("model_name") @db.VarChar(64)
-  resultUrl       String?   @map("result_url")
-  thumbnailUrl    String?   @map("thumbnail_url")
-  errorMessage    String?   @map("error_message")
-  retryCount      Int       @default(0) @map("retry_count")
-  usedToken       String?   @map("used_token") @db.VarChar(64)
+  imageUrl        String?          @map("image_url")
+  status          String           @default("pending") @db.VarChar(32)
+  remoteTaskId    String?          @map("remote_task_id") @db.VarChar(128)
+  exploreMode     Boolean          @default(true) @map("explore_mode")
+  modelName       String           @default("gen4") @map("model_name") @db.VarChar(64)
+  resultUrl       String?          @map("result_url")
+  thumbnailUrl    String?          @map("thumbnail_url")
+  errorMessage    String?          @map("error_message")
+  retryCount      Int              @default(0) @map("retry_count")
+  createdAt       DateTime         @default(now()) @map("created_at")
+  updatedAt       DateTime         @updatedAt @map("updated_at")
+  startedAt       DateTime?        @map("started_at")
+  finishedAt      DateTime?        @map("finished_at")
+  referenceImages String?          @map("reference_images")
+  usedToken       String?          @map("used_token") @db.VarChar(64)
   duration        Int?
   remark          String?
-  createdAt       DateTime  @default(now()) @map("created_at")
-  updatedAt       DateTime  @updatedAt @map("updated_at")
-  startedAt       DateTime? @map("started_at")
-  finishedAt      DateTime? @map("finished_at")
-  user            User?     @relation(fields: [userId], references: [id])
+  accountId       String?          @map("account_id") @db.Uuid
+  resolution      String?          @db.VarChar(32)
+  quality         String?          @db.VarChar(32)
+  cfgScale        Float?           @map("cfg_scale")
+  sound           Boolean?
+  videoUrl        String?          @map("video_url")
   events          RunwayJobEvent[]
+  account         RunwayAccount?   @relation(fields: [accountId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  user            User?            @relation(fields: [userId], references: [id])
 
   @@map("runway_jobs")
 }
@@ -75,4 +82,26 @@ model RunwayJobEvent {
   job         RunwayJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
 
   @@map("runway_job_events")
+}
+
+model RunwayAccount {
+  id               String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  label            String      @db.VarChar(64)
+  token            String
+  tokenShort       String      @map("token_short") @db.VarChar(16)
+  teamId           String      @map("team_id") @db.VarChar(32)
+  proxyUrl         String?     @map("proxy_url")
+  maxConcurrency   Int         @default(2) @map("max_concurrency")
+  isActive         Boolean     @default(true) @map("is_active")
+  priority         Int         @default(0)
+  tokenExpiresAt   DateTime?   @map("token_expires_at") @db.Timestamptz(6)
+  lastUsedAt       DateTime?   @map("last_used_at") @db.Timestamptz(6)
+  lastErrorAt      DateTime?   @map("last_error_at") @db.Timestamptz(6)
+  lastErrorMessage String?     @map("last_error_message")
+  totalGenerated   Int         @default(0) @map("total_generated")
+  createdAt        DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime    @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  jobs             RunwayJob[]
+
+  @@map("runway_accounts")
 }

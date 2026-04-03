@@ -1,23 +1,29 @@
 import { Worker, Job, Queue } from 'bullmq';
 import fs from 'fs';
 import path from 'path';
-import IORedis from 'ioredis';
 import fetch from 'node-fetch';
-import { PrismaClient } from '@prisma/client';
 import { RunwayDirectClient } from '../services/runway.direct';
+import { prisma, redis as connection, accountPool } from '../services/shared';
 
-const prisma = new PrismaClient();
-const connection = new IORedis(process.env.REDIS_URL || 'redis://localhost:6379', {
-  maxRetriesPerRequest: null,
-});
 const pollQueue = new Queue('runway-poll', { connection });
 const submitQueue = new Queue('runway-submit', { connection });
-const client = new RunwayDirectClient();
 
 // Max auto-retries when remote task fails (prevents infinite loop)
 const MAX_REMOTE_RETRIES = 3;
 // Max BullMQ attempts for submit queue jobs created by auto-retry
 const MAX_SUBMIT_ATTEMPTS = 60;
+
+/** Create a RunwayDirectClient for a specific account */
+async function getClientForJob(accountId?: string): Promise<RunwayDirectClient> {
+  if (accountId) {
+    const account = await prisma.runwayAccount.findUnique({ where: { id: accountId } });
+    if (account) {
+      return new RunwayDirectClient(account.token, Number(account.teamId), account.proxyUrl || undefined);
+    }
+  }
+  // Fallback to env vars for legacy jobs
+  return new RunwayDirectClient();
+}
 
 async function promoteNextJob() {
   try {
@@ -53,9 +59,13 @@ const INTERVAL_QUEUED     = Number(process.env.POLL_INTERVAL_QUEUED_MS) || 20000
 const INTERVAL_PROCESSING = Number(process.env.POLL_INTERVAL_PROCESSING_MS) || 10000;
 
 new Worker('runway-poll', async (job: Job) => {
-  const { jobId, remoteTaskId } = job.data;
-  const dbJob = await prisma.runwayJob.findUnique({ where: { id: jobId } });
-  if (!dbJob || ['completed', 'failed', 'cancelled'].includes(dbJob.status)) return;
+  const { jobId, remoteTaskId, accountId } = job.data;
+  const dbJob = await prisma.runwayJob.findUnique({ where: { id: jobId } }) as any;
+  if (!dbJob || ['completed', 'failed', 'cancelled'].includes(dbJob.status)) {
+    // Job already done — release account concurrency if still held
+    if (accountId) await accountPool.release(accountId, jobId);
+    return;
+  }
 
   if (dbJob.resultUrl && dbJob.resultUrl.startsWith('/img/videos/')) {
     console.log(`[poll-worker] job ${jobId.slice(0,8)} already has cached video, marking completed`);
@@ -63,10 +73,15 @@ new Worker('runway-poll', async (job: Job) => {
       where: { id: jobId },
       data: { status: 'completed', finishedAt: dbJob.finishedAt || new Date() },
     });
+    if (accountId) {
+      await accountPool.release(accountId, jobId);
+      await accountPool.incrementGenerated(accountId);
+    }
     await promoteNextJob();
     return;
   }
 
+  const client = await getClientForJob(accountId);
   const result = await client.getTask(remoteTaskId);
 
   if (result.status === 'completed') {
@@ -75,19 +90,39 @@ new Worker('runway-poll', async (job: Job) => {
       where: { id: jobId },
       data: { status: 'completed', resultUrl: localUrl || result.resultUrl, thumbnailUrl: result.thumbnailUrl, finishedAt: new Date() },
     });
+    // Release account concurrency and increment counter
+    if (accountId) {
+      await accountPool.release(accountId, jobId);
+      await accountPool.incrementGenerated(accountId);
+    }
     await promoteNextJob();
   } else if (result.status === 'failed' || result.status === 'cancelled') {
+    // Release account concurrency on failure
+    if (accountId) {
+      await accountPool.release(accountId, jobId);
+      await accountPool.recordError(accountId, result.errorMessage || 'Task failed');
+    }
+
     const retryCount = (dbJob.retryCount || 0);
 
     if (result.status === 'failed' && retryCount < MAX_REMOTE_RETRIES) {
-      // Auto-retry: increment retryCount, re-queue for submit
+      // Auto-retry: read params from DB instead of job.data chain
       await prisma.runwayJob.update({
         where: { id: jobId },
         data: { status: 'pending', errorMessage: result.errorMessage, retryCount: retryCount + 1 },
       });
       const existing = await submitQueue.getJob(`submit-${jobId}`);
       if (existing) await existing.remove().catch(() => {});
-      await submitQueue.add('submit', { jobId, duration: (dbJob as any).duration || 5, resolution: job.data.resolution, quality: job.data.quality, cfgScale: job.data.cfgScale, sound: job.data.sound, videoUrl: job.data.videoUrl }, {
+      await submitQueue.add('submit', {
+        jobId,
+        duration: dbJob.duration || 5,
+        resolution: dbJob.resolution,
+        quality: dbJob.quality,
+        cfgScale: dbJob.cfgScale,
+        sound: dbJob.sound,
+        videoUrl: dbJob.videoUrl,
+        // NOTE: accountId is NOT passed — submit worker will acquire a new account
+      }, {
         jobId: `submit-${jobId}`, delay: 5000, attempts: MAX_SUBMIT_ATTEMPTS, backoff: { type: 'custom' },
       });
       console.log(`[poll-worker] auto-retry #${retryCount + 1}/${MAX_REMOTE_RETRIES} for job ${jobId.slice(0,8)}`);
@@ -105,12 +140,15 @@ new Worker('runway-poll', async (job: Job) => {
     }
     await promoteNextJob();
   } else {
+    // Still processing — re-queue poll with only essential fields
     const delay = result.status === 'queued' ? INTERVAL_QUEUED : INTERVAL_PROCESSING;
-    await pollQueue.add('poll', { jobId, remoteTaskId, duration: job.data.duration, resolution: job.data.resolution, quality: job.data.quality, cfgScale: job.data.cfgScale, sound: job.data.sound, videoUrl: job.data.videoUrl }, { jobId: `poll-${jobId}-${Date.now()}`, delay });
+    await pollQueue.add('poll', {
+      jobId, remoteTaskId, accountId,
+    }, { jobId: `poll-${jobId}-${Date.now()}`, delay });
   }
 }, { connection, concurrency: 1 });
 
-console.log('[poll-worker] listening on runway-poll (direct mode)');
+console.log('[poll-worker] listening on runway-poll (multi-account mode)');
 
 setInterval(async () => {
   try {
