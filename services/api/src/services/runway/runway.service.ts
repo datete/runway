@@ -22,6 +22,18 @@ interface CreateJobInput {
 
 const ACTIVE_STATUSES = ["pending", "queued", "submitted", "processing"];
 
+/** Add a single trigger to the submit queue (deduped) */
+async function triggerSubmit(delay = 0): Promise<void> {
+  try {
+    await submitQueue.add("submit-trigger", {}, {
+      jobId: `trig-${Date.now()}`,
+      delay,
+      removeOnComplete: 10,
+      removeOnFail: 10,
+    });
+  } catch {}
+}
+
 export class RunwayService {
   async createJob(input: CreateJobInput) {
     // Only check hard quota limits — concurrency is enforced by the worker
@@ -77,14 +89,8 @@ export class RunwayService {
       } as any,
     });
 
-    const existing = await submitQueue.getJob(`submit-${job.id}`);
-    if (existing) await existing.remove().catch(() => {});
-    await submitQueue.add(
-      "submit",
-      { jobId: job.id, duration: input.duration, resolution: input.resolution, quality: input.quality, cfgScale: input.cfgScale, sound: input.sound, videoUrl: input.videoUrl },
-      { jobId: `submit-${job.id}`, backoff: { type: "custom" } },
-    );
-    await prisma.runwayJob.update({ where: { id: job.id }, data: { status: "queued" } });
+    // Trigger the submit worker to pick up pending jobs (FIFO from DB)
+    await triggerSubmit();
 
     // Calculate queue position for immediate feedback
     const queueAhead = await prisma.runwayJob.count({
@@ -114,21 +120,8 @@ export class RunwayService {
       where: { id },
       data: { status: "pending", errorMessage: null, retryCount: { increment: 1 } },
     });
-    const existing = await submitQueue.getJob(`submit-${id}`);
-    if (existing) await existing.remove().catch(() => {});
-    await submitQueue.add(
-      "submit",
-      {
-        jobId: id,
-        duration: (job as any).duration || 5,
-        resolution: (job as any).resolution,
-        quality: (job as any).quality,
-        cfgScale: (job as any).cfgScale,
-        sound: (job as any).sound,
-        videoUrl: (job as any).videoUrl,
-      },
-      { jobId: `submit-${id}`, backoff: { type: "custom" } },
-    );
+    // Trigger the submit worker
+    await triggerSubmit();
     return prisma.runwayJob.findUnique({ where: { id } });
   }
 

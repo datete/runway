@@ -13,7 +13,6 @@ export interface AccountEntry {
   tokenExpiresAt: Date | null;
 }
 
-const COOLDOWN_SECONDS = 60;
 const CACHE_TTL = 30; // seconds to cache account list
 const CONCURRENCY_TTL = 900; // seconds for concurrency key safety TTL (15 min)
 
@@ -69,7 +68,8 @@ export class AccountPool {
 
   /**
    * Acquire an account with available concurrency.
-   * Returns the account entry or null if all accounts are full/cooled/expired.
+   * No cooldown — just check concurrency slots.
+   * Returns the account entry or null if all accounts are at max concurrency.
    */
   async acquire(): Promise<AccountEntry | null> {
     const accounts = await this.getAccounts();
@@ -81,10 +81,6 @@ export class AccountPool {
         console.warn(`[account-pool] ${account.label} token expired, skipping`);
         continue;
       }
-
-      // Check cooldown
-      const cooled = await this.redis.get(`account:cooldown:${account.id}`);
-      if (cooled) continue;
 
       // Atomic concurrency check: INCR and check
       const key = `account:concurrency:${account.id}`;
@@ -132,12 +128,6 @@ export class AccountPool {
     console.log(`[account-pool] released ${accountId.slice(0, 8)}, now ${Math.max(0, val)}`);
   }
 
-  /** Set cooldown after a 429 rate limit */
-  async setCooldown(accountId: string): Promise<void> {
-    await this.redis.set(`account:cooldown:${accountId}`, '1', 'EX', COOLDOWN_SECONDS);
-    console.log(`[account-pool] account ${accountId.slice(0, 8)} cooled for ${COOLDOWN_SECONDS}s`);
-  }
-
   /** Record an error on an account */
   async recordError(accountId: string, message: string): Promise<void> {
     await this.prisma.runwayAccount.update({
@@ -172,19 +162,28 @@ export class AccountPool {
     return stats;
   }
 
-  /** Reconcile Redis counters with actual Runway API concurrency */
-  async reconcile(getActiveFn: (token: string, teamId: string, proxyUrl?: string) => Promise<number>): Promise<void> {
+  /**
+   * Reconcile Redis counters with our DB's active job count (not Runway API).
+   * Only count jobs WE submitted — external tasks on the same account are ignored.
+   */
+  async reconcile(): Promise<void> {
     const accounts = await this.getAccounts();
     for (const account of accounts) {
       try {
-        const actual = await getActiveFn(account.token, account.teamId, account.proxyUrl || undefined);
+        // Count our own active jobs for this account
+        const dbActive = await this.prisma.runwayJob.count({
+          where: {
+            accountId: account.id,
+            status: { in: ['submitted', 'processing'] },
+          },
+        });
         const redisKey = `account:concurrency:${account.id}`;
         const redisVal = parseInt(await this.redis.get(redisKey) || '0', 10);
 
-        if (redisVal !== actual) {
-          console.log(`[account-pool:reconcile] ${account.label}: redis=${redisVal} actual=${actual}, correcting`);
-          if (actual > 0) {
-            await this.redis.set(redisKey, String(actual), 'EX', CONCURRENCY_TTL);
+        if (redisVal !== dbActive) {
+          console.log(`[account-pool:reconcile] ${account.label}: redis=${redisVal} db=${dbActive}, correcting`);
+          if (dbActive > 0) {
+            await this.redis.set(redisKey, String(dbActive), 'EX', CONCURRENCY_TTL);
           } else {
             await this.redis.del(redisKey);
           }

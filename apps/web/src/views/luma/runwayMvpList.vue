@@ -1,6 +1,6 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { NButton, NCheckbox, NEmpty, NModal, NPagination, NSpin, NTag, useMessage } from 'naive-ui'
+import { NButton, NCheckbox, NEmpty, NModal, NPagination, NProgress, NSpin, NTag, useMessage } from 'naive-ui'
 import { homeStore } from '@/store'
 import { useRunwayJwt } from '@/composables/useRunwayJwt'
 import RunwayAdminPanel from './RunwayAdminPanel.vue'
@@ -26,9 +26,10 @@ interface RunwayJob {
   finishedAt: string | null
   queuePosition: number | null
   queueTotal: number | null
+  progress: number | null
 }
 
-type TabKey = 'all' | 'active' | 'completed' | 'failed'
+type TabKey = 'all' | 'queued' | 'processing' | 'completed' | 'failed'
 
 const message = useMessage()
 const { headers: authHeaders, token: jwtToken, role: jwtRole, username: jwtUsername, removeToken } = useRunwayJwt()
@@ -47,8 +48,9 @@ const deleting = ref(false)
 let pollTimer: ReturnType<typeof setInterval> | null = null
 
 const tabs: Array<{ key: TabKey; label: string }> = [
-  { key: 'all', label: '全部任务' },
-  { key: 'active', label: '进行中' },
+  { key: 'all', label: '全部' },
+  { key: 'queued', label: '排队中' },
+  { key: 'processing', label: '处理中' },
   { key: 'completed', label: '已完成' },
   { key: 'failed', label: '失败' },
 ]
@@ -80,17 +82,21 @@ const modeLabel: Record<string, string> = {
   img2video: '图生视频',
 }
 
-const isActive = (status: string) => ['pending', 'queued', 'submitted', 'processing'].includes(status)
+const isQueued = (status: string) => ['pending', 'queued'].includes(status)
+const isProcessing = (status: string) => ['submitted', 'processing'].includes(status)
+const isActive = (status: string) => isQueued(status) || isProcessing(status)
 
 const tabCount = computed(() => ({
   all: allJobs.value.length,
-  active: allJobs.value.filter((item) => isActive(item.status)).length,
+  queued: allJobs.value.filter((item) => isQueued(item.status)).length,
+  processing: allJobs.value.filter((item) => isProcessing(item.status)).length,
   completed: allJobs.value.filter((item) => item.status === 'completed').length,
   failed: allJobs.value.filter((item) => item.status === 'failed').length,
 }))
 
 const filteredJobs = computed(() => {
-  if (activeTab.value === 'active') return allJobs.value.filter((item) => isActive(item.status))
+  if (activeTab.value === 'queued') return allJobs.value.filter((item) => isQueued(item.status))
+  if (activeTab.value === 'processing') return allJobs.value.filter((item) => isProcessing(item.status))
   if (activeTab.value === 'completed') return allJobs.value.filter((item) => item.status === 'completed')
   if (activeTab.value === 'failed') return allJobs.value.filter((item) => item.status === 'failed')
   return allJobs.value
@@ -235,6 +241,20 @@ const retryJob = async (id: string) => {
   }
 }
 
+const cancelJob = async (id: string) => {
+  try {
+    const res = await fetch(`/api/runway/jobs/${id}/cancel`, {
+      method: 'POST',
+      headers: authHeaders(),
+    })
+    if (!res.ok) throw new Error('取消失败')
+    message.success('任务已取消')
+    fetchJobs()
+  } catch (error: any) {
+    message.error(error.message || '取消失败')
+  }
+}
+
 const downloadVideo = async (job: RunwayJob) => {
   if (!job.resultUrl) return
   try {
@@ -265,6 +285,9 @@ watch(
     if (act === 'RunwayMvpRefresh') {
       fetchJobs()
       page.value = 1
+    }
+    if (act === 'ShowAdmin') {
+      showAdminPanel.value = true
     }
   },
 )
@@ -376,10 +399,14 @@ onUnmounted(() => stopPolling())
               :src="getFirstImage(job) as string"
               class="h-full w-full object-cover opacity-70"
             />
-            <div class="absolute inset-x-0 bottom-0 flex items-center gap-2 bg-gradient-to-t from-black/80 to-transparent px-3 py-3">
-              <NSpin size="small" />
-              <span class="text-sm text-white">{{ statusLabel[job.status] || job.status }}</span>
-              <span v-if="queuePosition(job) !== null" class="text-xs text-cyan-200">队列第 {{ queuePosition(job) }}/{{ job.queueTotal || '?' }} 位</span>
+            <div class="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 to-transparent px-3 py-2">
+              <div class="flex items-center gap-2">
+                <NSpin size="small" />
+                <span class="text-sm text-white">{{ statusLabel[job.status] || job.status }}</span>
+                <span v-if="isQueued(job.status) && queuePosition(job) !== null" class="text-xs text-cyan-200">第 {{ queuePosition(job) }}/{{ job.queueTotal || '?' }} 位</span>
+                <span v-if="isProcessing(job.status)" class="text-xs text-cyan-200">{{ job.progress != null && job.progress > 0 ? Math.round(job.progress * 100) + '%' : '处理中...' }}</span>
+              </div>
+              <NProgress v-if="isProcessing(job.status)" type="line" :percentage="Math.round((job.progress || 0) * 100)" :show-indicator="false" :height="3" status="success" class="mt-1" />
             </div>
           </div>
 
@@ -417,13 +444,22 @@ onUnmounted(() => stopPolling())
               <NButton v-if="job.resultUrl" size="small" @click="downloadVideo(job)">下载视频</NButton>
               <NButton v-if="job.status === 'failed'" size="small" type="primary" @click="retryJob(job.id)">重新提交</NButton>
               <NButton
-                v-if="!selectMode"
+                v-if="!selectMode && isActive(job.status)"
                 size="small"
-                :type="isActive(job.status) ? 'warning' : 'error'"
+                type="warning"
+                secondary
+                @click="cancelJob(job.id)"
+              >
+                取消任务
+              </NButton>
+              <NButton
+                v-if="!selectMode && !isActive(job.status)"
+                size="small"
+                type="error"
                 secondary
                 @click="deleteSingle(job.id)"
               >
-                {{ isActive(job.status) ? '取消任务' : '删除任务' }}
+                删除任务
               </NButton>
             </div>
           </div>

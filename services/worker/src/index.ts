@@ -4,13 +4,12 @@ import { prisma, redis, accountPool } from "./services/shared";
 import "./workers/submit.worker";
 import "./workers/poll.worker";
 import { Queue } from "bullmq";
-import { RunwayDirectClient } from "./services/runway.direct";
+import { triggerSubmit } from "./workers/submit.worker";
 import fs from "fs";
 import path from "path";
 
-console.log("[runway-worker] started (multi-account mode)");
+console.log("[runway-worker] started (single-trigger FIFO mode)");
 
-const submitQueue = new Queue("runway-submit", { connection: redis });
 const pollQueue = new Queue("runway-poll", { connection: redis });
 
 async function recoverStuckJobs() {
@@ -49,49 +48,27 @@ async function recoverStuckJobs() {
         continue;
       }
 
-      // pending/queued/submitted -> submit queue
-      const existing = await submitQueue.getJob(`submit-${job.id}`);
-      if (existing) {
-        const state = await existing.getState();
-        if (["waiting", "delayed", "active"].includes(state)) {
-          console.log(`[startup-recovery] ${job.id.slice(0,8)} already in submit queue (${state}), skip`);
-          continue;
-        }
-        await existing.remove();
-        console.log(`[startup-recovery] ${job.id.slice(0,8)} removed stale ${state} job`);
-      }
+      // pending/queued/submitted -> reset to pending
       await prisma.runwayJob.update({
         where: { id: job.id },
         data: { status: "pending", errorMessage: null },
       });
-      await submitQueue.add("submit", {
-        jobId: job.id,
-        duration: j.duration || 5,
-        resolution: j.resolution,
-        quality: j.quality,
-        cfgScale: j.cfgScale,
-        sound: j.sound,
-        videoUrl: j.videoUrl,
-      }, {
-        jobId: `submit-${job.id}`, delay: 2000, backoff: { type: "custom" },
-      });
-      console.log(`[startup-recovery] ${job.id.slice(0,8)} -> submit queue`);
+      console.log(`[startup-recovery] ${job.id.slice(0,8)} -> pending`);
     }
+
+    // Single trigger to process all pending jobs in FIFO order
+    await triggerSubmit(2000);
+    console.log("[startup-recovery] triggered submit worker");
   } catch (e) {
     console.error("[startup-recovery] error:", e);
   }
 }
 
-// Reconciliation: sync Redis counters with actual Runway API state every 60s
+// Reconciliation: sync Redis counters with our DB active job count every 60s
 function startReconciliation() {
-  const getActive = async (token: string, teamId: string, proxyUrl?: string): Promise<number> => {
-    const client = new RunwayDirectClient(token, Number(teamId), proxyUrl);
-    return client.getActiveConcurrency();
-  };
-
   setInterval(async () => {
     try {
-      await accountPool.reconcile(getActive);
+      await accountPool.reconcile();
     } catch (e: any) {
       console.warn("[reconcile] error:", e.message);
     }
@@ -100,7 +77,7 @@ function startReconciliation() {
   // Initial reconciliation after 10s
   setTimeout(async () => {
     try {
-      await accountPool.reconcile(getActive);
+      await accountPool.reconcile();
       console.log("[reconcile] initial reconciliation done");
     } catch (e: any) {
       console.warn("[reconcile] initial error:", e.message);
@@ -140,6 +117,39 @@ function startCacheCleanup() {
   setInterval(cleanup, 3600000);
 }
 
+// Upload cleanup
+const UPLOADS_DIR = "/root/runway/uploads";
+const UPLOAD_MAX_AGE_DAYS = Number(process.env.UPLOAD_CACHE_DAYS) || 7;
+
+function startUploadCleanup() {
+  const cleanup = () => {
+    try {
+      if (!fs.existsSync(UPLOADS_DIR)) return;
+      const files = fs.readdirSync(UPLOADS_DIR).filter(f => f.startsWith("upload_"));
+      const cutoff = Date.now() - UPLOAD_MAX_AGE_DAYS * 86400000;
+      let deleted = 0;
+      for (const file of files) {
+        try {
+          const filePath = path.join(UPLOADS_DIR, file);
+          const stat = fs.statSync(filePath);
+          if (stat.mtimeMs < cutoff) {
+            fs.unlinkSync(filePath);
+            deleted++;
+          }
+        } catch {}
+      }
+      if (deleted > 0) {
+        console.log(`[upload-cleanup] deleted ${deleted} file(s) older than ${UPLOAD_MAX_AGE_DAYS}d`);
+      }
+    } catch (e: any) {
+      console.error("[upload-cleanup] error:", e.message);
+    }
+  };
+  setTimeout(cleanup, 30000);
+  setInterval(cleanup, 3600000);
+}
+
 setTimeout(recoverStuckJobs, 3000);
 setTimeout(startReconciliation, 5000);
 setTimeout(startCacheCleanup, 8000);
+setTimeout(startUploadCleanup, 10000);

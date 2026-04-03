@@ -217,9 +217,10 @@ export class RunwayDirectClient implements RunwayProvider {
     const status = statusMap[t.status] || "processing";
     const resultUrl = t.artifacts?.[0]?.url;
     const thumbnailUrl = t.artifacts?.[0]?.previewUrls?.[0] || t.artifacts?.[0]?.metadata?.thumbnailUrl || undefined;
-    console.log(`[runway:poll] taskId=${remoteTaskId} status=${t.status}->${status}${resultUrl ? " resultUrl="+resultUrl.split("?")[0] : ""}`);
+    const progress = typeof t.progress === "number" ? t.progress : (t.progressRatio !== undefined && t.progressRatio !== null ? parseFloat(t.progressRatio) : undefined);
+    console.log(`[runway:poll] taskId=${remoteTaskId} status=${t.status}->${status} progress=${progress ?? "?"}${resultUrl ? " resultUrl="+resultUrl.split("?")[0] : ""}`);
 
-    return { remoteTaskId, status, resultUrl, thumbnailUrl, errorMessage: t.error || undefined };
+    return { remoteTaskId, status, resultUrl, thumbnailUrl, errorMessage: t.error || undefined, progress };
   }
 
   /** Download a video artifact to a Buffer */

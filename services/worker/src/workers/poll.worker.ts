@@ -4,14 +4,12 @@ import path from 'path';
 import fetch from 'node-fetch';
 import { RunwayDirectClient } from '../services/runway.direct';
 import { prisma, redis as connection, accountPool } from '../services/shared';
+import { triggerSubmit } from './submit.worker';
 
 const pollQueue = new Queue('runway-poll', { connection });
-const submitQueue = new Queue('runway-submit', { connection });
 
 // Max auto-retries when remote task fails (prevents infinite loop)
 const MAX_REMOTE_RETRIES = 3;
-// Max BullMQ attempts for submit queue jobs created by auto-retry
-const MAX_SUBMIT_ATTEMPTS = 60;
 
 /** Create a RunwayDirectClient for a specific account */
 async function getClientForJob(accountId?: string): Promise<RunwayDirectClient> {
@@ -21,18 +19,7 @@ async function getClientForJob(accountId?: string): Promise<RunwayDirectClient> 
       return new RunwayDirectClient(account.token, Number(account.teamId), account.proxyUrl || undefined);
     }
   }
-  // Fallback to env vars for legacy jobs
   return new RunwayDirectClient();
-}
-
-async function promoteNextJob() {
-  try {
-    const delayed = await submitQueue.getDelayed();
-    if (delayed.length > 0) {
-      await delayed[0].promote();
-      console.log(`[poll-worker] promoted next job (${delayed.length} were delayed)`);
-    }
-  } catch {}
 }
 
 const VIDEOS_DIR = '/root/runway/uploads/videos';
@@ -57,13 +44,12 @@ async function cacheVideo(remoteUrl: string, jobId: string): Promise<string> {
 
 const INTERVAL_QUEUED     = Number(process.env.POLL_INTERVAL_QUEUED_MS) || 20000;
 const INTERVAL_PROCESSING = Number(process.env.POLL_INTERVAL_PROCESSING_MS) || 10000;
-const INTERVAL_ERROR      = 30000; // retry delay on network error
+const INTERVAL_ERROR      = 30000;
 
 new Worker('runway-poll', async (job: Job) => {
   const { jobId, remoteTaskId, accountId } = job.data;
   const dbJob = await prisma.runwayJob.findUnique({ where: { id: jobId } }) as any;
   if (!dbJob || ['completed', 'failed', 'cancelled'].includes(dbJob.status)) {
-    // Job already done — release account concurrency if still held
     if (accountId) await accountPool.release(accountId, jobId);
     return;
   }
@@ -78,18 +64,16 @@ new Worker('runway-poll', async (job: Job) => {
       await accountPool.release(accountId, jobId);
       await accountPool.incrementGenerated(accountId);
     }
-    await promoteNextJob();
+    await triggerSubmit();
     return;
   }
 
-  // Wrap getTask in try/catch to handle network errors gracefully
   let result: any;
   try {
     const client = await getClientForJob(accountId);
     result = await client.getTask(remoteTaskId);
   } catch (err: any) {
-    console.warn(`[poll-worker] getTask error for job ${jobId.slice(0,8)}: ${err.message}, will retry in ${INTERVAL_ERROR/1000}s`);
-    // Re-queue the poll job with a delay instead of crashing
+    console.warn(`[poll-worker] getTask error for job ${jobId.slice(0,8)}: ${err.message}, retry in ${INTERVAL_ERROR/1000}s`);
     await pollQueue.add('poll', {
       jobId, remoteTaskId, accountId,
     }, { jobId: `poll-${jobId}-${Date.now()}`, delay: INTERVAL_ERROR });
@@ -100,16 +84,16 @@ new Worker('runway-poll', async (job: Job) => {
     const localUrl = result.resultUrl ? await cacheVideo(result.resultUrl, jobId) : null;
     await prisma.runwayJob.update({
       where: { id: jobId },
-      data: { status: 'completed', resultUrl: localUrl || result.resultUrl, thumbnailUrl: result.thumbnailUrl, finishedAt: new Date() },
+      data: { status: 'completed', resultUrl: localUrl || result.resultUrl, thumbnailUrl: result.thumbnailUrl, finishedAt: new Date(), progress: 1 } as any,
     });
-    // Release account concurrency and increment counter
     if (accountId) {
       await accountPool.release(accountId, jobId);
       await accountPool.incrementGenerated(accountId);
     }
-    await promoteNextJob();
+    console.log(`[poll-worker] job ${jobId.slice(0,8)} completed`);
+    // Slot freed — trigger next submission immediately
+    await triggerSubmit();
   } else if (result.status === 'failed' || result.status === 'cancelled') {
-    // Release account concurrency on failure
     if (accountId) {
       await accountPool.release(accountId, jobId);
       await accountPool.recordError(accountId, result.errorMessage || 'Task failed');
@@ -118,27 +102,12 @@ new Worker('runway-poll', async (job: Job) => {
     const retryCount = (dbJob.retryCount || 0);
 
     if (result.status === 'failed' && retryCount < MAX_REMOTE_RETRIES) {
-      // Auto-retry: read params from DB instead of job.data chain
       await prisma.runwayJob.update({
         where: { id: jobId },
         data: { status: 'pending', errorMessage: result.errorMessage, retryCount: retryCount + 1 },
       });
-      const existing = await submitQueue.getJob(`submit-${jobId}`);
-      if (existing) await existing.remove().catch(() => {});
-      await submitQueue.add('submit', {
-        jobId,
-        duration: dbJob.duration || 5,
-        resolution: dbJob.resolution,
-        quality: dbJob.quality,
-        cfgScale: dbJob.cfgScale,
-        sound: dbJob.sound,
-        videoUrl: dbJob.videoUrl,
-      }, {
-        jobId: `submit-${jobId}`, delay: 5000, attempts: MAX_SUBMIT_ATTEMPTS, backoff: { type: 'custom' },
-      });
       console.log(`[poll-worker] auto-retry #${retryCount + 1}/${MAX_REMOTE_RETRIES} for job ${jobId.slice(0,8)}`);
     } else {
-      // Max retries reached or cancelled — mark as final state
       const finalStatus = result.status === 'failed' ? 'failed' : 'cancelled';
       const errMsg = retryCount >= MAX_REMOTE_RETRIES
         ? `${result.errorMessage || '远程任务失败'}（已重试 ${retryCount} 次，不再重试）`
@@ -149,9 +118,16 @@ new Worker('runway-poll', async (job: Job) => {
       });
       console.log(`[poll-worker] job ${jobId.slice(0,8)} final ${finalStatus} after ${retryCount} retries`);
     }
-    await promoteNextJob();
+    // Slot freed — trigger next submission
+    await triggerSubmit();
   } else {
-    // Still processing — re-queue poll with only essential fields
+    // Still processing — update progress and re-queue poll
+    if (result.progress !== undefined) {
+      await prisma.runwayJob.update({
+        where: { id: jobId },
+        data: { progress: result.progress } as any,
+      }).catch(() => {});
+    }
     const delay = result.status === 'queued' ? INTERVAL_QUEUED : INTERVAL_PROCESSING;
     await pollQueue.add('poll', {
       jobId, remoteTaskId, accountId,
@@ -159,17 +135,4 @@ new Worker('runway-poll', async (job: Job) => {
   }
 }, { connection, concurrency: 1 });
 
-console.log('[poll-worker] listening on runway-poll (multi-account mode)');
-
-setInterval(async () => {
-  try {
-    const delayed = await submitQueue.getDelayed();
-    if (delayed.length === 0) return;
-    const active = await submitQueue.getActive();
-    const waiting = await submitQueue.getWaiting();
-    if (active.length === 0 && waiting.length === 0) {
-      await delayed[0].promote();
-      console.log('[poll-worker] heartbeat: promoted stuck delayed job');
-    }
-  } catch {}
-}, 30000);
+console.log('[poll-worker] listening on runway-poll (single-trigger mode)');

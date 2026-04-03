@@ -33,7 +33,7 @@ const remark = ref('')
 const images = ref<UploadedImage[]>([])
 const exploreMode = ref(true)
 const duration = ref(5)
-const resolution = ref('')
+const resolution = ref('1080x1920')
 const quality = ref('std')
 const sound = ref(true)
 const cfgScale = ref(0.5)
@@ -42,9 +42,8 @@ const cfgScale = ref(0.5)
 const refVideo = ref<{ preview: string; url: string; uploading: boolean } | null>(null)
 
 const resolutionOptions = [
-  { value: '', label: '自动' },
   { value: '720x1280', label: '720x1280 竖屏' },
-  { value: '960x960', label: '960x960 方形' },
+  { value: '1080x1920', label: '1080x1920 竖屏高清' },
 ]
 
 const durationHints: Record<number, string> = {
@@ -54,9 +53,8 @@ const durationHints: Record<number, string> = {
 }
 
 const resolutionHints: Record<string, string> = {
-  '': '自动模式 — 根据参考图片尺寸自动推断输出分辨率，推荐使用',
-  '720x1280': '竖屏模式 — 适合抖音/快手/小红书等短视频平台，9:16 比例',
-  '960x960': '方形画面 — 适合微信朋友圈、电商主图、Instagram 等场景，1:1 比例',
+  '720x1280': '竖屏标清 — 9:16 比例，生成速度更快',
+  '1080x1920': '竖屏高清 — 9:16 比例，画面更清晰，推荐使用',
 }
 
 const qualityHints: Record<string, string> = {
@@ -81,11 +79,14 @@ const isUploading = computed(() => images.value.some((item) => item.uploading))
 const uploadedUrls = computed(() => images.value.filter((item) => item.url).map((item) => item.url))
 const remainingSlots = computed(() => Math.max(0, MAX_IMAGES - images.value.length))
 
+const isVideoUploading = computed(() => refVideo.value?.uploading === true)
+
 const canSubmit = computed(() => {
   if (!jwtToken.value) return false
   if (!prompt.value.trim()) return false
   if (uploadedUrls.value.length === 0) return false
-  if (loading.value || isUploading.value) return false
+  if (quality.value === 'pro' && (!refVideo.value || !refVideo.value.url)) return false
+  if (loading.value || isUploading.value || isVideoUploading.value) return false
   return true
 })
 
@@ -267,10 +268,10 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="space-y-4 p-3">
+  <div class="space-y-2 p-2">
     <!-- 用户信息 -->
-    <div class="rounded-2xl border border-slate-200 bg-white/95 p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900/95">
-      <div class="mb-3 flex items-center justify-between gap-3">
+    <div class="rounded-xl border border-slate-200 bg-white/95 px-3 py-2 shadow-sm dark:border-slate-800 dark:bg-slate-900/95">
+      <div class="mb-1 flex items-center justify-between gap-3">
         <div class="min-w-0">
           <p class="truncate text-sm font-semibold text-slate-800 dark:text-slate-100">{{ jwtToken ? jwtUsername : '未登录' }}</p>
           <p class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">{{ jwtRole === 'admin' ? '管理员账号' : '普通账号' }}</p>
@@ -286,8 +287,8 @@ onUnmounted(() => {
     </div>
 
     <!-- 提示词 -->
-    <div class="rounded-2xl border border-slate-200 bg-white/95 p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900/95">
-      <label class="mb-2 block text-xs font-medium text-slate-600 dark:text-slate-300">提示词 *</label>
+    <div class="rounded-xl border border-slate-200 bg-white/95 px-3 py-2 shadow-sm dark:border-slate-800 dark:bg-slate-900/95">
+      <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">提示词 *</label>
       <NInput
         v-model:value="prompt"
         type="textarea"
@@ -298,10 +299,10 @@ onUnmounted(() => {
     </div>
 
     <!-- 参考图片 -->
-    <div class="rounded-2xl border border-slate-200 bg-white/95 p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900/95">
-      <label class="mb-2 block text-xs font-medium text-slate-600 dark:text-slate-300">参考图片 *（最多 {{ MAX_IMAGES }} 张）</label>
+    <div class="rounded-xl border border-slate-200 bg-white/95 px-3 py-2 shadow-sm dark:border-slate-800 dark:bg-slate-900/95">
+      <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">参考图片 *（最多 {{ MAX_IMAGES }} 张）</label>
       <div class="flex flex-wrap gap-2">
-        <div v-for="(img, idx) in images" :key="img.id" class="group relative h-20 w-20 overflow-hidden rounded-lg border border-slate-200 dark:border-slate-700">
+        <div v-for="(img, idx) in images" :key="img.id" class="group relative h-16 w-16 overflow-hidden rounded-lg border border-slate-200 dark:border-slate-700">
           <img v-if="img.preview" :src="img.preview" class="h-full w-full object-cover" />
           <div v-if="img.uploading" class="absolute inset-0 flex items-center justify-center bg-black/40">
             <NSpin size="small" />
@@ -316,7 +317,7 @@ onUnmounted(() => {
         </div>
         <label
           v-if="remainingSlots > 0"
-          class="flex h-20 w-20 cursor-pointer items-center justify-center rounded-lg border-2 border-dashed border-slate-300 text-slate-400 transition hover:border-blue-400 hover:text-blue-400 dark:border-slate-600"
+          class="flex h-16 w-16 cursor-pointer items-center justify-center rounded-lg border-2 border-dashed border-slate-300 text-slate-400 transition hover:border-blue-400 hover:text-blue-400 dark:border-slate-600"
         >
           <SvgIcon icon="ri:add-line" class="text-2xl" />
           <input type="file" accept="image/*" multiple class="hidden" @change="handleFileSelect" />
@@ -325,9 +326,9 @@ onUnmounted(() => {
     </div>
 
     <!-- 生成设置 -->
-    <div class="rounded-2xl border border-slate-200 bg-white/95 p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900/95">
-      <label class="mb-3 block text-xs font-medium text-slate-600 dark:text-slate-300">生成设置</label>
-      <div class="space-y-4">
+    <div class="rounded-xl border border-slate-200 bg-white/95 px-3 py-2 shadow-sm dark:border-slate-800 dark:bg-slate-900/95">
+      <label class="mb-2 block text-xs font-medium text-slate-600 dark:text-slate-300">生成设置</label>
+      <div class="space-y-3">
 
         <!-- 分辨率 -->
         <div>
@@ -386,10 +387,10 @@ onUnmounted(() => {
         <Transition name="hint-fade">
           <div v-if="quality === 'pro'">
             <div class="mb-1 flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
-              <span>参考视频（可选）</span>
+              <span>参考视频 *</span>
             </div>
             <div class="flex items-center gap-2">
-              <div v-if="refVideo" class="group relative h-20 w-32 overflow-hidden rounded-lg border border-slate-200 dark:border-slate-700">
+              <div v-if="refVideo" class="group relative h-16 w-28 overflow-hidden rounded-lg border border-slate-200 dark:border-slate-700">
                 <video v-if="refVideo.preview" :src="refVideo.preview" class="h-full w-full object-cover" muted />
                 <div v-if="refVideo.uploading" class="absolute inset-0 flex items-center justify-center bg-black/40">
                   <NSpin size="small" />
@@ -404,14 +405,14 @@ onUnmounted(() => {
               </div>
               <label
                 v-if="!refVideo"
-                class="flex h-20 w-32 cursor-pointer flex-col items-center justify-center gap-1 rounded-lg border-2 border-dashed border-slate-300 text-slate-400 transition hover:border-blue-400 hover:text-blue-400 dark:border-slate-600"
+                class="flex h-16 w-28 cursor-pointer flex-col items-center justify-center gap-1 rounded-lg border-2 border-dashed border-slate-300 text-slate-400 transition hover:border-blue-400 hover:text-blue-400 dark:border-slate-600"
               >
                 <SvgIcon icon="ri:video-add-line" class="text-xl" />
                 <span class="text-[10px]">上传视频</span>
                 <input type="file" accept="video/*" class="hidden" @change="handleVideoSelect" />
               </label>
             </div>
-            <p class="mt-1 text-[11px] text-slate-400 dark:text-slate-500">专业模式支持参考视频+图片混合输入，AI 会参考视频中的运动轨迹和节奏来生成新视频</p>
+            <p class="mt-1 text-[11px] text-amber-500 dark:text-amber-400">专业模式必须上传参考视频，AI 会参考视频运动轨迹生成新视频</p>
           </div>
         </Transition>
 
@@ -454,7 +455,7 @@ onUnmounted(() => {
         <div class="flex items-center justify-between">
           <div>
             <span class="text-xs text-slate-600 dark:text-slate-300">生成声音</span>
-            <p class="text-[11px] text-slate-400 dark:text-slate-500">开启后视频将包含 AI 生成的环境音效和背景音</p>
+
           </div>
           <NSwitch v-model:value="sound" size="small" />
         </div>
@@ -463,7 +464,7 @@ onUnmounted(() => {
         <div class="flex items-center justify-between">
           <div>
             <span class="text-xs text-slate-600 dark:text-slate-300">探索模式</span>
-            <p class="text-[11px] text-slate-400 dark:text-slate-500">开启后 AI 会尝试更多创意方向，生成效果更多样但可能不够稳定</p>
+
           </div>
           <NSwitch v-model:value="exploreMode" size="small" />
         </div>
@@ -471,8 +472,8 @@ onUnmounted(() => {
     </div>
 
     <!-- 备注 -->
-    <div class="rounded-2xl border border-slate-200 bg-white/95 p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900/95">
-      <label class="mb-2 block text-xs font-medium text-slate-600 dark:text-slate-300">备注（可选）</label>
+    <div class="rounded-xl border border-slate-200 bg-white/95 px-3 py-2 shadow-sm dark:border-slate-800 dark:bg-slate-900/95">
+      <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">备注（可选）</label>
       <NInput v-model:value="remark" placeholder="给这个任务加个备注..." class="rounded-lg" />
     </div>
 
@@ -482,11 +483,12 @@ onUnmounted(() => {
       block
       :loading="loading"
       :disabled="!canSubmit"
-      class="rounded-2xl"
+      class="rounded-xl"
       @click="submit"
     >
       {{ loading ? '提交中...' : '生成视频' }}
     </NButton>
+    <p v-if="quality === 'pro' && (!refVideo || !refVideo.url) && uploadedUrls.length > 0 && prompt.trim()" class="text-center text-[11px] text-amber-500">请上传参考视频后再提交（专业模式必需）</p>
   </div>
 </template>
 

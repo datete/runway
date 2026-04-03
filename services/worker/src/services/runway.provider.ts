@@ -19,6 +19,7 @@ export interface RunwayTaskStatus {
   resultUrl?: string;
   thumbnailUrl?: string;
   errorMessage?: string;
+  progress?: number;
 }
 
 export interface RunwayProvider {

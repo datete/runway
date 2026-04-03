@@ -18,14 +18,23 @@ runwayRouter.post("/jobs/:id/retry", authMiddleware, (req, res) => ctrl.retryJob
 runwayRouter.delete("/jobs/:id", authMiddleware, (req, res) => ctrl.deleteJob(req, res));
 
 // Upload — require auth
+const ALLOWED_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp", "gif", "mp4", "mov", "avi"]);
+const MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10MB
+const MAX_VIDEO_SIZE = 50 * 1024 * 1024; // 50MB
+const VIDEO_EXTENSIONS = new Set(["mp4", "mov", "avi"]);
+
 runwayRouter.post("/upload", authMiddleware, (req, res) => {
   try {
     const { data, filename } = req.body;
     if (!data || typeof data !== "string") return res.status(400).json({ error: "Missing data field" });
     const ext = (filename || "upload.png").split(".").pop()?.toLowerCase() || "png";
+    if (!ALLOWED_EXTENSIONS.has(ext)) return res.status(400).json({ error: `不支持的文件格式: .${ext}` });
+    const buf = Buffer.from(data.replace(/^data:[^;]+;base64,/, ""), "base64");
+    const maxSize = VIDEO_EXTENSIONS.has(ext) ? MAX_VIDEO_SIZE : MAX_IMAGE_SIZE;
+    if (buf.length > maxSize) return res.status(400).json({ error: `文件过大（${Math.round(buf.length/1024/1024)}MB），上限 ${Math.round(maxSize/1024/1024)}MB` });
+    if (buf.length < 1024 && !VIDEO_EXTENSIONS.has(ext)) return res.status(400).json({ error: "图片文件过小，请上传有效图片" });
     const safeName = `upload_${Date.now()}.${ext}`;
     const dest = path.join("/root/runway/uploads", safeName);
-    const buf = Buffer.from(data.replace(/^data:[^;]+;base64,/, ""), "base64");
     fs.writeFileSync(dest, buf);
     res.json({ url: `/img/${safeName}` });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
