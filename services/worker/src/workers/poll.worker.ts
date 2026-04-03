@@ -10,6 +10,7 @@ const pollQueue = new Queue('runway-poll', { connection });
 
 // Max auto-retries when remote task fails (prevents infinite loop)
 const MAX_REMOTE_RETRIES = 3;
+const MAX_QUEUED_MINUTES = Number(process.env.MAX_QUEUED_MINUTES) || 30; // max time in queued/THROTTLED before auto-fail
 
 /** Create a RunwayDirectClient for a specific account */
 async function getClientForJob(accountId?: string): Promise<RunwayDirectClient> {
@@ -133,13 +134,32 @@ new Worker('runway-poll', async (job: Job) => {
     // Slot freed — trigger next submission
     await triggerSubmit();
   } else {
-    // Still processing — update progress and re-queue poll
-    if (result.progress !== undefined) {
+    // Still processing — update progress only if changed (avoid refreshing updatedAt)
+    if (result.progress !== undefined && result.progress !== (dbJob.progress || 0)) {
       await prisma.runwayJob.update({
         where: { id: jobId },
         data: { progress: result.progress } as any,
       }).catch(() => {});
     }
+
+    // Timeout check: if job stuck in queued (THROTTLED) too long, auto-fail
+    if (result.status === 'queued' && dbJob.createdAt) {
+      const stuckMinutes = (Date.now() - new Date(dbJob.createdAt).getTime()) / 60000;
+      if (stuckMinutes > MAX_QUEUED_MINUTES) {
+        console.warn(`[poll-worker] job ${jobId.slice(0,8)} stuck in queued/THROTTLED for ${Math.round(stuckMinutes)}min, auto-failing`);
+        await prisma.runwayJob.update({
+          where: { id: jobId },
+          data: { status: 'failed', errorMessage: `排队超时(${Math.round(stuckMinutes)}分钟)，请重试`, finishedAt: new Date() },
+        });
+        if (accountId) {
+          await accountPool.release(accountId, jobId);
+          await accountPool.recordError(accountId, 'Task stuck in THROTTLED/queued too long');
+        }
+        await triggerSubmit();
+        return;
+      }
+    }
+
     // Re-check DB status before re-queuing (user may have cancelled during API call)
     const freshJob = await prisma.runwayJob.findUnique({ where: { id: jobId }, select: { status: true } });
     if (!freshJob || ['completed', 'failed', 'cancelled'].includes(freshJob.status)) {
