@@ -2,26 +2,13 @@ import { Worker, Job } from "bullmq";
 import { RunwayDirectClient } from "../services/runway.direct";
 import { prisma, redis as connection, accountPool } from "../services/shared";
 
-// Max BullMQ attempts for transient issues (cooldown / concurrency full)
-const MAX_QUEUE_ATTEMPTS = 60;
-
 new Worker("runway-submit", async (job: Job) => {
   const { jobId, duration, resolution, quality, cfgScale, sound, videoUrl } = job.data;
-  console.log(`[submit-worker] attempt=${job.attemptsMade+1}/${MAX_QUEUE_ATTEMPTS} jobId=${jobId.slice(0,8)}`);
+  console.log(`[submit-worker] attempt=${job.attemptsMade+1} jobId=${jobId.slice(0,8)}`);
 
   const dbJob = await prisma.runwayJob.findUnique({ where: { id: jobId } });
   if (!dbJob || ["cancelled", "completed", "processing"].includes(dbJob.status)) {
     console.log(`[submit-worker] job ${jobId.slice(0,8)} cancelled/missing, skip`);
-    return;
-  }
-
-  // Safety: if BullMQ attempts exceed limit, mark as failed
-  if (job.attemptsMade >= MAX_QUEUE_ATTEMPTS) {
-    console.error(`[submit-worker] jobId=${jobId.slice(0,8)} exceeded ${MAX_QUEUE_ATTEMPTS} queue attempts, marking failed`);
-    await prisma.runwayJob.update({
-      where: { id: jobId },
-      data: { status: "failed", errorMessage: "排队超时：超过最大重试次数", finishedAt: new Date() },
-    });
     return;
   }
 

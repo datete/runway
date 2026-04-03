@@ -15,6 +15,7 @@ export interface AccountEntry {
 
 const COOLDOWN_SECONDS = 60;
 const CACHE_TTL = 30; // seconds to cache account list
+const CONCURRENCY_TTL = 900; // seconds for concurrency key safety TTL (15 min)
 
 export class AccountPool {
   private redis: IORedis;
@@ -90,8 +91,8 @@ export class AccountPool {
       const current = await this.redis.incr(key);
 
       if (current <= account.maxConcurrency) {
-        // Set TTL on concurrency key as safety net (5 min)
-        await this.redis.expire(key, 300);
+        // Set TTL on concurrency key as safety net
+        await this.redis.expire(key, CONCURRENCY_TTL);
         console.log(`[account-pool] acquired ${account.label} (${current}/${account.maxConcurrency})`);
 
         // Update lastUsedAt in DB (non-blocking)
@@ -110,14 +111,14 @@ export class AccountPool {
     return null;
   }
 
-  /** Release a concurrency slot for an account (idempotent per jobId) */
+  /** Release a concurrency slot for an account (idempotent per accountId+jobId) */
   async release(accountId: string, jobId?: string): Promise<void> {
-    // Prevent double-release for the same job
+    // Prevent double-release for the same account+job combination
     if (jobId) {
-      const releaseKey = `account:released:${jobId}`;
+      const releaseKey = `account:released:${accountId}:${jobId}`;
       const alreadyReleased = await this.redis.set(releaseKey, '1', 'EX', 600, 'NX');
       if (!alreadyReleased) {
-        console.log(`[account-pool] already released for job ${jobId.slice(0, 8)}, skipping`);
+        console.log(`[account-pool] already released ${accountId.slice(0, 8)} for job ${jobId.slice(0, 8)}, skipping`);
         return;
       }
     }
@@ -183,7 +184,7 @@ export class AccountPool {
         if (redisVal !== actual) {
           console.log(`[account-pool:reconcile] ${account.label}: redis=${redisVal} actual=${actual}, correcting`);
           if (actual > 0) {
-            await this.redis.set(redisKey, String(actual), 'EX', 300);
+            await this.redis.set(redisKey, String(actual), 'EX', CONCURRENCY_TTL);
           } else {
             await this.redis.del(redisKey);
           }

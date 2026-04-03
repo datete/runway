@@ -57,6 +57,7 @@ async function cacheVideo(remoteUrl: string, jobId: string): Promise<string> {
 
 const INTERVAL_QUEUED     = Number(process.env.POLL_INTERVAL_QUEUED_MS) || 20000;
 const INTERVAL_PROCESSING = Number(process.env.POLL_INTERVAL_PROCESSING_MS) || 10000;
+const INTERVAL_ERROR      = 30000; // retry delay on network error
 
 new Worker('runway-poll', async (job: Job) => {
   const { jobId, remoteTaskId, accountId } = job.data;
@@ -81,8 +82,19 @@ new Worker('runway-poll', async (job: Job) => {
     return;
   }
 
-  const client = await getClientForJob(accountId);
-  const result = await client.getTask(remoteTaskId);
+  // Wrap getTask in try/catch to handle network errors gracefully
+  let result: any;
+  try {
+    const client = await getClientForJob(accountId);
+    result = await client.getTask(remoteTaskId);
+  } catch (err: any) {
+    console.warn(`[poll-worker] getTask error for job ${jobId.slice(0,8)}: ${err.message}, will retry in ${INTERVAL_ERROR/1000}s`);
+    // Re-queue the poll job with a delay instead of crashing
+    await pollQueue.add('poll', {
+      jobId, remoteTaskId, accountId,
+    }, { jobId: `poll-${jobId}-${Date.now()}`, delay: INTERVAL_ERROR });
+    return;
+  }
 
   if (result.status === 'completed') {
     const localUrl = result.resultUrl ? await cacheVideo(result.resultUrl, jobId) : null;
@@ -121,7 +133,6 @@ new Worker('runway-poll', async (job: Job) => {
         cfgScale: dbJob.cfgScale,
         sound: dbJob.sound,
         videoUrl: dbJob.videoUrl,
-        // NOTE: accountId is NOT passed — submit worker will acquire a new account
       }, {
         jobId: `submit-${jobId}`, delay: 5000, attempts: MAX_SUBMIT_ATTEMPTS, backoff: { type: 'custom' },
       });
