@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "../services/prisma";
 
 export interface AuthUser {
   id: string;
@@ -17,7 +17,6 @@ declare global {
 }
 
 const JWT_SECRET = process.env.RUNWAY_JWT_SECRET || "runway-secret-change-me";
-const prisma = new PrismaClient();
 
 export function authMiddleware(req: Request, res: Response, next: NextFunction) {
   const authHeader = req.headers["authorization"] as string;

@@ -1,8 +1,7 @@
-import { PrismaClient } from "@prisma/client";
-import { submitQueue } from "../../queues/runway.queue";
+import { prisma } from "../prisma";
+import { submitQueue, pollQueue, redisConnection } from "../../queues/runway.queue";
 import { v4 as uuidv4 } from "uuid";
-
-const prisma = new PrismaClient();
+import fetch from "node-fetch";
 
 interface CreateJobInput {
   prompt: string;
@@ -83,7 +82,7 @@ export class RunwayService {
     await submitQueue.add(
       "submit",
       { jobId: job.id, duration: input.duration, resolution: input.resolution, quality: input.quality, cfgScale: input.cfgScale, sound: input.sound, videoUrl: input.videoUrl },
-      { jobId: `submit-${job.id}`, attempts: 60, backoff: { type: "custom" } },
+      { jobId: `submit-${job.id}`, backoff: { type: "custom" } },
     );
     await prisma.runwayJob.update({ where: { id: job.id }, data: { status: "queued" } });
 
@@ -128,7 +127,7 @@ export class RunwayService {
         sound: (job as any).sound,
         videoUrl: (job as any).videoUrl,
       },
-      { jobId: `submit-${id}`, attempts: 60, backoff: { type: "custom" } },
+      { jobId: `submit-${id}`, backoff: { type: "custom" } },
     );
     return prisma.runwayJob.findUnique({ where: { id } });
   }
@@ -137,6 +136,10 @@ export class RunwayService {
     const job = await prisma.runwayJob.findUnique({ where: { id } });
     if (!job) throw new Error("not found");
     if (role !== "admin" && userId && job.userId !== userId) throw new Error("forbidden");
+    // Cancel remote task if running
+    await this._cancelRemote(job as any);
+    // Clean up BullMQ jobs
+    await this._cleanupQueues(id);
     await prisma.runwayJob.update({
       where: { id },
       data: { status: "cancelled", finishedAt: new Date() },
@@ -148,9 +151,82 @@ export class RunwayService {
     const job = await prisma.runwayJob.findUnique({ where: { id } });
     if (!job) throw new Error("not found");
     if (role !== "admin" && userId && job.userId !== userId) throw new Error("forbidden");
+    // Cancel remote task if running
+    await this._cancelRemote(job as any);
+    // Clean up BullMQ jobs
+    await this._cleanupQueues(id);
+    // Release account concurrency if applicable
+    if ((job as any).accountId) {
+      await this._releaseAccount((job as any).accountId, id);
+    }
     return prisma.runwayJob.update({
       where: { id },
       data: { status: "cancelled", finishedAt: new Date() },
     });
+  }
+
+  /** Cancel remote Runway task if it has a remoteTaskId */
+  private async _cancelRemote(job: any): Promise<void> {
+    if (!job.remoteTaskId || !job.accountId) return;
+    try {
+      const account = await prisma.runwayAccount.findUnique({ where: { id: job.accountId } });
+      if (!account) return;
+
+      const headers: Record<string, string> = {
+        "Authorization": `Bearer ${account.token}`,
+        "Content-Type": "application/json",
+        "X-Runway-Workspace": account.teamId,
+      };
+
+      // Build proxy agent if needed
+      let agent: any;
+      if (account.proxyUrl) {
+        try {
+          if (account.proxyUrl.startsWith('socks')) {
+            const { SocksProxyAgent } = await import('socks-proxy-agent');
+            agent = new SocksProxyAgent(account.proxyUrl);
+          } else {
+            const { HttpsProxyAgent } = await import('https-proxy-agent');
+            agent = new HttpsProxyAgent(account.proxyUrl);
+          }
+        } catch {}
+      }
+
+      await fetch(`https://api.runwayml.com/v1/tasks/${job.remoteTaskId}/cancel?asTeamId=${account.teamId}`, {
+        method: "POST",
+        headers,
+        ...(agent ? { agent } : {}),
+      });
+      console.log(`[runway-service] cancelled remote task ${job.remoteTaskId} for job ${job.id.slice(0,8)}`);
+    } catch (e: any) {
+      console.warn(`[runway-service] cancel remote failed: ${e.message}`);
+    }
+  }
+
+  /** Remove BullMQ jobs from submit and poll queues */
+  private async _cleanupQueues(jobId: string): Promise<void> {
+    try {
+      const submitJob = await submitQueue.getJob(`submit-${jobId}`);
+      if (submitJob) await submitJob.remove().catch(() => {});
+    } catch {}
+    try {
+      const pollJob = await pollQueue.getJob(`poll-${jobId}`);
+      if (pollJob) await pollJob.remove().catch(() => {});
+    } catch {}
+  }
+
+  /** Release account concurrency slot via Redis */
+  private async _releaseAccount(accountId: string, jobId: string): Promise<void> {
+    try {
+      const releaseKey = `account:released:${accountId}:${jobId}`;
+      const alreadyReleased = await redisConnection.set(releaseKey, '1', 'EX', 600, 'NX');
+      if (!alreadyReleased) return;
+      const key = `account:concurrency:${accountId}`;
+      const val = await redisConnection.decr(key);
+      if (val < 0) await redisConnection.set(key, '0');
+      console.log(`[runway-service] released concurrency for account ${accountId.slice(0,8)}, now ${Math.max(0, val)}`);
+    } catch (e: any) {
+      console.warn(`[runway-service] release account failed: ${e.message}`);
+    }
   }
 }

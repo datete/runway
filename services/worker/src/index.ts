@@ -28,28 +28,28 @@ async function recoverStuckJobs() {
     for (const job of stuckJobs) {
       const j = job as any;
 
-      // 已缓存视频直接标记完成
+      // cached video -> mark completed
       if (j.resultUrl && j.resultUrl.startsWith("/img/videos/")) {
         await prisma.runwayJob.update({
           where: { id: job.id },
           data: { status: "completed", finishedAt: j.finishedAt || new Date() },
         });
-        console.log(`[startup-recovery] ${job.id.slice(0,8)} cached video → completed`);
+        console.log(`[startup-recovery] ${job.id.slice(0,8)} cached video -> completed`);
         continue;
       }
 
-      // processing + remoteTaskId → 加入 poll 队列
+      // processing + remoteTaskId -> poll queue
       if (j.status === "processing" && j.remoteTaskId) {
         await pollQueue.add("poll", {
           jobId: job.id,
           remoteTaskId: j.remoteTaskId,
           accountId: j.accountId || undefined,
         }, { delay: 5000 });
-        console.log(`[startup-recovery] ${job.id.slice(0,8)} processing → poll queue`);
+        console.log(`[startup-recovery] ${job.id.slice(0,8)} processing -> poll queue`);
         continue;
       }
 
-      // pending/queued/submitted → 加入 submit 队列
+      // pending/queued/submitted -> submit queue
       const existing = await submitQueue.getJob(`submit-${job.id}`);
       if (existing) {
         const state = await existing.getState();
@@ -73,9 +73,9 @@ async function recoverStuckJobs() {
         sound: j.sound,
         videoUrl: j.videoUrl,
       }, {
-        jobId: `submit-${job.id}`, delay: 2000, attempts: 60, backoff: { type: "custom" },
+        jobId: `submit-${job.id}`, delay: 2000, backoff: { type: "custom" },
       });
-      console.log(`[startup-recovery] ${job.id.slice(0,8)} → submit queue`);
+      console.log(`[startup-recovery] ${job.id.slice(0,8)} -> submit queue`);
     }
   } catch (e) {
     console.error("[startup-recovery] error:", e);

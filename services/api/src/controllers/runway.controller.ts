@@ -1,9 +1,8 @@
 import { Request, Response } from "express";
 import { RunwayService } from "../services/runway/runway.service";
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "../services/prisma";
 
 const svc = new RunwayService();
-const prisma = new PrismaClient();
 
 const ACTIVE_STATUSES = ["pending", "queued", "submitted", "processing"];
 

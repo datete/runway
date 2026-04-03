@@ -1,6 +1,8 @@
-import { Worker, Job } from "bullmq";
+import { Worker, Job, Queue } from "bullmq";
 import { RunwayDirectClient } from "../services/runway.direct";
 import { prisma, redis as connection, accountPool } from "../services/shared";
+
+const pollQueue = new Queue("runway-poll", { connection });
 
 new Worker("runway-submit", async (job: Job) => {
   const { jobId, duration, resolution, quality, cfgScale, sound, videoUrl } = job.data;
@@ -85,8 +87,6 @@ new Worker("runway-submit", async (job: Job) => {
     });
     console.log(`[submit-worker] jobId=${jobId.slice(0,8)} remoteTaskId=${remoteTaskId} account=${account.label}`);
 
-    const { Queue } = await import("bullmq");
-    const pollQueue = new Queue("runway-poll", { connection });
     await pollQueue.add("poll", {
       jobId, remoteTaskId,
       accountId: account.id,

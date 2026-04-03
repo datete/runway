@@ -1,11 +1,10 @@
 import { Router, Request, Response } from "express";
 import bcrypt from "bcryptjs";
 import IORedis from "ioredis";
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "../services/prisma";
 import { adminMiddleware } from "../middleware/auth";
 
 const router = Router();
-const prisma = new PrismaClient();
 const redis = new IORedis(process.env.REDIS_URL || "redis://localhost:6379", {
   maxRetriesPerRequest: null,
 });
