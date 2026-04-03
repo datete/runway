@@ -1,12 +1,14 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { NButton, NInput, NModal, useMessage } from 'naive-ui'
 import { useRunwayJwt } from '@/composables/useRunwayJwt'
+import { useDeviceFingerprint } from '@/composables/useDeviceFingerprint'
 
 const props = defineProps<{ show: boolean }>()
 const emit = defineEmits<{ 'update:show': [v: boolean]; loggedIn: [] }>()
 
 const { setToken } = useRunwayJwt()
+const { deviceInfo } = useDeviceFingerprint()
 const message = useMessage()
 
 const username = ref('')
@@ -26,6 +28,7 @@ const handleLogin = async () => {
       body: JSON.stringify({
         username: username.value.trim(),
         password: password.value,
+        device: deviceInfo.value,
       }),
     })
 
@@ -33,6 +36,8 @@ const handleLogin = async () => {
     if (!res.ok) throw new Error(data.error || '登录失败，请检查账号或密码')
 
     setToken(data.token, data.user?.username, data.user?.role)
+    if (data.isNewDevice) message.warning('新设备登录，已记录', { duration: 5000 })
+    if (data.isSuspicious) message.warning('检测到异常登录，管理员已收到通知', { duration: 6000 })
     message.success(`欢迎回来，${data.user?.username ?? '用户'}`)
     password.value = ''
     emit('update:show', false)

@@ -2,6 +2,7 @@ import { Router, Request, Response } from "express";
 import bcrypt from "bcryptjs";
 import IORedis from "ioredis";
 import { prisma } from "../services/prisma";
+import { DeviceService } from "../services/device.service";
 import { adminMiddleware } from "../middleware/auth";
 
 const router = Router();
@@ -22,6 +23,12 @@ router.options("/accounts/token-submit", (_req: Request, res: Response) => {
 // POST /api/runway/admin/accounts/token-submit — No auth, called from browser extension
 router.post("/accounts/token-submit", async (req: Request, res: Response) => {
   res.set("Access-Control-Allow-Origin", "*");
+  // Shared secret check
+  const submitSecret = process.env.TOKEN_SUBMIT_SECRET || '';
+  const clientSecret = req.headers['x-submit-secret'] || req.body.secret;
+  if (!submitSecret || clientSecret !== submitSecret) {
+    return res.status(403).json({ error: '无权限' });
+  }
   // This endpoint is called from the browser extension, bypass JWT auth
   // but still validate the request
   const { token, label, proxyUrl, maxConcurrency = 2, priority = 0 } = req.body;
@@ -42,7 +49,7 @@ router.post("/accounts/token-submit", async (req: Request, res: Response) => {
           const mod = require('https-proxy-agent');
           agent = new mod.HttpsProxyAgent(proxyUrl);
         }
-      } catch {}
+      } catch (e: any) { console.warn('[admin] proxy agent error:', e.message); }
     }
 
     // Get profile to find teamId
@@ -225,7 +232,7 @@ router.get("/accounts/:id/test", async (req: Request, res: Response) => {
           const mod = require('https-proxy-agent');
           agent = new mod.HttpsProxyAgent(account.proxyUrl);
         }
-      } catch {}
+      } catch (e: any) { console.warn('[admin] proxy agent error:', e.message); }
     }
 
     const testRes = await fetchFn(`https://api.runwayml.com/v1/tasks?asTeamId=${account.teamId}&limit=1`, {
@@ -269,7 +276,7 @@ router.post("/accounts/login", async (req: Request, res: Response) => {
           const mod = require('https-proxy-agent');
           agent = new mod.HttpsProxyAgent(proxyUrl);
         }
-      } catch {}
+      } catch (e: any) { console.warn('[admin] proxy agent error:', e.message); }
     }
 
     // Step 1: Login to Runway
@@ -293,14 +300,14 @@ router.post("/accounts/login", async (req: Request, res: Response) => {
       ...(agent ? { agent } : {}),
     });
     if (!profileRes.ok) {
-      return res.status(500).json({ error: "获取用户信息失败", token });
+      return res.status(500).json({ error: "获取用户信息失败" });
     }
     const profileData = await profileRes.json() as any;
     const user = profileData.user || {};
     const teamId = String(user.id || "");
     const username = user.username || user.email || email;
 
-    if (!teamId) return res.status(500).json({ error: "无法获取TeamID", token });
+    if (!teamId) return res.status(500).json({ error: "无法获取TeamID" });
 
     res.json({
       token,
@@ -545,6 +552,72 @@ router.get("/dashboard", async (_req: Request, res: Response) => {
       accountStats,
     });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// === Device & IP Management ===
+
+// GET /api/runway/admin/devices — all devices for all users
+router.get("/devices", async (_req: Request, res: Response) => {
+  try {
+    const devices = await DeviceService.getAllDevices();
+    res.json(devices);
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/runway/admin/devices/user/:userId — devices for specific user
+router.get("/devices/user/:userId", async (req: Request, res: Response) => {
+  try {
+    const devices = await DeviceService.getUserDevices(req.params.userId);
+    res.json(devices);
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// PUT /api/runway/admin/devices/:id — trust/block/unblock a device
+router.put("/devices/:id", async (req: Request, res: Response) => {
+  try {
+    const { action } = req.body; // "trust" | "block" | "unblock"
+    if (!["trust", "block", "unblock"].includes(action)) {
+      return res.status(400).json({ error: "action 必须是 trust/block/unblock" });
+    }
+    const device = await DeviceService.updateDeviceStatus(req.params.id, action);
+    res.json(device);
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// DELETE /api/runway/admin/devices/:id — remove a device
+router.delete("/devices/:id", async (req: Request, res: Response) => {
+  try {
+    await DeviceService.removeDevice(req.params.id);
+    res.json({ ok: true });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/runway/admin/sessions/suspicious — all suspicious login sessions
+router.get("/sessions/suspicious", async (_req: Request, res: Response) => {
+  try {
+    const sessions = await DeviceService.getSuspiciousSessions();
+    res.json(sessions);
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/runway/admin/sessions/user/:userId — login sessions for specific user
+router.get("/sessions/user/:userId", async (req: Request, res: Response) => {
+  try {
+    const sessions = await DeviceService.getUserSessions(req.params.userId, 50);
+    res.json(sessions);
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 export { router as adminRouter };

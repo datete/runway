@@ -17,49 +17,59 @@ export async function triggerSubmit(delay = 0): Promise<void> {
       removeOnComplete: 10,
       removeOnFail: 10,
     });
-  } catch {}
+  } catch (e: any) { console.warn('[submit] triggerSubmit error:', e.message); }
 }
 
 type SubmitResult = "submitted" | "no_pending" | "concurrency_full" | "rate_limited" | "network_error" | "job_failed";
 
 /** Try to submit one pending job. Returns status string. */
 async function trySubmitOne(): Promise<SubmitResult> {
-  const dbJob = await prisma.runwayJob.findFirst({
+  // Fetch up to 10 pending jobs to avoid head-of-line blocking across users
+  const pendingJobs = await prisma.runwayJob.findMany({
     where: { status: { in: ["pending", "queued"] } },
     orderBy: { createdAt: "asc" },
-  }) as any;
+    take: 10,
+  }) as any[];
 
-  if (!dbJob) return "no_pending";
+  if (pendingJobs.length === 0) return "no_pending";
+
+  let dbJob: any = null;
+
+  for (const candidate of pendingJobs) {
+    if (candidate.userId) {
+      const user = await prisma.user.findUnique({
+        where: { id: candidate.userId },
+        select: { maxConcurrency: true },
+      });
+      if (user && user.maxConcurrency !== null) {
+        const activeCount = await prisma.runwayJob.count({
+          where: {
+            userId: candidate.userId,
+            status: { in: ["submitted", "processing"] },
+            id: { not: candidate.id },
+          },
+        });
+        if (activeCount >= user.maxConcurrency) {
+          console.log(`[submit-worker] user ${candidate.userId} concurrency full (${activeCount}/${user.maxConcurrency}), skipping job ${candidate.id.slice(0,8)}`);
+          // Mark as queued so it's not re-picked immediately
+          await prisma.runwayJob.update({ where: { id: candidate.id }, data: { status: "queued" } });
+          continue; // try next job from a different user
+        }
+      }
+    }
+    dbJob = candidate;
+    break;
+  }
+
+  if (!dbJob) return "concurrency_full"; // all candidates blocked by user concurrency
 
   const jobId: string = dbJob.id;
   console.log(`[submit-worker] FIFO pick jobId=${jobId.slice(0,8)} created=${dbJob.createdAt.toISOString()}`);
 
-  // --- Per-user concurrency check ---
-  if (dbJob.userId) {
-    const user = await prisma.user.findUnique({
-      where: { id: dbJob.userId },
-      select: { maxConcurrency: true },
-    });
-    if (user && user.maxConcurrency !== null) {
-      const activeCount = await prisma.runwayJob.count({
-        where: {
-          userId: dbJob.userId,
-          status: { in: ["submitted", "processing"] },
-          id: { not: jobId },
-        },
-      });
-      if (activeCount >= user.maxConcurrency) {
-        console.log(`[submit-worker] user concurrency full (${activeCount}/${user.maxConcurrency})`);
-        await prisma.runwayJob.update({ where: { id: jobId }, data: { status: "queued" } });
-        return "concurrency_full";
-      }
-    }
-  }
-
   // Parse reference image URLs
   let imageUrls: string[] | undefined;
   if (dbJob.referenceImages) {
-    try { imageUrls = JSON.parse(dbJob.referenceImages); } catch {}
+    try { imageUrls = JSON.parse(dbJob.referenceImages); } catch (e: any) { console.warn('[submit] referenceImages parse error:', e.message); }
   }
 
   // Acquire an account — no cooldown, just concurrency check
@@ -68,6 +78,9 @@ async function trySubmitOne(): Promise<SubmitResult> {
     console.log(`[submit-worker] account concurrency full`);
     return "concurrency_full";
   }
+
+  // Clear stale release guard for this account+job (prevents release being blocked on retry/re-submit)
+  await connection.del(`account:released:${account.id}:${jobId}`);
 
   const client = new RunwayDirectClient(account.token, Number(account.teamId), account.proxyUrl || undefined);
 
@@ -98,10 +111,27 @@ async function trySubmitOne(): Promise<SubmitResult> {
     });
     console.log(`[submit-worker] jobId=${jobId.slice(0,8)} -> processing, remote=${remoteTaskId.slice(0,8)}, account=${account.label}`);
 
-    await pollQueue.add("poll", {
-      jobId, remoteTaskId,
-      accountId: account.id,
-    }, { jobId: `poll-${jobId}-${Date.now()}`, delay: 15000 });
+    // Retry pollQueue.add up to 3 times — do NOT let failure overwrite DB status
+    let pollAdded = false;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await pollQueue.add("poll", {
+          jobId, remoteTaskId,
+          accountId: account.id,
+        }, { jobId: `poll-${jobId}-${Date.now()}`, delay: 15000 });
+        pollAdded = true;
+        break;
+      } catch (pollErr: any) {
+        console.error(`[submit-worker] pollQueue.add attempt ${attempt}/3 failed: ${pollErr.message}`);
+        if (attempt < 3) await new Promise(r => setTimeout(r, 1000));
+      }
+    }
+    if (!pollAdded) {
+      // Leave DB in "processing" — startup recovery will pick it up
+      console.error(`[submit-worker] pollQueue.add failed after 3 retries, leaving job ${jobId.slice(0,8)} in processing for recovery`);
+      // Do NOT release concurrency slot — recovery will handle it
+      return "submitted";
+    }
 
     return "submitted";
 
@@ -123,7 +153,7 @@ async function trySubmitOne(): Promise<SubmitResult> {
       // Network error — release slot, keep job pending, retry after delay
       await accountPool.release(account.id);
       await accountPool.recordError(account.id, msg.slice(0, 200));
-      await prisma.runwayJob.update({ where: { id: jobId }, data: { status: "pending", errorMessage: `网络错误(将重试): ${msg.slice(0, 300)}` } });
+      await prisma.runwayJob.update({ where: { id: jobId }, data: { status: "pending", errorMessage: '网络错误(将重试)' } });
       console.log(`[submit-worker] network error, will retry in 10s`);
       return "network_error";
     }
@@ -178,7 +208,7 @@ setInterval(async () => {
     if (pendingCount > 0) {
       await triggerSubmit();
     }
-  } catch {}
+  } catch (e: any) { console.warn('[submit] periodic check error:', e.message); }
 }, 30000);
 
 console.log("[submit-worker] listening (FIFO from DB, 30s periodic check)");

@@ -56,6 +56,11 @@ async function recoverStuckJobs() {
       console.log(`[startup-recovery] ${job.id.slice(0,8)} -> pending`);
     }
 
+    // Reconcile Redis counters with DB BEFORE triggering submit
+    // This fixes leaked concurrency slots from crashed workers
+    await accountPool.reconcile();
+    console.log("[startup-recovery] reconciled concurrency counters");
+
     // Single trigger to process all pending jobs in FIFO order
     await triggerSubmit(2000);
     console.log("[startup-recovery] triggered submit worker");
@@ -104,7 +109,7 @@ function startCacheCleanup() {
             fs.unlinkSync(filePath);
             deleted++;
           }
-        } catch {}
+        } catch (e: any) { console.warn('[cache-cleanup] file error:', e.message); }
       }
       if (deleted > 0) {
         console.log(`[cache-cleanup] deleted ${deleted} video(s) older than ${CACHE_MAX_AGE_DAYS}d`);
@@ -136,7 +141,7 @@ function startUploadCleanup() {
             fs.unlinkSync(filePath);
             deleted++;
           }
-        } catch {}
+        } catch (e: any) { console.warn('[upload-cleanup] file error:', e.message); }
       }
       if (deleted > 0) {
         console.log(`[upload-cleanup] deleted ${deleted} file(s) older than ${UPLOAD_MAX_AGE_DAYS}d`);
@@ -148,6 +153,28 @@ function startUploadCleanup() {
   setTimeout(cleanup, 30000);
   setInterval(cleanup, 3600000);
 }
+
+// Graceful shutdown
+async function shutdown() {
+  console.log('[worker] shutting down gracefully...');
+  try {
+    // Close Redis connection
+    await redis.quit();
+    console.log('[worker] Redis closed');
+  } catch (e: any) {
+    console.warn('[worker] Redis close error:', e.message);
+  }
+  try {
+    // Close Prisma
+    await prisma.$disconnect();
+    console.log('[worker] Prisma disconnected');
+  } catch (e: any) {
+    console.warn('[worker] Prisma disconnect error:', e.message);
+  }
+  process.exit(0);
+}
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
 
 setTimeout(recoverStuckJobs, 3000);
 setTimeout(startReconciliation, 5000);

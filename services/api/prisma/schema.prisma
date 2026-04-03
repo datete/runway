@@ -8,17 +8,20 @@ datasource db {
 }
 
 model User {
-  id             String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  username       String      @unique @db.VarChar(64)
-  passwordHash   String      @map("password_hash")
-  role           String      @default("user") @db.VarChar(16)
-  createdAt      DateTime    @default(now()) @map("created_at")
-  updatedAt      DateTime    @updatedAt @map("updated_at")
-  dailyQuota     Int?        @map("daily_quota")
-  isActive       Boolean     @default(true) @map("is_active")
-  maxConcurrency Int?        @map("max_concurrency")
-  totalQuota     Int?        @map("total_quota")
+  id             String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  username       String           @unique @db.VarChar(64)
+  passwordHash   String           @map("password_hash")
+  role           String           @default("user") @db.VarChar(16)
+  createdAt      DateTime         @default(now()) @map("created_at")
+  updatedAt      DateTime         @updatedAt @map("updated_at")
+  dailyQuota     Int?             @map("daily_quota")
+  isActive       Boolean          @default(true) @map("is_active")
+  maxConcurrency Int?             @map("max_concurrency")
+  totalQuota     Int?             @map("total_quota")
+  maxDevices    Int?        @default(3) @map("max_devices")
+  sessions      LoginSession[]
   jobs           RunwayJob[]
+  devices       UserDevice[]
   logs           UserLog[]
 
   @@map("users")
@@ -70,6 +73,11 @@ model RunwayJob {
   account         RunwayAccount?   @relation(fields: [accountId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   user            User?            @relation(fields: [userId], references: [id])
 
+  @@index([status], map: "idx_runway_jobs_status")
+  @@index([userId], map: "idx_runway_jobs_user_id")
+  @@index([accountId], map: "idx_runway_jobs_account_id")
+  @@index([createdAt], map: "idx_runway_jobs_created_at")
+  @@index([remoteTaskId], map: "idx_runway_jobs_remote_task_id")
   @@map("runway_jobs")
 }
 
@@ -82,6 +90,7 @@ model RunwayJobEvent {
   createdAt   DateTime  @default(now()) @map("created_at")
   job         RunwayJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
 
+  @@index([jobId], map: "idx_runway_job_events_job_id")
   @@map("runway_job_events")
 }
 
@@ -105,4 +114,44 @@ model RunwayAccount {
   jobs             RunwayJob[]
 
   @@map("runway_accounts")
+}
+
+model LoginSession {
+  id               String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId           String       @map("user_id") @db.Uuid
+  deviceId         String?      @map("device_id") @db.Uuid
+  ip               String       @db.VarChar(64)
+  city             String?      @db.VarChar(128)
+  region           String?      @db.VarChar(128)
+  country          String?      @db.VarChar(8)
+  userAgent        String?      @map("user_agent")
+  isSuspicious     Boolean?     @default(false) @map("is_suspicious")
+  suspiciousReason String?      @map("suspicious_reason") @db.VarChar(256)
+  createdAt        DateTime?    @default(now()) @map("created_at") @db.Timestamptz(6)
+  device           UserDevice?  @relation(fields: [deviceId], references: [id], onUpdate: NoAction)
+  user             User         @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([createdAt(sort: Desc)], map: "idx_login_sessions_created")
+  @@index([userId], map: "idx_login_sessions_user")
+  @@map("login_sessions")
+}
+
+model UserDevice {
+  id            String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId        String          @map("user_id") @db.Uuid
+  fingerprint   String          @db.VarChar(128)
+  deviceName    String?         @map("device_name") @db.VarChar(256)
+  browser       String?         @db.VarChar(128)
+  os            String?         @db.VarChar(128)
+  firstSeenAt   DateTime?       @default(now()) @map("first_seen_at") @db.Timestamptz(6)
+  lastSeenAt    DateTime?       @default(now()) @map("last_seen_at") @db.Timestamptz(6)
+  lastIp        String?         @map("last_ip") @db.VarChar(64)
+  isTrusted     Boolean?        @default(false) @map("is_trusted")
+  isBlocked     Boolean?        @default(false) @map("is_blocked")
+  sessions      LoginSession[]
+  user          User            @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([userId, fingerprint])
+  @@index([userId], map: "idx_user_devices_user")
+  @@map("user_devices")
 }

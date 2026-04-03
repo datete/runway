@@ -42,7 +42,10 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
         req.user = payload;
         next();
       })
-      .catch(() => { req.user = payload; next(); }); // fallback: allow if DB fails
+      .catch((err) => {
+          console.error('[auth] DB check failed:', err.message);
+          return res.status(503).json({ error: '服务暂时不可用' });
+        });
   } catch {
     return res.status(401).json({ error: "token 无效或已过期" });
   }

@@ -87,23 +87,20 @@ new Worker('runway-poll', async (job: Job) => {
 
   if (result.status === 'completed') {
     const localUrl = result.resultUrl ? await cacheVideo(result.resultUrl, jobId) : null;
+    // IMPORTANT: Update DB status BEFORE releasing Redis concurrency slot
+    // This prevents reconcile from reverting the release due to stale DB state
     await prisma.runwayJob.update({
       where: { id: jobId },
       data: { status: 'completed', resultUrl: localUrl || result.resultUrl, thumbnailUrl: result.thumbnailUrl, finishedAt: new Date(), progress: 1, errorMessage: null } as any,
     });
+    console.log(`[poll-worker] job ${jobId.slice(0,8)} completed`);
     if (accountId) {
       await accountPool.release(accountId, jobId);
       await accountPool.incrementGenerated(accountId);
     }
-    console.log(`[poll-worker] job ${jobId.slice(0,8)} completed`);
     // Slot freed — trigger next submission immediately
     await triggerSubmit();
   } else if (result.status === 'failed' || result.status === 'cancelled') {
-    if (accountId) {
-      await accountPool.release(accountId, jobId);
-      await accountPool.recordError(accountId, result.errorMessage || 'Task failed');
-    }
-
     const retryCount = (dbJob.retryCount || 0);
 
     if (result.status === 'failed' && retryCount < MAX_REMOTE_RETRIES) {
@@ -111,6 +108,11 @@ new Worker('runway-poll', async (job: Job) => {
         where: { id: jobId },
         data: { status: 'pending', errorMessage: result.errorMessage, retryCount: retryCount + 1 },
       });
+      // Release concurrency for auto-retry (job goes back to pending, will re-acquire on next submit)
+      if (accountId) {
+        await accountPool.release(accountId, jobId);
+        await accountPool.recordError(accountId, result.errorMessage || 'Task failed (auto-retry)');
+      }
       console.log(`[poll-worker] auto-retry #${retryCount + 1}/${MAX_REMOTE_RETRIES} for job ${jobId.slice(0,8)}`);
     } else {
       const finalStatus = result.status === 'failed' ? 'failed' : 'cancelled';
@@ -123,6 +125,11 @@ new Worker('runway-poll', async (job: Job) => {
       });
       console.log(`[poll-worker] job ${jobId.slice(0,8)} final ${finalStatus} after ${retryCount} retries`);
     }
+    // Release concurrency AFTER DB update to prevent reconcile race condition
+    if (accountId) {
+      await accountPool.release(accountId, jobId);
+      await accountPool.recordError(accountId, result.errorMessage || 'Task failed');
+    }
     // Slot freed — trigger next submission
     await triggerSubmit();
   } else {
@@ -132,6 +139,14 @@ new Worker('runway-poll', async (job: Job) => {
         where: { id: jobId },
         data: { progress: result.progress } as any,
       }).catch(() => {});
+    }
+    // Re-check DB status before re-queuing (user may have cancelled during API call)
+    const freshJob = await prisma.runwayJob.findUnique({ where: { id: jobId }, select: { status: true } });
+    if (!freshJob || ['completed', 'failed', 'cancelled'].includes(freshJob.status)) {
+      console.log(`[poll-worker] job ${jobId.slice(0,8)} status changed to ${freshJob?.status || 'deleted'}, stopping poll`);
+      if (accountId) await accountPool.release(accountId, jobId);
+      if (freshJob?.status === 'cancelled') await triggerSubmit();
+      return;
     }
     const delay = result.status === 'queued' ? INTERVAL_QUEUED : INTERVAL_PROCESSING;
     await pollQueue.add('poll', {

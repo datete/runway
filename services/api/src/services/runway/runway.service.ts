@@ -36,58 +36,60 @@ async function triggerSubmit(delay = 0): Promise<void> {
 
 export class RunwayService {
   async createJob(input: CreateJobInput) {
-    // Only check hard quota limits — concurrency is enforced by the worker
-    if (input.userId) {
-      const user = await prisma.user.findUnique({
-        where: { id: input.userId },
-        select: { dailyQuota: true, totalQuota: true },
-      });
-      if (user) {
-        // Daily quota — hard limit
-        if (user.dailyQuota !== null) {
-          const todayStart = new Date();
-          todayStart.setHours(0, 0, 0, 0);
-          const todayCount = await prisma.runwayJob.count({
-            where: { userId: input.userId, createdAt: { gte: todayStart } },
-          });
-          if (todayCount >= user.dailyQuota) {
-            throw new Error(`今日配额已用完（上限 ${user.dailyQuota} 个）`);
+    // Quota check + job creation in a serializable transaction to prevent races
+    const job = await prisma.$transaction(async (tx) => {
+      if (input.userId) {
+        const user = await tx.user.findUnique({
+          where: { id: input.userId },
+          select: { dailyQuota: true, totalQuota: true },
+        });
+        if (user) {
+          // Daily quota — hard limit
+          if (user.dailyQuota !== null) {
+            const todayStart = new Date();
+            todayStart.setHours(0, 0, 0, 0);
+            const todayCount = await tx.runwayJob.count({
+              where: { userId: input.userId, createdAt: { gte: todayStart } },
+            });
+            if (todayCount >= user.dailyQuota) {
+              throw new Error(`今日配额已用完（上限 ${user.dailyQuota} 个）`);
+            }
           }
-        }
-        // Total quota — hard limit
-        if (user.totalQuota !== null) {
-          const totalCount = await prisma.runwayJob.count({
-            where: { userId: input.userId },
-          });
-          if (totalCount >= user.totalQuota) {
-            throw new Error(`总提交配额已用完（上限 ${user.totalQuota} 个）`);
+          // Total quota — hard limit
+          if (user.totalQuota !== null) {
+            const totalCount = await tx.runwayJob.count({
+              where: { userId: input.userId },
+            });
+            if (totalCount >= user.totalQuota) {
+              throw new Error(`总提交配额已用完（上限 ${user.totalQuota} 个）`);
+            }
           }
         }
       }
-    }
 
-    // Always accept the job — it enters the global queue
-    const job = await prisma.runwayJob.create({
-      data: {
-        id: uuidv4(),
-        userId: input.userId,
-        prompt: input.prompt,
-        mode: input.mode,
-        imageUrl: input.imageUrl,
-        referenceImages: input.imageUrls ? JSON.stringify(input.imageUrls) : undefined,
-        exploreMode: input.exploreMode ?? true,
-        modelName: "kling_3_0_standard",
-        status: "pending",
-        provider: "direct",
-        duration: input.duration || 5,
-        remark: input.remark,
-        resolution: input.resolution || null,
-        quality: input.quality || null,
-        cfgScale: input.cfgScale ?? null,
-        sound: input.sound ?? null,
-        videoUrl: input.videoUrl || null,
-      } as any,
-    });
+      // Always accept the job — it enters the global queue
+      return tx.runwayJob.create({
+        data: {
+          id: uuidv4(),
+          userId: input.userId,
+          prompt: input.prompt,
+          mode: input.mode,
+          imageUrl: input.imageUrl,
+          referenceImages: input.imageUrls ? JSON.stringify(input.imageUrls) : undefined,
+          exploreMode: input.exploreMode ?? true,
+          modelName: "kling_3_0_standard",
+          status: "pending",
+          provider: "direct",
+          duration: input.duration || 5,
+          remark: input.remark,
+          resolution: input.resolution || null,
+          quality: input.quality || null,
+          cfgScale: input.cfgScale ?? null,
+          sound: input.sound ?? null,
+          videoUrl: input.videoUrl || null,
+        } as any,
+      });
+    }, { isolationLevel: "Serializable" });
 
     // Trigger the submit worker to pick up pending jobs (FIFO from DB)
     await triggerSubmit();
@@ -207,9 +209,26 @@ export class RunwayService {
       const submitJob = await submitQueue.getJob(`submit-${jobId}`);
       if (submitJob) await submitJob.remove().catch(() => {});
     } catch {}
+    // Poll jobs have IDs like poll-{jobId}-{timestamp}, search delayed/waiting jobs
     try {
-      const pollJob = await pollQueue.getJob(`poll-${jobId}`);
-      if (pollJob) await pollJob.remove().catch(() => {});
+      const delayed = await pollQueue.getDelayed();
+      for (const j of delayed) {
+        if (j.data?.jobId === jobId) {
+          await j.remove().catch(() => {});
+          console.log(`[runway-service] removed delayed poll job for ${jobId.slice(0,8)}`);
+          break;
+        }
+      }
+    } catch {}
+    try {
+      const waiting = await pollQueue.getWaiting();
+      for (const j of waiting) {
+        if (j.data?.jobId === jobId) {
+          await j.remove().catch(() => {});
+          console.log(`[runway-service] removed waiting poll job for ${jobId.slice(0,8)}`);
+          break;
+        }
+      }
     } catch {}
   }
 

@@ -48,6 +48,17 @@ interface AccountStat {
   maxConcurrency: number; currentConcurrency: number; totalGenerated: number; activeTasks?: ActiveTask[]
 }
 
+interface DeviceInfo {
+  id: string; userId: string; fingerprint: string; deviceName: string; browser: string; os: string
+  firstSeenAt: string; lastSeenAt: string; lastIp: string; isTrusted: boolean; isBlocked: boolean
+  user?: { username: string }
+}
+interface LoginSessionInfo {
+  id: string; userId: string; deviceId: string | null; ip: string; city: string | null; region: string | null
+  country: string | null; userAgent: string; isSuspicious: boolean; suspiciousReason: string | null
+  createdAt: string; user?: { username: string }
+}
+
 /* ── Props / Emits ── */
 const props = defineProps<{ show: boolean }>()
 const emit = defineEmits<{ 'update:show': [v: boolean] }>()
@@ -75,7 +86,7 @@ const accountSaving = ref(false)
 const accountForm = ref({ label: '', token: '', teamId: '', proxyUrl: '', maxConcurrency: 2, priority: 0 })
 const accountTesting = ref<string | null>(null)
 const accountModalTab = ref<'manual' | 'login'>('login')
-const loginForm = ref({ email: '', password: '', proxyUrl: 'socks5://datete:datete@tengxun.iplcz.cn:28951' })
+const loginForm = ref({ email: '', password: '', proxyUrl: '' })
 const loginLoading = ref(false)
 
 const adminJobs = ref<AdminJob[]>([])
@@ -90,6 +101,11 @@ const logsTotal = ref(0)
 const logsLoading = ref(false)
 const logsPage = ref(1)
 const logsAction = ref('')
+
+const devices = ref<DeviceInfo[]>([])
+const devicesLoading = ref(false)
+const suspiciousSessions = ref<LoginSessionInfo[]>([])
+const sessionsLoading = ref(false)
 
 /* ── Options ── */
 const userFilterOptions = computed(() => [
@@ -177,13 +193,48 @@ const fetchLogs = async () => {
   finally { logsLoading.value = false }
 }
 
-const refreshAll = () => { fetchDashboard(); fetchUsers(); fetchAccounts(); fetchAdminJobs(); fetchLogs() }
+const fetchDevices = async () => {
+  devicesLoading.value = true
+  try {
+    const res = await fetch('/api/runway/admin/devices', { headers: headers() })
+    devices.value = await res.json()
+  } catch {} finally { devicesLoading.value = false }
+}
+
+const fetchSuspiciousSessions = async () => {
+  sessionsLoading.value = true
+  try {
+    const res = await fetch('/api/runway/admin/sessions/suspicious', { headers: headers() })
+    suspiciousSessions.value = await res.json()
+  } catch {} finally { sessionsLoading.value = false }
+}
+
+const updateDeviceStatus = async (id: string, action: 'trust' | 'block' | 'unblock') => {
+  try {
+    const res = await fetch(`/api/runway/admin/devices/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json', ...headers() }, body: JSON.stringify({ action }) })
+    if (!res.ok) throw new Error('操作失败')
+    message.success(action === 'trust' ? '已信任' : action === 'block' ? '已封禁' : '已解封')
+    fetchDevices()
+  } catch (e: any) { message.error(e.message) }
+}
+
+const removeDevice = async (id: string) => {
+  if (!window.confirm('确认移除该设备？用户下次登录需重新验证。')) return
+  try {
+    const res = await fetch(`/api/runway/admin/devices/${id}`, { method: 'DELETE', headers: headers() })
+    if (!res.ok) throw new Error('删除失败')
+    message.success('已移除')
+    fetchDevices()
+  } catch (e: any) { message.error(e.message) }
+}
+
+const refreshAll = () => { fetchDashboard(); fetchUsers(); fetchAccounts(); fetchAdminJobs(); fetchLogs(); fetchDevices(); fetchSuspiciousSessions() }
 
 /* ── Account CRUD ── */
 const openCreateAccount = () => {
   editingAccount.value = null
   accountForm.value = { label: '', token: '', teamId: '', proxyUrl: '', maxConcurrency: 2, priority: 0 }
-  loginForm.value = { email: '', password: '', proxyUrl: 'socks5://datete:datete@tengxun.iplcz.cn:28951' }
+  loginForm.value = { email: '', password: '', proxyUrl: '' }
   accountModalTab.value = 'login'
   showAccountModal.value = true
 }
@@ -364,6 +415,30 @@ const logColumns = [
   { title: '详情', key: 'detail', ellipsis: { tooltip: true } },
   { title: 'IP', key: 'ip', width: 140 },
   { title: '时间', key: 'createdAt', width: 170, render: (row: AdminLog) => formatTime(row.createdAt) },
+]
+
+const deviceColumns = [
+  { title: '用户', key: 'user', width: 100, render: (row: DeviceInfo) => h(NTag, { size: 'small', round: true, bordered: false, type: 'info' }, () => row.user?.username ?? '—') },
+  { title: '设备', key: 'deviceName', width: 140 },
+  { title: '浏览器', key: 'browser', width: 90 },
+  { title: '系统', key: 'os', width: 80 },
+  { title: 'IP', key: 'lastIp', width: 130 },
+  { title: '指纹', key: 'fingerprint', width: 90, render: (row: DeviceInfo) => row.fingerprint.slice(0, 8) },
+  { title: '状态', key: 'status', width: 80, render: (row: DeviceInfo) => h(NTag, { type: row.isBlocked ? 'error' : row.isTrusted ? 'success' : 'warning', size: 'small', round: true, bordered: false }, () => row.isBlocked ? '封禁' : row.isTrusted ? '信任' : '新设备') },
+  { title: '最后活跃', key: 'lastSeenAt', width: 160, render: (row: DeviceInfo) => formatTime(row.lastSeenAt) },
+  { title: '操作', key: 'actions', width: 200, render: (row: DeviceInfo) => h('div', { class: 'flex gap-1' }, [
+    !row.isTrusted && !row.isBlocked ? h(NButton, { size: 'tiny', tertiary: true, type: 'success', onClick: () => updateDeviceStatus(row.id, 'trust') }, () => '信任') : null,
+    !row.isBlocked ? h(NButton, { size: 'tiny', tertiary: true, type: 'error', onClick: () => updateDeviceStatus(row.id, 'block') }, () => '封禁') : h(NButton, { size: 'tiny', tertiary: true, type: 'success', onClick: () => updateDeviceStatus(row.id, 'unblock') }, () => '解封'),
+    h(NButton, { size: 'tiny', tertiary: true, type: 'warning', onClick: () => removeDevice(row.id) }, () => '移除'),
+  ]) },
+]
+
+const sessionColumns = [
+  { title: '用户', key: 'user', width: 100, render: (row: LoginSessionInfo) => h(NTag, { size: 'small', round: true, bordered: false, type: 'info' }, () => row.user?.username ?? '—') },
+  { title: 'IP', key: 'ip', width: 130 },
+  { title: '地区', key: 'location', width: 140, render: (row: LoginSessionInfo) => [row.city, row.region, row.country].filter(Boolean).join(', ') || '—' },
+  { title: '可疑原因', key: 'suspiciousReason', ellipsis: { tooltip: true } },
+  { title: '时间', key: 'createdAt', width: 170, render: (row: LoginSessionInfo) => formatTime(row.createdAt) },
 ]
 
 /* ── Watchers ── */
@@ -627,6 +702,26 @@ onUnmounted(() => { if (autoRefreshTimer) clearInterval(autoRefreshTimer) })
               </div>
               <div class="mt-3 flex justify-center">
                 <NPagination v-model:page="logsPage" :page-count="Math.ceil(logsTotal / 20) || 1" />
+              </div>
+            </NTabPane>
+
+            <!-- Devices Tab -->
+            <NTabPane name="devices" tab="设备管理">
+              <div class="mb-3 flex gap-2">
+                <NButton size="small" secondary @click="fetchDevices">刷新设备</NButton>
+                <NButton size="small" secondary @click="fetchSuspiciousSessions">刷新可疑登录</NButton>
+              </div>
+
+              <!-- Devices table -->
+              <p class="mb-2 text-xs font-semibold text-slate-600 dark:text-slate-300">已注册设备</p>
+              <div class="mb-4 overflow-hidden rounded-lg border border-slate-200/80 dark:border-slate-700/40">
+                <NDataTable :columns="deviceColumns" :data="devices" :loading="devicesLoading" :scroll-x="900" size="small" />
+              </div>
+
+              <!-- Suspicious sessions -->
+              <p class="mb-2 text-xs font-semibold text-slate-600 dark:text-slate-300">可疑登录记录</p>
+              <div class="overflow-hidden rounded-lg border border-slate-200/80 dark:border-slate-700/40">
+                <NDataTable :columns="sessionColumns" :data="suspiciousSessions" :loading="sessionsLoading" :scroll-x="800" size="small" />
               </div>
             </NTabPane>
           </NTabs>

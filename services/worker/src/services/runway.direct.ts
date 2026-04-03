@@ -1,4 +1,5 @@
 import fetch from "node-fetch";
+import sharp from "sharp";
 import { v4 as uuidv4 } from "uuid";
 import { RunwayProvider, CreateRunwayTaskInput, RunwayTaskStatus } from "./runway.provider";
 
@@ -8,6 +9,7 @@ export class RunwayDirectClient implements RunwayProvider {
   private token: string;
   private teamId: number;
   private proxyUrl?: string;
+  private cachedAgent: any = null;
 
   constructor(token?: string, teamId?: number, proxyUrl?: string) {
     this.token  = token || process.env.RUNWAY_TOKEN || "";
@@ -28,25 +30,54 @@ export class RunwayDirectClient implements RunwayProvider {
     };
   }
 
-  /** Get fetch options with proxy agent if configured */
+  /** Get fetch options with proxy agent if configured (cached) */
   private async getFetchOptions(): Promise<{ agent?: any }> {
     if (!this.proxyUrl) return {};
+    if (this.cachedAgent) return { agent: this.cachedAgent };
     try {
+      let agent: any;
       if (this.proxyUrl.startsWith('socks')) {
         const { SocksProxyAgent } = await import('socks-proxy-agent');
-        return { agent: new SocksProxyAgent(this.proxyUrl) };
+        agent = new SocksProxyAgent(this.proxyUrl);
       } else {
         const { HttpsProxyAgent } = await import('https-proxy-agent');
-        return { agent: new HttpsProxyAgent(this.proxyUrl) };
+        agent = new HttpsProxyAgent(this.proxyUrl);
       }
+      this.cachedAgent = agent;
+      return { agent };
     } catch (e: any) {
       console.warn(`[runway] proxy agent init failed: ${e.message}, using direct connection`);
       return {};
     }
   }
 
+  /**
+   * Upscale/resize image to target resolution for maximum quality.
+   * Resizes to fit within target dimensions, then extends with black background.
+   */
+  private async upscaleImage(buf: Buffer, targetWidth: number, targetHeight: number): Promise<Buffer> {
+    try {
+      const meta = await sharp(buf).metadata();
+      if (!meta.width || !meta.height) return buf;
+      // Skip if already at or above target size
+      if (meta.width >= targetWidth && meta.height >= targetHeight) {
+        console.log(`[runway:upscale] image ${meta.width}x${meta.height} already >= ${targetWidth}x${targetHeight}, skip`);
+        return buf;
+      }
+      const result = await sharp(buf)
+        .resize(targetWidth, targetHeight, { fit: "contain", background: { r: 0, g: 0, b: 0, alpha: 1 } })
+        .png()
+        .toBuffer();
+      console.log(`[runway:upscale] ${meta.width}x${meta.height} -> ${targetWidth}x${targetHeight} (${Math.round(result.length/1024)}KB)`);
+      return result;
+    } catch (e: any) {
+      console.warn(`[runway:upscale] failed: ${e.message}, using original`);
+      return buf;
+    }
+  }
+
   /** Download an image from any URL, upload to Runway S3, return signed CloudFront URL */
-  async uploadImage(sourceUrl: string): Promise<string> {
+  async uploadImage(sourceUrl: string, isPro = false): Promise<string> {
     // Convert relative /img/ paths to absolute localhost URL
     if (sourceUrl.startsWith("/")) sourceUrl = `http://localhost:5102${sourceUrl}`;
     console.log(`[runway:upload] source: ${sourceUrl}`);
@@ -62,8 +93,18 @@ export class RunwayDirectClient implements RunwayProvider {
               : ct.includes("mp4")  ? "mp4"
               : ct.includes("video") ? "mp4"
               : "png";
-    const filename = `ref_${Date.now()}.${ext}`;
-    console.log(`[runway:upload] downloaded ${imgBuf.length} bytes, type=${ct}, file=${filename}`);
+    console.log(`[runway:upload] downloaded ${imgBuf.length} bytes, type=${ct}`);
+
+    // Auto-upscale reference image to max resolution for best quality
+    const isImage = !ct.includes("video") && !ct.includes("mp4") && !ct.includes("gif");
+    let finalBuf = imgBuf;
+    let finalCt = ct;
+    if (isImage) {
+      const [tw, th] = isPro ? [1080, 1920] : [720, 1280];
+      finalBuf = await this.upscaleImage(imgBuf, tw, th) as any;
+      finalCt = "image/png";
+    }
+    const filename = `ref_${Date.now()}.${isImage ? "png" : ext}`;
 
     const proxyOpts = await this.getFetchOptions();
 
@@ -83,8 +124,8 @@ export class RunwayDirectClient implements RunwayProvider {
     // Step 3 – PUT to S3 presigned URL (S3 direct, no proxy needed)
     const putRes = await fetch(s3Url, {
       method: "PUT",
-      headers: { "Content-Type": ct },
-      body: imgBuf,
+      headers: { "Content-Type": finalCt },
+      body: finalBuf,
     });
     if (!putRes.ok) throw new Error(`S3 PUT ${putRes.status}`);
     const etag = (putRes.headers.get("ETag") || "").replace(/"/g, "");
@@ -114,7 +155,7 @@ export class RunwayDirectClient implements RunwayProvider {
     if (!imgRes.ok) throw new Error(`Failed to download file ${imgRes.status}: ${sourceUrl}`);
     const buf = Buffer.from(await imgRes.arrayBuffer());
     const ct = imgRes.headers.get("content-type") || "video/mp4";
-    const ext = ct.includes("mp4") || ct.includes("video") ? "mp4" : "mp4";
+    const ext = ct.includes("mp4") || ct.includes("video") ? "mp4" : "png";
     const filename = `ref_${Date.now()}.${ext}`;
     console.log(`[runway:upload:video] downloaded ${buf.length} bytes, type=${ct}`);
 
@@ -152,17 +193,17 @@ export class RunwayDirectClient implements RunwayProvider {
   }
 
   /** Upload any file (image or video) to Runway S3 */
-  async uploadFile(sourceUrl: string): Promise<string> {
-    return this.uploadImage(sourceUrl);
+  async uploadFile(sourceUrl: string, isPro = false): Promise<string> {
+    return this.uploadImage(sourceUrl, isPro);
   }
 
   /** Upload multiple images and return referenceImages array for task creation */
-  private async uploadReferenceImages(urls: string[]): Promise<Array<{ url: string }>> {
+  private async uploadReferenceImages(urls: string[], isPro = false): Promise<Array<{ url: string }>> {
     console.log(`[runway] uploading ${urls.length} reference image(s)`);
     const results: Array<{ url: string }> = [];
     for (let i = 0; i < urls.length; i++) {
       console.log(`[runway] image ${i + 1}/${urls.length}: ${urls[i]}`);
-      const runwayUrl = await this.uploadImage(urls[i]);
+      const runwayUrl = await this.uploadImage(urls[i], isPro);
       results.push({ url: runwayUrl });
       console.log(`[runway] image ${i + 1} uploaded ok`);
     }
@@ -187,7 +228,7 @@ export class RunwayDirectClient implements RunwayProvider {
     // Upload images to Runway
     let referenceImages: Array<{ url: string }> = [];
     if (sourceUrls.length > 0) {
-      referenceImages = await this.uploadReferenceImages(sourceUrls);
+      referenceImages = await this.uploadReferenceImages(sourceUrls, isPro);
     }
 
     // Upload reference video for pro mode
@@ -227,12 +268,20 @@ export class RunwayDirectClient implements RunwayProvider {
     console.log(`[runway:task] POST /v1/tasks, referenceImages=${referenceImages.length}`);
 
     const proxyOpts = await this.getFetchOptions();
-    const res = await fetch(`${API_BASE}/v1/tasks`, {
-      method: "POST",
-      headers: this.headers,
-      body: JSON.stringify(body),
-      ...proxyOpts,
-    });
+    const createAbort = new AbortController();
+    const createTimeout = setTimeout(() => createAbort.abort(), 30000);
+    let res: any;
+    try {
+      res = await fetch(`${API_BASE}/v1/tasks`, {
+        method: "POST",
+        headers: this.headers,
+        body: JSON.stringify(body),
+        signal: createAbort.signal as any,
+        ...proxyOpts,
+      });
+    } finally {
+      clearTimeout(createTimeout);
+    }
 
     if (res.status === 429) {
       console.warn("[runway:task] 429 rate limited");
@@ -253,10 +302,17 @@ export class RunwayDirectClient implements RunwayProvider {
   async getTask(remoteTaskId: string): Promise<RunwayTaskStatus> {
     console.log(`[runway:poll] GET /v1/tasks/${remoteTaskId}`);
     const proxyOpts = await this.getFetchOptions();
-    const res = await fetch(
-      `${API_BASE}/v1/tasks/${remoteTaskId}?asTeamId=${this.teamId}`,
-      { headers: this.headers, ...proxyOpts }
-    );
+    const getAbort = new AbortController();
+    const getTimeout = setTimeout(() => getAbort.abort(), 30000);
+    let res: any;
+    try {
+      res = await fetch(
+        `${API_BASE}/v1/tasks/${remoteTaskId}?asTeamId=${this.teamId}`,
+        { headers: this.headers, signal: getAbort.signal as any, ...proxyOpts }
+      );
+    } finally {
+      clearTimeout(getTimeout);
+    }
     if (!res.ok) throw new Error(`Runway getTask ${res.status}: ${await res.text()}`);
     const data = await res.json() as any;
     const t = data.task;
