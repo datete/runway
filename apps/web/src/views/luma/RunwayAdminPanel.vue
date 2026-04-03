@@ -38,11 +38,14 @@ interface AccountInfo {
   maxConcurrency: number; currentConcurrency: number; isActive: boolean; priority: number
   inCooldown: boolean; totalGenerated: number; lastUsedAt: string | null
   lastErrorAt: string | null; lastErrorMessage: string | null
-  tokenExpiresAt: string | null; createdAt: string
+  tokenExpiresAt: string | null; createdAt: string ; activeTasks?: ActiveTask[]
+}
+interface ActiveTask {
+  jobId: string; username: string; status: string; progress: number; prompt: string; createdAt: string
 }
 interface AccountStat {
   id: string; label: string; tokenShort: string; isActive: boolean
-  maxConcurrency: number; currentConcurrency: number; totalGenerated: number
+  maxConcurrency: number; currentConcurrency: number; totalGenerated: number; activeTasks?: ActiveTask[]
 }
 
 /* ── Props / Emits ── */
@@ -71,6 +74,9 @@ const editingAccount = ref<AccountInfo | null>(null)
 const accountSaving = ref(false)
 const accountForm = ref({ label: '', token: '', teamId: '', proxyUrl: '', maxConcurrency: 2, priority: 0 })
 const accountTesting = ref<string | null>(null)
+const accountModalTab = ref<'manual' | 'login'>('login')
+const loginForm = ref({ email: '', password: '', proxyUrl: 'socks5://datete:datete@tengxun.iplcz.cn:28951' })
+const loginLoading = ref(false)
 
 const adminJobs = ref<AdminJob[]>([])
 const adminJobsTotal = ref(0)
@@ -177,12 +183,15 @@ const refreshAll = () => { fetchDashboard(); fetchUsers(); fetchAccounts(); fetc
 const openCreateAccount = () => {
   editingAccount.value = null
   accountForm.value = { label: '', token: '', teamId: '', proxyUrl: '', maxConcurrency: 2, priority: 0 }
+  loginForm.value = { email: '', password: '', proxyUrl: 'socks5://datete:datete@tengxun.iplcz.cn:28951' }
+  accountModalTab.value = 'login'
   showAccountModal.value = true
 }
 
 const openEditAccount = (acc: AccountInfo) => {
   editingAccount.value = acc
   accountForm.value = { label: acc.label, token: '', teamId: acc.teamId, proxyUrl: acc.proxyUrl || '', maxConcurrency: acc.maxConcurrency, priority: acc.priority }
+  accountModalTab.value = 'manual'
   showAccountModal.value = true
 }
 
@@ -208,6 +217,32 @@ const saveAccount = async () => {
     fetchAccounts(); fetchDashboard()
   } catch (e: any) { message.error(e.message) }
   finally { accountSaving.value = false }
+}
+
+const loginRunway = async () => {
+  const f = loginForm.value
+  if (!f.email.trim() || !f.password.trim()) { message.error('请输入邮箱和密码'); return }
+  loginLoading.value = true
+  try {
+    const res = await fetch('/api/runway/admin/accounts/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...headers() },
+      body: JSON.stringify({ email: f.email.trim(), password: f.password.trim(), proxyUrl: f.proxyUrl.trim() || undefined }),
+    })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error || '登录失败')
+
+    // Fill the account form with login result
+    accountForm.value.token = data.token
+    accountForm.value.teamId = data.teamId
+    accountForm.value.proxyUrl = f.proxyUrl.trim()
+    if (!accountForm.value.label.trim()) accountForm.value.label = data.username || data.email || f.email.split('@')[0]
+
+    message.success(`登录成功! 用户: ${data.username || data.email}, TeamID: ${data.teamId}`)
+    // Auto-save the account
+    await saveAccount()
+  } catch (e: any) { message.error(e.message) }
+  finally { loginLoading.value = false }
 }
 
 const toggleAccountActive = async (acc: AccountInfo) => {
@@ -441,31 +476,62 @@ onUnmounted(() => { if (autoRefreshTimer) clearInterval(autoRefreshTimer) })
               <SvgIcon icon="ri:refresh-line" class="mr-1" /> 刷新
             </NButton>
           </div>
-          <div class="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
+          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div
               v-for="a in accountStatsData"
               :key="a.id"
-              class="rounded-lg border p-3"
-              :class="a.isActive ? 'border-slate-100 bg-slate-50/50 dark:border-slate-700/40 dark:bg-slate-800/40' : 'border-red-100 bg-red-50/50 dark:border-red-900/30 dark:bg-red-900/10'"
+              class="overflow-hidden rounded-xl border"
+              :class="a.isActive ? 'border-slate-200 dark:border-slate-700' : 'border-red-200 bg-red-50/30 dark:border-red-900/30 dark:bg-red-900/10'"
             >
-              <div class="flex items-center justify-between">
-                <span class="text-sm font-medium text-slate-800 dark:text-slate-100">{{ a.label }}</span>
-                <NTag :type="a.isActive ? 'success' : 'warning'" size="tiny" round :bordered="false">
-                  {{ a.isActive ? '活跃' : '停用' }}
-                </NTag>
+              <div class="flex items-center justify-between border-b border-slate-100 px-4 py-2.5 dark:border-slate-700/50" :class="a.isActive ? 'bg-slate-50/80 dark:bg-slate-800/60' : ''">
+                <div class="flex items-center gap-2">
+                  <div class="flex h-7 w-7 items-center justify-center rounded-full text-[10px] font-bold text-white" :class="a.isActive ? 'bg-gradient-to-br from-emerald-500 to-teal-600' : 'bg-gradient-to-br from-red-400 to-red-500'">
+                    {{ a.label.charAt(0).toUpperCase() }}
+                  </div>
+                  <span class="text-sm font-semibold text-slate-800 dark:text-slate-100">{{ a.label }}</span>
+                  <NTag :type="a.isActive ? 'success' : 'warning'" size="tiny" round :bordered="false">{{ a.isActive ? '活跃' : '停用' }}</NTag>
+                </div>
+                <span class="text-[11px] text-slate-500">已生成 <b class="text-slate-700 dark:text-slate-300">{{ a.totalGenerated }}</b></span>
               </div>
-              <div class="mt-2">
+              <div class="px-4 py-2">
+                <div class="flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400">
+                  <span>并发占用</span>
+                  <span><b :class="a.currentConcurrency >= a.maxConcurrency ? 'text-orange-500' : 'text-emerald-600 dark:text-emerald-400'">{{ a.currentConcurrency }}</b> / {{ a.maxConcurrency }}</span>
+                </div>
                 <NProgress
                   type="line"
                   :percentage="a.maxConcurrency > 0 ? Math.round(a.currentConcurrency / a.maxConcurrency * 100) : 0"
                   :status="a.currentConcurrency >= a.maxConcurrency ? 'warning' : 'success'"
                   :show-indicator="false"
-                  :height="8"
+                  :height="6"
+                  class="mt-1"
                 />
-                <div class="mt-1 flex justify-between text-[11px] text-slate-500">
-                  <span>并发 {{ a.currentConcurrency }}/{{ a.maxConcurrency }}</span>
-                  <span>已生成 {{ a.totalGenerated }}</span>
+              </div>
+              <div v-if="a.activeTasks && a.activeTasks.length > 0" class="border-t border-slate-100 px-4 py-2 dark:border-slate-700/50">
+                <p class="mb-1.5 text-[10px] font-medium uppercase tracking-wider text-slate-400">最近任务</p>
+                <div class="space-y-1.5">
+                  <div v-for="t in a.activeTasks" :key="t.jobId" class="flex items-center gap-2 rounded-lg bg-slate-50 px-2.5 py-1.5 dark:bg-slate-800/60">
+                    <div class="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-cyan-100 text-[9px] font-bold text-cyan-700 dark:bg-cyan-900/50 dark:text-cyan-300">
+                      {{ t.username.charAt(0).toUpperCase() }}
+                    </div>
+                    <div class="min-w-0 flex-1">
+                      <div class="flex items-center gap-1.5">
+                        <span class="text-[11px] font-medium text-cyan-600 dark:text-cyan-400">{{ t.username }}</span>
+                        <span class="text-[10px] text-slate-400">#{{ t.jobId }}</span>
+                        <NTag :type="t.status === 'completed' ? 'success' : t.status === 'failed' ? 'error' : t.status === 'cancelled' ? 'warning' : 'info'" size="tiny" round :bordered="false">
+                          {{ {completed: '完成', failed: '失败', cancelled: '取消', processing: '生成中', submitted: '提交中', pending: '排队'}[t.status] || t.status }}
+                        </NTag>
+                      </div>
+                      <p class="truncate text-[10px] text-slate-400">{{ t.prompt || '...' }}</p>
+                    </div>
+                    <div v-if="t.status === 'processing' && t.progress > 0" class="w-10 flex-shrink-0 text-right text-[11px] font-bold text-emerald-500">
+                      {{ Math.round(t.progress * 100) }}%
+                    </div>
+                  </div>
                 </div>
+              </div>
+              <div v-else class="border-t border-slate-100 px-4 py-2 dark:border-slate-700/50">
+                <p class="text-center text-[11px] text-slate-300 dark:text-slate-600">暂无任务记录</p>
               </div>
             </div>
           </div>
@@ -503,6 +569,7 @@ onUnmounted(() => { if (autoRefreshTimer) clearInterval(autoRefreshTimer) })
                         <span v-if="acc.proxyUrl">代理: {{ acc.proxyUrl }}</span>
                         <span>并发: <b :class="acc.currentConcurrency >= acc.maxConcurrency ? 'text-orange-500' : 'text-emerald-500'">{{ acc.currentConcurrency }}</b>/{{ acc.maxConcurrency }}</span>
                         <span>总生成: <b class="text-slate-700 dark:text-slate-200">{{ acc.totalGenerated }}</b></span>
+                        <span v-if="acc.activeTasks && acc.activeTasks.length > 0">用户: <b class="text-blue-500">{{ acc.activeTasks.map(t => t.username).filter((v,i,a) => a.indexOf(v)===i).join(", ") }}</b></span>
                       </div>
                       <div v-if="acc.lastErrorMessage" class="mt-1 text-xs text-red-500">
                         最近错误: {{ acc.lastErrorMessage }} ({{ acc.lastErrorAt ? formatTime(acc.lastErrorAt) : '' }})
@@ -604,30 +671,67 @@ onUnmounted(() => { if (autoRefreshTimer) clearInterval(autoRefreshTimer) })
 
   <!-- Account create/edit modal -->
   <NModal v-model:show="showAccountModal" preset="card" :title="editingAccount ? '编辑账号' : '添加账号'" style="width: min(92vw, 520px)">
-    <NForm label-placement="left" label-width="90">
-      <NFormItem label="账号标签">
-        <NInput v-model:value="accountForm.label" placeholder="例如: 账号1、美区账号" />
-      </NFormItem>
-      <NFormItem label="API Token">
-        <NInput v-model:value="accountForm.token" type="textarea" :autosize="{ minRows: 2, maxRows: 4 }" :placeholder="editingAccount ? '不修改留空' : 'Runway API Token (JWT)'" />
-      </NFormItem>
-      <NFormItem label="Team ID">
-        <NInput v-model:value="accountForm.teamId" :placeholder="editingAccount ? accountForm.teamId || '不修改留空' : 'Runway Team ID'" />
-      </NFormItem>
-      <NFormItem label="代理地址">
-        <NInput v-model:value="accountForm.proxyUrl" placeholder="可选，如 socks5://user:pass@host:port 或 http://host:port" />
-      </NFormItem>
-      <NFormItem label="最大并发">
-        <NInputNumber v-model:value="accountForm.maxConcurrency" :min="1" :max="10" style="width: 100%" />
-      </NFormItem>
-      <NFormItem label="优先级">
-        <NInputNumber v-model:value="accountForm.priority" :min="0" :max="100" style="width: 100%" />
-        <template #feedback>数值越大优先使用</template>
-      </NFormItem>
-    </NForm>
-    <div class="flex justify-end gap-2">
-      <NButton @click="showAccountModal = false">取消</NButton>
-      <NButton type="primary" :loading="accountSaving" @click="saveAccount">保存</NButton>
-    </div>
+    <NTabs v-if="!editingAccount" v-model:value="accountModalTab" type="segment" style="margin-bottom: 12px">
+      <NTabPane name="login" tab="Runway登录" />
+      <NTabPane name="manual" tab="手动填写" />
+    </NTabs>
+
+    <!-- Login tab -->
+    <template v-if="!editingAccount && accountModalTab === 'login'">
+      <NForm label-placement="left" label-width="90">
+        <NFormItem label="账号标签">
+          <NInput v-model:value="accountForm.label" placeholder="可选，留空自动用用户名" />
+        </NFormItem>
+        <NFormItem label="邮箱">
+          <NInput v-model:value="loginForm.email" placeholder="Runway 登录邮箱" />
+        </NFormItem>
+        <NFormItem label="密码">
+          <NInput v-model:value="loginForm.password" type="password" show-password-on="click" placeholder="Runway 登录密码" />
+        </NFormItem>
+        <NFormItem label="代理地址">
+          <NInput v-model:value="loginForm.proxyUrl" placeholder="socks5://user:pass@host:port" />
+        </NFormItem>
+        <NFormItem label="最大并发">
+          <NInputNumber v-model:value="accountForm.maxConcurrency" :min="1" :max="10" style="width: 100%" />
+        </NFormItem>
+        <NFormItem label="优先级">
+          <NInputNumber v-model:value="accountForm.priority" :min="0" :max="100" style="width: 100%" />
+          <template #feedback>数值越大优先使用</template>
+        </NFormItem>
+      </NForm>
+      <div class="flex justify-end gap-2">
+        <NButton @click="showAccountModal = false">取消</NButton>
+        <NButton type="primary" :loading="loginLoading" @click="loginRunway">登录并添加</NButton>
+      </div>
+    </template>
+
+    <!-- Manual / Edit tab -->
+    <template v-else>
+      <NForm label-placement="left" label-width="90">
+        <NFormItem label="账号标签">
+          <NInput v-model:value="accountForm.label" placeholder="例如: 账号1、美区账号" />
+        </NFormItem>
+        <NFormItem label="API Token">
+          <NInput v-model:value="accountForm.token" type="textarea" :autosize="{ minRows: 2, maxRows: 4 }" :placeholder="editingAccount ? '不修改留空' : 'Runway API Token (JWT)'" />
+        </NFormItem>
+        <NFormItem label="Team ID">
+          <NInput v-model:value="accountForm.teamId" :placeholder="editingAccount ? accountForm.teamId || '不修改留空' : 'Runway Team ID'" />
+        </NFormItem>
+        <NFormItem label="代理地址">
+          <NInput v-model:value="accountForm.proxyUrl" placeholder="可选，如 socks5://user:pass@host:port 或 http://host:port" />
+        </NFormItem>
+        <NFormItem label="最大并发">
+          <NInputNumber v-model:value="accountForm.maxConcurrency" :min="1" :max="10" style="width: 100%" />
+        </NFormItem>
+        <NFormItem label="优先级">
+          <NInputNumber v-model:value="accountForm.priority" :min="0" :max="100" style="width: 100%" />
+          <template #feedback>数值越大优先使用</template>
+        </NFormItem>
+      </NForm>
+      <div class="flex justify-end gap-2">
+        <NButton @click="showAccountModal = false">取消</NButton>
+        <NButton type="primary" :loading="accountSaving" @click="saveAccount">保存</NButton>
+      </div>
+    </template>
   </NModal>
 </template>

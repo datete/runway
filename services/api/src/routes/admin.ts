@@ -9,6 +9,86 @@ const redis = new IORedis(process.env.REDIS_URL || "redis://localhost:6379", {
   maxRetriesPerRequest: null,
 });
 
+// CORS preflight for token-submit (browser extension needs this)
+router.options("/accounts/token-submit", (_req: Request, res: Response) => {
+  res.set({
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+  });
+  res.sendStatus(204);
+});
+
+// POST /api/runway/admin/accounts/token-submit — No auth, called from browser extension
+router.post("/accounts/token-submit", async (req: Request, res: Response) => {
+  res.set("Access-Control-Allow-Origin", "*");
+  // This endpoint is called from the browser extension, bypass JWT auth
+  // but still validate the request
+  const { token, label, proxyUrl, maxConcurrency = 2, priority = 0 } = req.body;
+  if (!token) return res.status(400).json({ error: "token 必填" });
+
+  try {
+    const fetchMod = await import("node-fetch");
+    const fetchFn = fetchMod.default;
+
+    // Build proxy agent
+    let agent: any;
+    if (proxyUrl) {
+      try {
+        if (proxyUrl.startsWith('socks')) {
+          const mod = require('socks-proxy-agent');
+          agent = new mod.SocksProxyAgent(proxyUrl);
+        } else {
+          const mod = require('https-proxy-agent');
+          agent = new mod.HttpsProxyAgent(proxyUrl);
+        }
+      } catch {}
+    }
+
+    // Get profile to find teamId
+    const profileRes = await fetchFn("https://api.runwayml.com/v1/profile", {
+      headers: { "Authorization": `Bearer ${token}`, "Accept": "application/json" },
+      ...(agent ? { agent } : {}),
+    });
+    if (!profileRes.ok) {
+      return res.status(400).json({ error: `Token 无效或已过期 (${profileRes.status})` });
+    }
+    const profileData = await profileRes.json() as any;
+    const user = profileData.user || {};
+    const teamId = String(user.id || "");
+    const username = user.username || user.email || "unknown";
+    const email = user.email || "";
+
+    if (!teamId) return res.status(500).json({ error: "无法获取 TeamID" });
+
+    // Check if account with this teamId already exists
+    const existing = await prisma.runwayAccount.findFirst({
+      where: { teamId },
+    });
+
+    const accountLabel = label || username || email.split("@")[0];
+    const tokenShort = token.slice(-12);
+
+    if (existing) {
+      // Update existing account with new token
+      await prisma.runwayAccount.update({
+        where: { id: existing.id },
+        data: { token, tokenShort, proxyUrl: proxyUrl || existing.proxyUrl, isActive: true },
+      });
+      res.json({ ok: true, action: "updated", id: existing.id, label: existing.label, teamId, username });
+    } else {
+      // Create new account
+      const account = await prisma.runwayAccount.create({
+        data: { label: accountLabel, token, tokenShort, teamId, proxyUrl: proxyUrl || null, maxConcurrency: Number(maxConcurrency), priority: Number(priority) },
+      });
+      res.json({ ok: true, action: "created", id: account.id, label: accountLabel, teamId, username });
+    }
+  } catch (e: any) {
+    res.status(500).json({ error: `处理失败: ${e.message}` });
+  }
+});
+
+// All routes below require admin auth
 router.use(adminMiddleware);
 
 // ============== ACCOUNT MANAGEMENT ==============
@@ -19,10 +99,32 @@ router.get("/accounts", async (_req: Request, res: Response) => {
     const accounts = await prisma.runwayAccount.findMany({
       orderBy: [{ priority: "desc" }, { createdAt: "asc" }],
     });
+    // Get recent jobs per account (max 5 per account, newest first)
+    const acctJobs = await prisma.runwayJob.findMany({
+      where: { accountId: { not: null } },
+      orderBy: { updatedAt: "desc" },
+      take: 50,
+      select: { id: true, accountId: true, userId: true, status: true, progress: true, prompt: true, createdAt: true, updatedAt: true, user: { select: { username: true } } },
+    });
+    const accountTasksMap: Record<string, Array<{ jobId: string; username: string; status: string; progress: number; prompt: string; createdAt: string }>> = {};
+    for (const j of acctJobs) {
+      if (!j.accountId) continue;
+      if (!accountTasksMap[j.accountId]) accountTasksMap[j.accountId] = [];
+      if (accountTasksMap[j.accountId].length >= 5) continue;
+      accountTasksMap[j.accountId].push({
+        jobId: j.id.slice(0, 8),
+        username: j.user?.username || "unknown",
+        status: j.status,
+        progress: j.progress || 0,
+        prompt: (j.prompt || "").slice(0, 30),
+        createdAt: j.createdAt.toISOString(),
+      });
+    }
     // Enrich with live concurrency from Redis
     const enriched = await Promise.all(accounts.map(async a => {
       const current = await redis.get(`account:concurrency:${a.id}`);
       const cooled = await redis.get(`account:cooldown:${a.id}`);
+      const tasks = accountTasksMap[a.id] || [];
       return {
         id: a.id,
         label: a.label,
@@ -41,6 +143,7 @@ router.get("/accounts", async (_req: Request, res: Response) => {
         tokenExpiresAt: a.tokenExpiresAt,
         createdAt: a.createdAt,
         updatedAt: a.updatedAt,
+        activeTasks: tasks,
       };
     }));
     res.json(enriched);
@@ -146,6 +249,71 @@ router.get("/accounts/:id/test", async (req: Request, res: Response) => {
 });
 
 // ============== USER MANAGEMENT ==============
+
+// POST /api/runway/admin/accounts/login — Login to Runway with email/password, get token + teamId
+router.post("/accounts/login", async (req: Request, res: Response) => {
+  const { email, password, proxyUrl } = req.body;
+  if (!email || !password) return res.status(400).json({ error: "邮箱和密码必填" });
+  try {
+    const fetchMod = await import("node-fetch");
+    const fetchFn = fetchMod.default;
+
+    // Build proxy agent if provided
+    let agent: any;
+    if (proxyUrl) {
+      try {
+        if (proxyUrl.startsWith('socks')) {
+          const mod = require('socks-proxy-agent');
+          agent = new mod.SocksProxyAgent(proxyUrl);
+        } else {
+          const mod = require('https-proxy-agent');
+          agent = new mod.HttpsProxyAgent(proxyUrl);
+        }
+      } catch {}
+    }
+
+    // Step 1: Login to Runway
+    const loginRes = await fetchFn("https://api.runwayml.com/v1/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Accept": "application/json" },
+      body: JSON.stringify({ email, password }),
+      ...(agent ? { agent } : {}),
+    });
+    if (!loginRes.ok) {
+      const err = await loginRes.json() as any;
+      return res.status(loginRes.status).json({ error: err.error || `登录失败 (${loginRes.status})` });
+    }
+    const loginData = await loginRes.json() as any;
+    const token = loginData.token;
+    if (!token) return res.status(500).json({ error: "登录成功但未返回token" });
+
+    // Step 2: Get profile to find teamId
+    const profileRes = await fetchFn("https://api.runwayml.com/v1/profile", {
+      headers: { "Authorization": `Bearer ${token}`, "Accept": "application/json" },
+      ...(agent ? { agent } : {}),
+    });
+    if (!profileRes.ok) {
+      return res.status(500).json({ error: "获取用户信息失败", token });
+    }
+    const profileData = await profileRes.json() as any;
+    const user = profileData.user || {};
+    const teamId = String(user.id || "");
+    const username = user.username || user.email || email;
+
+    if (!teamId) return res.status(500).json({ error: "无法获取TeamID", token });
+
+    res.json({
+      token,
+      teamId,
+      username,
+      email: user.email || email,
+      tokenShort: token.slice(-12),
+    });
+  } catch (e: any) {
+    res.status(500).json({ error: `登录异常: ${e.message}` });
+  }
+});
+
 
 // GET /api/runway/admin/users
 router.get("/users", async (_req: Request, res: Response) => {
@@ -326,8 +494,30 @@ router.get("/dashboard", async (_req: Request, res: Response) => {
     const accounts = await prisma.runwayAccount.findMany({
       orderBy: [{ priority: "desc" }, { createdAt: "asc" }],
     });
+    // Get recent jobs per account (active first, then recent completed, max 5 per account)
+    const accountRecentJobs = await prisma.runwayJob.findMany({
+      where: { accountId: { not: null } },
+      orderBy: { updatedAt: "desc" },
+      take: 50,
+      select: { id: true, accountId: true, userId: true, status: true, progress: true, prompt: true, createdAt: true, updatedAt: true, user: { select: { username: true } } },
+    });
+    const accountTasksMap: Record<string, Array<{ jobId: string; username: string; status: string; progress: number; prompt: string; createdAt: string }>> = {};
+    for (const j of accountRecentJobs) {
+      if (!j.accountId) continue;
+      if (!accountTasksMap[j.accountId]) accountTasksMap[j.accountId] = [];
+      if (accountTasksMap[j.accountId].length >= 5) continue;
+      accountTasksMap[j.accountId].push({
+        jobId: j.id.slice(0, 8),
+        username: j.user?.username || "unknown",
+        status: j.status,
+        progress: j.progress || 0,
+        prompt: (j.prompt || "").slice(0, 30),
+        createdAt: j.createdAt.toISOString(),
+      });
+    }
     const accountStats = await Promise.all(accounts.map(async a => {
       const current = await redis.get(`account:concurrency:${a.id}`);
+      const tasks = accountTasksMap[a.id] || [];
       return {
         id: a.id,
         label: a.label,
@@ -336,6 +526,7 @@ router.get("/dashboard", async (_req: Request, res: Response) => {
         maxConcurrency: a.maxConcurrency,
         currentConcurrency: current ? parseInt(current, 10) : 0,
         totalGenerated: a.totalGenerated,
+        activeTasks: tasks,
       };
     }));
 

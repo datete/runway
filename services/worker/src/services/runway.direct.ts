@@ -104,6 +104,53 @@ export class RunwayDirectClient implements RunwayProvider {
     return runwayUrl;
   }
 
+  /** Upload any file (image or video) to Runway S3, return url and assetId */
+  async uploadFileWithAsset(sourceUrl: string): Promise<{ url: string; assetId: string }> {
+    // Convert relative /img/ paths to absolute localhost URL
+    if (sourceUrl.startsWith("/")) sourceUrl = `http://localhost:5102${sourceUrl}`;
+    console.log(`[runway:upload:video] source: ${sourceUrl}`);
+
+    const imgRes = await fetch(sourceUrl);
+    if (!imgRes.ok) throw new Error(`Failed to download file ${imgRes.status}: ${sourceUrl}`);
+    const buf = Buffer.from(await imgRes.arrayBuffer());
+    const ct = imgRes.headers.get("content-type") || "video/mp4";
+    const ext = ct.includes("mp4") || ct.includes("video") ? "mp4" : "mp4";
+    const filename = `ref_${Date.now()}.${ext}`;
+    console.log(`[runway:upload:video] downloaded ${buf.length} bytes, type=${ct}`);
+
+    const proxyOpts = await this.getFetchOptions();
+
+    const initRes = await fetch(`${API_BASE}/v1/uploads`, {
+      method: "POST",
+      headers: this.headers,
+      body: JSON.stringify({ filename, numberOfParts: 1, type: "DATASET", asTeamId: this.teamId }),
+      ...proxyOpts,
+    });
+    if (!initRes.ok) throw new Error(`Upload init ${initRes.status}: ${await initRes.text()}`);
+    const init = await initRes.json() as any;
+    const uploadId: string = init.id;
+    const s3Url: string = init.uploadUrls[0];
+
+    const putRes = await fetch(s3Url, {
+      method: "PUT",
+      headers: { "Content-Type": ct },
+      body: buf,
+    });
+    if (!putRes.ok) throw new Error(`S3 PUT ${putRes.status}`);
+    const etag = (putRes.headers.get("ETag") || "").replace(/"/g, "");
+
+    const completeRes = await fetch(`${API_BASE}/v1/uploads/${uploadId}/complete`, {
+      method: "POST",
+      headers: this.headers,
+      body: JSON.stringify({ parts: [{ PartNumber: 1, ETag: etag }], asTeamId: this.teamId }),
+      ...proxyOpts,
+    });
+    if (!completeRes.ok) throw new Error(`Upload complete ${completeRes.status}: ${await completeRes.text()}`);
+    const complete = await completeRes.json() as any;
+    console.log(`[runway:upload:video] complete, assetId=${uploadId}, url=${(complete.url || "").split("?")[0]}`);
+    return { url: complete.url, assetId: uploadId };
+  }
+
   /** Upload any file (image or video) to Runway S3 */
   async uploadFile(sourceUrl: string): Promise<string> {
     return this.uploadImage(sourceUrl);
@@ -123,7 +170,9 @@ export class RunwayDirectClient implements RunwayProvider {
   }
 
   async createTask(input: CreateRunwayTaskInput): Promise<{ remoteTaskId: string }> {
-    console.log(`[runway:task] creating kling_3_0_standard`);
+    const isPro = input.quality === "pro";
+    const taskType = isPro ? "kling_3_0_pro" : "kling_3_0_standard";
+    console.log(`[runway:task] creating ${taskType} (quality=${input.quality || "std"})`);
     console.log(`[runway:task] prompt: "${input.prompt.slice(0, 80)}"`);
     console.log(`[runway:task] duration=${input.duration || 5}s, exploreMode=${input.exploreMode ?? true}`);
 
@@ -142,27 +191,34 @@ export class RunwayDirectClient implements RunwayProvider {
     }
 
     // Upload reference video for pro mode
-    let referenceVideo: string | undefined;
+    let referenceVideoAsset: { url: string; assetId: string } | undefined;
     if (input.videoUrl) {
       console.log(`[runway:task] uploading reference video: ${input.videoUrl}`);
-      referenceVideo = await this.uploadFile(input.videoUrl);
-      console.log(`[runway:task] reference video uploaded`);
+      referenceVideoAsset = await this.uploadFileWithAsset(input.videoUrl);
+      console.log(`[runway:task] reference video uploaded, assetId=${referenceVideoAsset.assetId}`);
     }
 
+    // Use resolution from frontend directly; fallback to defaults if missing
+    const defaultRes = isPro ? "1080x1920" : "720x1280";
+    const stdToProRes: Record<string, string> = { "720x1280": "1080x1920", "1280x720": "1920x1080", "960x960": "1440x1440" };
+    const effectiveResolution = input.resolution
+      ? (isPro && stdToProRes[input.resolution] ? stdToProRes[input.resolution] : input.resolution)
+      : defaultRes;
+
     const body: any = {
-      taskType: "kling_3_0_standard",
+      taskType,
       options: {
         name:           input.prompt.slice(0, 100),
-        mode:           input.quality || "std",
+        mode:           isPro ? "std" : (input.quality || "std"),
         textPrompt:     input.prompt,
         duration:       input.duration || 5,
         cfgScale:       input.cfgScale ?? 0.5,
-        ...(input.resolution && { resolution: input.resolution }),
+        ...((referenceImages.length === 0 && !referenceVideoAsset) && { resolution: effectiveResolution }),
         providerSettings: { sound: input.sound !== false },
         exploreMode:    input.exploreMode ?? false,
         creationSource: "tool-mode",
         ...(referenceImages.length > 0 && { referenceImages }),
-        ...(referenceVideo && { referenceVideo }),
+        ...(referenceVideoAsset && { referenceVideos: [{ assetId: referenceVideoAsset.assetId, url: referenceVideoAsset.url, durationSeconds: input.duration || 5 }] }),
       },
       asTeamId:  this.teamId,
       sessionId: uuidv4(),

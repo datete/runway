@@ -27,6 +27,7 @@ interface RunwayJob {
   queuePosition: number | null
   queueTotal: number | null
   progress: number | null
+  username?: string | null
 }
 
 type TabKey = 'all' | 'queued' | 'processing' | 'completed' | 'failed'
@@ -370,7 +371,7 @@ onUnmounted(() => stopPolling())
 
       <NEmpty v-if="filteredJobs.length === 0" class="my-10" description="暂无任务数据" />
 
-      <div v-else class="space-y-3">
+      <div v-else class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <div
           v-for="job in paginatedJobs"
           :key="job.id"
@@ -387,12 +388,12 @@ onUnmounted(() => stopPolling())
           </div>
 
           <div v-if="job.resultUrl" class="bg-black">
-            <video controls loop preload="metadata" class="max-h-72 w-full object-contain" :src="job.resultUrl" />
+            <video controls loop preload="metadata" class="aspect-video w-full object-contain" :src="job.resultUrl" />
           </div>
 
           <div
             v-else-if="isActive(job.status)"
-            class="relative h-40 w-full overflow-hidden bg-slate-100 dark:bg-slate-900"
+            class="relative aspect-video w-full overflow-hidden bg-slate-100 dark:bg-slate-900"
           >
             <img
               v-if="getFirstImage(job)"
@@ -414,7 +415,7 @@ onUnmounted(() => stopPolling())
             <p v-if="job.remark" class="mb-1 text-xs font-medium text-cyan-600 dark:text-cyan-400"># {{ job.remark }}</p>
 
             <div class="mb-2 flex items-start justify-between gap-2">
-              <p class="flex-1 whitespace-pre-wrap break-words text-sm text-slate-700 dark:text-slate-200">
+              <p class="flex-1 break-words text-sm text-slate-700 dark:text-slate-200 line-clamp-3">
                 {{ job.prompt }}
               </p>
               <NTag :type="statusType[job.status] || 'default'" size="small" round>
@@ -423,6 +424,7 @@ onUnmounted(() => stopPolling())
             </div>
 
             <div class="mb-2 flex flex-wrap items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
+              <span v-if="job.username" class="rounded bg-cyan-50 px-1.5 py-0.5 font-medium text-cyan-600 dark:bg-cyan-900/30 dark:text-cyan-400">{{ job.username }}</span>
               <span>{{ formatTime(job.createdAt) }}</span>
               <span class="rounded bg-slate-100 px-1.5 py-0.5 dark:bg-slate-800">
                 {{ modeLabel[job.mode] || job.mode }}

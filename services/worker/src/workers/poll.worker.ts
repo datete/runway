@@ -89,7 +89,7 @@ new Worker('runway-poll', async (job: Job) => {
     const localUrl = result.resultUrl ? await cacheVideo(result.resultUrl, jobId) : null;
     await prisma.runwayJob.update({
       where: { id: jobId },
-      data: { status: 'completed', resultUrl: localUrl || result.resultUrl, thumbnailUrl: result.thumbnailUrl, finishedAt: new Date(), progress: 1 } as any,
+      data: { status: 'completed', resultUrl: localUrl || result.resultUrl, thumbnailUrl: result.thumbnailUrl, finishedAt: new Date(), progress: 1, errorMessage: null } as any,
     });
     if (accountId) {
       await accountPool.release(accountId, jobId);

@@ -18,6 +18,10 @@ function setupPlugins(env: ImportMetaEnv): PluginOption[] {
     }),
     VitePWA({ // env.VITE_GLOB_APP_PWA === 'true' &&
       injectRegister: 'auto',
+      workbox: {
+        skipWaiting: true,
+        clientsClaim: true,
+      },
       manifest: {
         name: 'chatGPT-MJ',
         short_name: 'chatGPT-MJ',

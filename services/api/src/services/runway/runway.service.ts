@@ -109,7 +109,12 @@ export class RunwayService {
 
   async listJobs(userId?: string, role?: string) {
     const where = role === "admin" ? {} : { userId: userId ?? null };
-    return prisma.runwayJob.findMany({ where, orderBy: { createdAt: "desc" }, take: 100 });
+    const include = role === "admin" ? { user: { select: { username: true } } } : undefined;
+    const jobs = await prisma.runwayJob.findMany({ where, orderBy: { createdAt: "desc" }, take: 100, include });
+    if (role === "admin") {
+      return jobs.map((j: any) => ({ ...j, username: j.user?.username || null, user: undefined }));
+    }
+    return jobs;
   }
 
   async retryJob(id: string, userId?: string, role?: string) {

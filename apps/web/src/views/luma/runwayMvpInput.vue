@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { NAlert, NButton, NInput, NSpin, NSwitch, NTag, NSlider, NTooltip, useMessage } from 'naive-ui'
 import { SvgIcon } from '@/components/common'
 import { homeStore } from '@/store'
@@ -33,7 +33,7 @@ const remark = ref('')
 const images = ref<UploadedImage[]>([])
 const exploreMode = ref(true)
 const duration = ref(5)
-const resolution = ref('1080x1920')
+const resolution = ref('720x1280')
 const quality = ref('std')
 const sound = ref(true)
 const cfgScale = ref(0.5)
@@ -41,10 +41,27 @@ const cfgScale = ref(0.5)
 // Pro mode: reference video
 const refVideo = ref<{ preview: string; url: string; uploading: boolean } | null>(null)
 
-const resolutionOptions = [
-  { value: '720x1280', label: '720x1280 竖屏' },
-  { value: '1080x1920', label: '1080x1920 竖屏高清' },
+const stdResolutions = [
+  { value: '720x1280', label: '9:16', desc: '竖屏 720p', iconW: 20, iconH: 34 },
+  { value: '1280x720', label: '16:9', desc: '横屏 720p', iconW: 34, iconH: 20 },
+  { value: '960x960', label: '1:1', desc: '方形 960p', iconW: 26, iconH: 26 },
 ]
+const proResolutions = [
+  { value: '1080x1920', label: '9:16', desc: '竖屏 1080p', iconW: 20, iconH: 34 },
+  { value: '1920x1080', label: '16:9', desc: '横屏 1080p', iconW: 34, iconH: 20 },
+  { value: '1440x1440', label: '1:1', desc: '方形 1440p', iconW: 26, iconH: 26 },
+]
+const resolutionOptions = computed(() => quality.value === 'pro' ? proResolutions : stdResolutions)
+
+const stdToProMap: Record<string, string> = { '720x1280': '1080x1920', '1280x720': '1920x1080', '960x960': '1440x1440' }
+const proToStdMap: Record<string, string> = { '1080x1920': '720x1280', '1920x1080': '1280x720', '1440x1440': '960x960' }
+watch(quality, (newQ) => {
+  if (newQ === 'pro') {
+    resolution.value = stdToProMap[resolution.value] || '1080x1920'
+  } else {
+    resolution.value = proToStdMap[resolution.value] || '720x1280'
+  }
+})
 
 const durationHints: Record<number, string> = {
   5: '适合产品展示、短镜头动作，生成速度最快',
@@ -52,10 +69,7 @@ const durationHints: Record<number, string> = {
   15: '适合复杂场景、长镜头叙事，生成时间较长',
 }
 
-const resolutionHints: Record<string, string> = {
-  '720x1280': '竖屏标清 — 9:16 比例，生成速度更快',
-  '1080x1920': '竖屏高清 — 9:16 比例，画面更清晰，推荐使用',
-}
+
 
 const qualityHints: Record<string, string> = {
   std: '标准模式 — 基于参考图片生成视频，适合大多数场景，消耗 1 个配额',
@@ -168,6 +182,16 @@ const handleFileSelect = async (event: Event) => {
         return
       }
       updateImage(id, { preview: base64 })
+      // Check image dimensions
+      const img = new Image()
+      img.src = base64
+      img.onload = () => {
+        if (img.width < 300 || img.height < 300) {
+          message.error(`图片 ${file.name} 尺寸太小(${img.width}x${img.height})，Runway要求至少300x300px`, { duration: 6000 })
+        } else if (img.width > img.height) {
+          message.warning(`图片 ${file.name} 为横屏(${img.width}x${img.height})，建议上传竖屏(9:16)图片以获得最佳效果`, { duration: 5000 })
+        }
+      }
       try {
         const uploadRes = await fetch('/api/runway/upload', {
           method: 'POST',
@@ -330,27 +354,34 @@ onUnmounted(() => {
       <label class="mb-2 block text-xs font-medium text-slate-600 dark:text-slate-300">生成设置</label>
       <div class="space-y-3">
 
-        <!-- 分辨率 -->
+        <!-- 画面比例 -->
         <div>
-          <div class="mb-1 flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
-            <span>分辨率</span>
+          <div class="mb-2 flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
+            <span>画面比例</span>
           </div>
-          <div class="flex gap-2">
+          <div class="grid grid-cols-3 gap-2">
             <button
               v-for="opt in resolutionOptions"
               :key="opt.value"
-              class="rounded-lg border px-3 py-1.5 text-xs font-medium transition"
+              class="group flex flex-col items-center gap-2 rounded-xl border px-3 py-3 transition-all duration-200 hover:-translate-y-0.5"
               :class="resolution === opt.value
-                ? 'border-blue-500 bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400'
-                : 'border-slate-200 text-slate-600 hover:border-slate-300 dark:border-slate-700 dark:text-slate-400'"
+                ? 'border-cyan-500 bg-gradient-to-b from-white to-cyan-50 shadow-md shadow-cyan-500/20 dark:from-slate-800 dark:to-cyan-950/40 dark:shadow-cyan-500/10'
+                : 'border-slate-200 bg-white hover:border-slate-300 hover:shadow-sm dark:border-slate-700 dark:bg-slate-800/60 dark:hover:border-slate-600'"
               @click="resolution = opt.value"
             >
-              {{ opt.label }}
+              <div
+                class="rounded transition-all duration-200"
+                :class="resolution === opt.value
+                  ? 'border-2 border-cyan-500 bg-gradient-to-br from-cyan-100 to-cyan-200 dark:from-cyan-800/60 dark:to-cyan-700/40'
+                  : 'border-2 border-slate-300 bg-gradient-to-br from-slate-100 to-slate-200 group-hover:border-slate-400 dark:border-slate-600 dark:from-slate-700 dark:to-slate-600'"
+                :style="{ width: opt.iconW + 'px', height: opt.iconH + 'px' }"
+              />
+              <div class="text-center">
+                <p class="text-xs font-bold" :class="resolution === opt.value ? 'text-cyan-600 dark:text-cyan-400' : 'text-slate-700 dark:text-slate-300'">{{ opt.label }}</p>
+                <p class="text-[10px]" :class="resolution === opt.value ? 'text-cyan-500/80 dark:text-cyan-400/60' : 'text-slate-400 dark:text-slate-500'">{{ opt.desc }}</p>
+              </div>
             </button>
           </div>
-          <Transition name="hint-fade">
-            <p v-if="resolutionHints[resolution]" class="mt-1 text-[11px] text-slate-400 dark:text-slate-500">{{ resolutionHints[resolution] }}</p>
-          </Transition>
         </div>
 
         <!-- 生成模式 -->
@@ -412,7 +443,7 @@ onUnmounted(() => {
                 <input type="file" accept="video/*" class="hidden" @change="handleVideoSelect" />
               </label>
             </div>
-            <p class="mt-1 text-[11px] text-amber-500 dark:text-amber-400">专业模式必须上传参考视频，AI 会参考视频运动轨迹生成新视频</p>
+            <p class="mt-1 text-[11px] text-amber-500 dark:text-amber-400">专业模式必须上传参考视频，AI 会 1:1 复刻视频中的动作和运动轨迹，分辨率自动升级至 1080p</p>
           </div>
         </Transition>
 
@@ -460,14 +491,6 @@ onUnmounted(() => {
           <NSwitch v-model:value="sound" size="small" />
         </div>
 
-        <!-- 探索模式 -->
-        <div class="flex items-center justify-between">
-          <div>
-            <span class="text-xs text-slate-600 dark:text-slate-300">探索模式</span>
-
-          </div>
-          <NSwitch v-model:value="exploreMode" size="small" />
-        </div>
       </div>
     </div>
 

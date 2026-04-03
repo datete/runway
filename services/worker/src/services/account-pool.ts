@@ -22,6 +22,21 @@ export class AccountPool {
   private cachedAccounts: AccountEntry[] = [];
   private cacheExpiry = 0;
 
+  // Lua: atomic INCR-if-below-max, returns current count or -1 if full
+  private readonly ACQUIRE_LUA = `
+    local key = KEYS[1]
+    local max = tonumber(ARGV[1])
+    local ttl = tonumber(ARGV[2])
+    local cur = redis.call('INCR', key)
+    if cur <= max then
+      redis.call('EXPIRE', key, ttl)
+      return cur
+    else
+      redis.call('DECR', key)
+      return -1
+    end
+  `;
+
   constructor(redis: IORedis, prisma: PrismaClient) {
     this.redis = redis;
     this.prisma = prisma;
@@ -76,31 +91,25 @@ export class AccountPool {
     const now = Date.now();
 
     for (const account of accounts) {
-      // Check token expiry
       if (account.tokenExpiresAt && account.tokenExpiresAt.getTime() < now) {
         console.warn(`[account-pool] ${account.label} token expired, skipping`);
         continue;
       }
 
-      // Atomic concurrency check: INCR and check
+      // Atomic: INCR only if below max (Lua script, no race condition)
       const key = `account:concurrency:${account.id}`;
-      const current = await this.redis.incr(key);
+      const result = await this.redis.eval(
+        this.ACQUIRE_LUA, 1, key,
+        String(account.maxConcurrency), String(CONCURRENCY_TTL)
+      ) as number;
 
-      if (current <= account.maxConcurrency) {
-        // Set TTL on concurrency key as safety net
-        await this.redis.expire(key, CONCURRENCY_TTL);
-        console.log(`[account-pool] acquired ${account.label} (${current}/${account.maxConcurrency})`);
-
-        // Update lastUsedAt in DB (non-blocking)
+      if (result > 0) {
+        console.log(`[account-pool] acquired ${account.label} (${result}/${account.maxConcurrency})`);
         this.prisma.runwayAccount.update({
           where: { id: account.id },
           data: { lastUsedAt: new Date() },
         }).catch(() => {});
-
         return account;
-      } else {
-        // Over limit, decrement back
-        await this.redis.decr(key);
       }
     }
 

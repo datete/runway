@@ -84,7 +84,7 @@ async function trySubmitOne(): Promise<SubmitResult> {
       imageUrls,
       duration:    dbJob.duration || 5,
       exploreMode: dbJob.exploreMode ?? true,
-      modelName:   "kling_3_0_standard",
+      modelName:   dbJob.quality === "pro" ? "kling_3_0_pro" : "kling_3_0_standard",
       resolution:  dbJob.resolution,
       quality:     dbJob.quality,
       cfgScale:    dbJob.cfgScale,
@@ -101,7 +101,7 @@ async function trySubmitOne(): Promise<SubmitResult> {
     await pollQueue.add("poll", {
       jobId, remoteTaskId,
       accountId: account.id,
-    }, { jobId: `poll-${jobId}`, delay: 15000 });
+    }, { jobId: `poll-${jobId}-${Date.now()}`, delay: 15000 });
 
     return "submitted";
 
