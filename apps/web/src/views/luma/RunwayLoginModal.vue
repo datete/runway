@@ -71,7 +71,7 @@ watch(
       <div
         class="mb-5 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 px-4 py-4 text-white shadow-lg shadow-cyan-500/20 dark:from-cyan-600 dark:to-blue-700"
       >
-        <p class="text-lg font-semibold">Runway 工作台</p>
+        <p class="text-lg font-semibold">视频工作台</p>
         <p class="mt-1 text-xs text-cyan-50/90">请登录后继续创建视频任务</p>
       </div>
 

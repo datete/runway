@@ -1,3 +1,4 @@
+import { PrismaClient } from "@prisma/client";
 import IORedis from "ioredis";
 import { Router } from "express";
 import { RunwayController } from "../controllers/runway.controller";
@@ -6,6 +7,7 @@ import fs from "fs";
 import path from "path";
 
 const ctrl = new RunwayController();
+const _prisma_shared = new PrismaClient();
 export const runwayRouter = Router();
 
 // Jobs routes — require auth
@@ -91,8 +93,8 @@ runwayRouter.get("/token-status", authMiddleware, async (req, res) => {
     await _redis.connect().catch(() => {});
     const tokens = parseTokensForStatus();
     const now = Math.floor(Date.now() / 1000);
-    const { PrismaClient } = await import("@prisma/client");
-    const _prisma = new PrismaClient();
+    
+    const _prisma = _prisma_shared;
 
     // Per-user active task count and concurrency limit
     const userId = req.user?.id;
@@ -134,7 +136,6 @@ runwayRouter.get("/token-status", authMiddleware, async (req, res) => {
       totalUsed = await _prisma.runwayJob.count({ where: { userId } }).catch(() => 0);
     }
 
-    await _prisma.$disconnect().catch(() => {});
 
     res.json({
       tokens: result, count: result.length,

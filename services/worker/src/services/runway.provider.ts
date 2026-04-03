@@ -6,7 +6,11 @@ export interface CreateRunwayTaskInput {
   duration?: number;          // seconds: 5 or 10
   exploreMode?: boolean;
   modelName?: string;
-  resolution?: string;  // e.g. "720p", "1080p"
+  resolution?: string;
+  quality?: string;     // "std" or "pro"
+  cfgScale?: number;    // 0-1, prompt relevance
+  sound?: boolean;      // enable audio
+  videoUrl?: string;      // pro mode: reference video URL
 }
 
 export interface RunwayTaskStatus {

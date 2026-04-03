@@ -5,6 +5,8 @@ import { PrismaClient } from "@prisma/client";
 const svc = new RunwayService();
 const prisma = new PrismaClient();
 
+const ACTIVE_STATUSES = ["pending", "queued", "submitted", "processing"];
+
 async function logAction(userId: string | undefined, action: string, detail?: string, ip?: string) {
   if (!userId) return;
   await prisma.userLog.create({ data: { userId, action, detail, ip } }).catch(() => {});
@@ -13,10 +15,10 @@ async function logAction(userId: string | undefined, action: string, detail?: st
 export class RunwayController {
   async createJob(req: Request, res: Response) {
     try {
-      const { prompt, mode, imageUrl, imageUrls, duration, exploreMode, model, remark } = req.body;
+      const { prompt, mode, imageUrl, imageUrls, duration, exploreMode, model, remark, resolution, quality, cfgScale, sound, videoUrl } = req.body;
       if (!prompt || !mode) return res.status(400).json({ error: "prompt and mode required" });
       const userId = req.user?.id;
-      const job = await svc.createJob({ prompt, mode, imageUrl, imageUrls, duration, exploreMode, model, remark, userId });
+      const job = await svc.createJob({ prompt, mode, imageUrl, imageUrls, duration, exploreMode, model, remark, userId, resolution, quality, cfgScale, sound, videoUrl });
       logAction(userId, "create_job", `jobId=${job.id} mode=${mode}`, req.socket.remoteAddress);
       res.status(201).json(job);
     } catch (e: any) {
@@ -37,7 +39,26 @@ export class RunwayController {
   async listJobs(req: Request, res: Response) {
     try {
       const jobs = await svc.listJobs(req.user?.id, req.user?.role);
-      res.json(jobs);
+
+      // Calculate global queue positions for active jobs
+      const globalQueue = await prisma.runwayJob.findMany({
+        where: { status: { in: ACTIVE_STATUSES } },
+        orderBy: { createdAt: "asc" },
+        select: { id: true, status: true, createdAt: true },
+      });
+
+      const positionMap = new Map<string, number>();
+      globalQueue.forEach((qj, idx) => {
+        positionMap.set(qj.id, idx + 1);
+      });
+
+      const enriched = jobs.map((job: any) => ({
+        ...job,
+        queuePosition: ACTIVE_STATUSES.includes(job.status) ? (positionMap.get(job.id) || null) : null,
+        queueTotal: globalQueue.length,
+      }));
+
+      res.json(enriched);
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }

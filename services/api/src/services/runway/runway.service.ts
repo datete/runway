@@ -14,27 +14,25 @@ interface CreateJobInput {
   model?: string;
   remark?: string;
   userId?: string;
+  resolution?: string;
+  quality?: string;
+  cfgScale?: number;
+  sound?: boolean;
+  videoUrl?: string;
 }
 
 const ACTIVE_STATUSES = ["pending", "queued", "submitted", "processing"];
-const SYSTEM_MAX_CONCURRENCY = 2;
 
 export class RunwayService {
   async createJob(input: CreateJobInput) {
-    // Check per-user concurrency and quota limits
+    // Only check hard quota limits — concurrency is enforced by the worker
     if (input.userId) {
       const user = await prisma.user.findUnique({
         where: { id: input.userId },
-        select: { maxConcurrency: true, dailyQuota: true, totalQuota: true },
+        select: { dailyQuota: true, totalQuota: true },
       });
       if (user) {
-        const maxConc = user.maxConcurrency ?? SYSTEM_MAX_CONCURRENCY;
-        const activeCount = await prisma.runwayJob.count({
-          where: { userId: input.userId, status: { in: ACTIVE_STATUSES } },
-        });
-        if (activeCount >= maxConc) {
-          throw new Error(`并发限制：当前已有 ${activeCount} 个任务在进行中（上限 ${maxConc}）`);
-        }
+        // Daily quota — hard limit
         if (user.dailyQuota !== null) {
           const todayStart = new Date();
           todayStart.setHours(0, 0, 0, 0);
@@ -45,6 +43,7 @@ export class RunwayService {
             throw new Error(`今日配额已用完（上限 ${user.dailyQuota} 个）`);
           }
         }
+        // Total quota — hard limit
         if (user.totalQuota !== null) {
           const totalCount = await prisma.runwayJob.count({
             where: { userId: input.userId },
@@ -56,6 +55,7 @@ export class RunwayService {
       }
     }
 
+    // Always accept the job — it enters the global queue
     const job = await prisma.runwayJob.create({
       data: {
         id: uuidv4(),
@@ -72,11 +72,22 @@ export class RunwayService {
         remark: input.remark,
       } as any,
     });
+
     const existing = await submitQueue.getJob(`submit-${job.id}`);
     if (existing) await existing.remove().catch(() => {});
-    await submitQueue.add("submit", { jobId: job.id, duration: input.duration }, { jobId: `submit-${job.id}`, attempts: 1000, backoff: { type: "custom" } });
+    await submitQueue.add(
+      "submit",
+      { jobId: job.id, duration: input.duration, resolution: input.resolution, quality: input.quality, cfgScale: input.cfgScale, sound: input.sound, videoUrl: input.videoUrl },
+      { jobId: `submit-${job.id}`, attempts: 60, backoff: { type: "custom" } },
+    );
     await prisma.runwayJob.update({ where: { id: job.id }, data: { status: "queued" } });
-    return job;
+
+    // Calculate queue position for immediate feedback
+    const queueAhead = await prisma.runwayJob.count({
+      where: { status: { in: ACTIVE_STATUSES }, createdAt: { lt: job.createdAt } },
+    });
+
+    return { ...job, queuePosition: queueAhead + 1 };
   }
 
   async getJob(id: string, userId?: string, role?: string) {
@@ -101,7 +112,11 @@ export class RunwayService {
     });
     const existing = await submitQueue.getJob(`submit-${id}`);
     if (existing) await existing.remove().catch(() => {});
-    await submitQueue.add("submit", { jobId: id, duration: (job as any).duration || 5 }, { jobId: `submit-${id}`, attempts: 1000, backoff: { type: "custom" } });
+    await submitQueue.add(
+      "submit",
+      { jobId: id, duration: (job as any).duration || 5 },
+      { jobId: `submit-${id}`, attempts: 60, backoff: { type: "custom" } },
+    );
     return prisma.runwayJob.findUnique({ where: { id } });
   }
 

@@ -55,6 +55,7 @@ const adminJobsTotal = ref(0)
 const jobsLoading = ref(false)
 const jobsPage = ref(1)
 const jobsStatus = ref('')
+const jobsUser = ref('')
 
 const logs = ref<AdminLog[]>([])
 const logsTotal = ref(0)
@@ -63,6 +64,10 @@ const logsPage = ref(1)
 const logsAction = ref('')
 
 /* ── Options ── */
+const userFilterOptions = computed(() => [
+  { label: '全部用户', value: '' },
+  ...users.value.map(u => ({ label: u.username, value: u.id })),
+])
 const roleOptions = [{ label: '普���用户', value: 'user' }, { label: '管理员', value: 'admin' }]
 const statusOptions = [{ label: '全部状态', value: '' }, { label: '等待中', value: 'pending' }, { label: '排队中', value: 'queued' }, { label: '处理中', value: 'processing' }, { label: '已完成', value: 'completed' }, { label: '失败', value: 'failed' }]
 const logActionOptions = [{ label: '全部行为', value: '' }, { label: '登录', value: 'login' }, { label: '创建任务', value: 'create_job' }, { label: '删���任务', value: 'delete_job' }, { label: '重试任务', value: 'retry_job' }]
@@ -108,6 +113,7 @@ const fetchAdminJobs = async () => {
   try {
     const params = new URLSearchParams({ page: String(jobsPage.value), limit: '20' })
     if (jobsStatus.value) params.set('status', jobsStatus.value)
+    if (jobsUser.value) params.set('userId', jobsUser.value)
     const res = await fetch(`/api/runway/admin/jobs?${params}`, { headers: headers() })
     if (!res.ok) throw new Error('加载失败')
     const data = await res.json()
@@ -333,6 +339,7 @@ watch(logsPage, () => fetchLogs())
             <!-- Jobs Tab -->
             <NTabPane name="jobs" tab="任务监控">
               <div class="mb-3 flex flex-wrap gap-2">
+                <NSelect v-model:value="jobsUser" :options="userFilterOptions" size="small" style="width: 140px" @update:value="jobsPage = 1; fetchAdminJobs()" />
                 <NSelect v-model:value="jobsStatus" :options="statusOptions" size="small" style="width: 140px" @update:value="jobsPage = 1; fetchAdminJobs()" />
                 <NButton size="small" secondary @click="fetchAdminJobs">刷新</NButton>
               </div>

@@ -40,6 +40,8 @@ export class RunwayDirectClient implements RunwayProvider {
     const ext = ct.includes("jpeg") || ct.includes("jpg") ? "jpg"
               : ct.includes("webp") ? "webp"
               : ct.includes("gif")  ? "gif"
+              : ct.includes("mp4")  ? "mp4"
+              : ct.includes("video") ? "mp4"
               : "png";
     const filename = `ref_${Date.now()}.${ext}`;
     console.log(`[runway:upload] downloaded ${imgBuf.length} bytes, type=${ct}, file=${filename}`);
@@ -79,6 +81,11 @@ export class RunwayDirectClient implements RunwayProvider {
     return runwayUrl;
   }
 
+  /** Upload any file (image or video) to Runway S3 */
+  async uploadFile(sourceUrl: string): Promise<string> {
+    return this.uploadImage(sourceUrl);
+  }
+
   /** Upload multiple images and return referenceImages array for task creation */
   private async uploadReferenceImages(urls: string[]): Promise<Array<{ url: string }>> {
     console.log(`[runway] uploading ${urls.length} reference image(s)`);
@@ -111,19 +118,28 @@ export class RunwayDirectClient implements RunwayProvider {
       referenceImages = await this.uploadReferenceImages(sourceUrls);
     }
 
+    // Upload reference video for pro mode
+    let referenceVideo: string | undefined;
+    if (input.videoUrl) {
+      console.log(`[runway:task] uploading reference video: ${input.videoUrl}`);
+      referenceVideo = await this.uploadFile(input.videoUrl);
+      console.log(`[runway:task] reference video uploaded`);
+    }
+
     const body: any = {
       taskType: "kling_3_0_standard",
       options: {
         name:           input.prompt.slice(0, 100),
-        mode:           "std",
+        mode:           input.quality || "std",
         textPrompt:     input.prompt,
         duration:       input.duration || 5,
-        cfgScale:       0.5,
-        ...(referenceImages.length === 0 && { resolution: input.resolution || "1280x720" }),
-        providerSettings: { sound: false },
+        cfgScale:       input.cfgScale ?? 0.5,
+        ...(input.resolution && { resolution: input.resolution }),
+        providerSettings: { sound: input.sound !== false },
         exploreMode:    input.exploreMode ?? false,
         creationSource: "tool-mode",
         ...(referenceImages.length > 0 && { referenceImages }),
+        ...(referenceVideo && { referenceVideo }),
       },
       asTeamId:  this.teamId,
       sessionId: uuidv4(),

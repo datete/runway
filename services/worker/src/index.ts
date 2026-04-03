@@ -63,7 +63,7 @@ async function recoverStuckJobs() {
         data: { status: "pending", errorMessage: null },
       });
       await submitQueue.add("submit", { jobId: job.id, duration: j.duration || 5 }, {
-        jobId: `submit-${job.id}`, delay: 2000, attempts: 1000, backoff: { type: "custom" },
+        jobId: `submit-${job.id}`, delay: 2000, attempts: 60, backoff: { type: "custom" },
       });
       console.log(`[startup-recovery] ${job.id.slice(0,8)} → submit queue`);
     }

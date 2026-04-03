@@ -12,7 +12,7 @@ const PORT = Number(process.env.API_PORT) || 5102;
 const WEB_BASE = 'http://127.0.0.1:3002';
 
 app.use(cors());
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '50mb' }));
 
 // Request logger
 app.use((req, _res, next) => {

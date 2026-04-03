@@ -14,6 +14,11 @@ const pollQueue = new Queue('runway-poll', { connection });
 const submitQueue = new Queue('runway-submit', { connection });
 const client = new RunwayDirectClient();
 
+// Max auto-retries when remote task fails (prevents infinite loop)
+const MAX_REMOTE_RETRIES = 3;
+// Max BullMQ attempts for submit queue jobs created by auto-retry
+const MAX_SUBMIT_ATTEMPTS = 60;
+
 async function promoteNextJob() {
   try {
     const delayed = await submitQueue.getDelayed();
@@ -73,23 +78,35 @@ new Worker('runway-poll', async (job: Job) => {
     await promoteNextJob();
   } else if (result.status === 'failed' || result.status === 'cancelled') {
     const retryCount = (dbJob.retryCount || 0);
-    if (result.status === 'failed') {
+
+    if (result.status === 'failed' && retryCount < MAX_REMOTE_RETRIES) {
+      // Auto-retry: increment retryCount, re-queue for submit
       await prisma.runwayJob.update({
         where: { id: jobId },
         data: { status: 'pending', errorMessage: result.errorMessage, retryCount: retryCount + 1 },
       });
-      await submitQueue.add('submit', { jobId, duration: (dbJob as any).duration || 5 }, { jobId: `submit-${jobId}`, delay: 5000, attempts: 1000, backoff: { type: 'custom' } });
-      console.log(`[poll-worker] auto-retry #${retryCount + 1} for job ${jobId.slice(0,8)}`);
+      const existing = await submitQueue.getJob(`submit-${jobId}`);
+      if (existing) await existing.remove().catch(() => {});
+      await submitQueue.add('submit', { jobId, duration: (dbJob as any).duration || 5, resolution: job.data.resolution, quality: job.data.quality, cfgScale: job.data.cfgScale, sound: job.data.sound, videoUrl: job.data.videoUrl }, {
+        jobId: `submit-${jobId}`, delay: 5000, attempts: MAX_SUBMIT_ATTEMPTS, backoff: { type: 'custom' },
+      });
+      console.log(`[poll-worker] auto-retry #${retryCount + 1}/${MAX_REMOTE_RETRIES} for job ${jobId.slice(0,8)}`);
     } else {
+      // Max retries reached or cancelled — mark as final state
+      const finalStatus = result.status === 'failed' ? 'failed' : 'cancelled';
+      const errMsg = retryCount >= MAX_REMOTE_RETRIES
+        ? `${result.errorMessage || '远程任务失败'}（已重试 ${retryCount} 次，不再重试）`
+        : (result.errorMessage || undefined);
       await prisma.runwayJob.update({
         where: { id: jobId },
-        data: { status: result.status, errorMessage: result.errorMessage, finishedAt: new Date() },
+        data: { status: finalStatus, errorMessage: errMsg, finishedAt: new Date() },
       });
+      console.log(`[poll-worker] job ${jobId.slice(0,8)} final ${finalStatus} after ${retryCount} retries`);
     }
     await promoteNextJob();
   } else {
     const delay = result.status === 'queued' ? INTERVAL_QUEUED : INTERVAL_PROCESSING;
-    await pollQueue.add('poll', { jobId, remoteTaskId }, { jobId: `poll-${jobId}-${Date.now()}`, delay });
+    await pollQueue.add('poll', { jobId, remoteTaskId, duration: job.data.duration, resolution: job.data.resolution, quality: job.data.quality, cfgScale: job.data.cfgScale, sound: job.data.sound, videoUrl: job.data.videoUrl }, { jobId: `poll-${jobId}-${Date.now()}`, delay });
   }
 }, { connection, concurrency: 1 });
 

@@ -1,6 +1,6 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { NAlert, NButton, NInput, NSpin, NSwitch, NTag, useMessage } from 'naive-ui'
+import { NAlert, NButton, NInput, NSpin, NSwitch, NTag, NSlider, NTooltip, useMessage } from 'naive-ui'
 import { SvgIcon } from '@/components/common'
 import { homeStore } from '@/store'
 import { useRunwayJwt } from '@/composables/useRunwayJwt'
@@ -33,6 +33,43 @@ const remark = ref('')
 const images = ref<UploadedImage[]>([])
 const exploreMode = ref(true)
 const duration = ref(5)
+const resolution = ref('')
+const quality = ref('std')
+const sound = ref(true)
+const cfgScale = ref(0.5)
+
+// Pro mode: reference video
+const refVideo = ref<{ preview: string; url: string; uploading: boolean } | null>(null)
+
+const resolutionOptions = [
+  { value: '', label: '自动' },
+  { value: '720x1280', label: '720x1280 竖屏' },
+  { value: '960x960', label: '960x960 方形' },
+]
+
+const durationHints: Record<number, string> = {
+  5: '适合产品展示、短镜头动作，生成速度最快',
+  10: '适合完整动作展示、多步骤演示，推荐日常使用',
+  15: '适合复杂场景、长镜头叙事，生成时间较长',
+}
+
+const resolutionHints: Record<string, string> = {
+  '': '自动模式 — 根据参考图片尺寸自动推断输出分辨率，推荐使用',
+  '720x1280': '竖屏模式 — 适合抖音/快手/小红书等短视频平台，9:16 比例',
+  '960x960': '方形画面 — 适合微信朋友圈、电商主图、Instagram 等场景，1:1 比例',
+}
+
+const qualityHints: Record<string, string> = {
+  std: '标准模式 — 基于参考图片生成视频，适合大多数场景，消耗 1 个配额',
+  pro: '专业模式 — 支持参考视频+图片混合输入，运动控制更精准，画质更高，消耗 2 个配额',
+}
+
+const cfgHint = computed(() => {
+  const v = cfgScale.value
+  if (v <= 0.3) return '低关联度 — AI 自由发挥空间大，动作更自然流畅，但可能偏离提示词描述'
+  if (v <= 0.6) return '平衡模式 — 推荐大多数场景使用，兼顾提示词准确性和画面自然度'
+  return '高关联度 — 严格遵循提示词，适合精确控制动作和构图，但可能导致画面僵硬'
+})
 
 const tokenWarnings = ref<string[]>([])
 const activeTasks = ref(0)
@@ -108,7 +145,7 @@ const fetchTokenStatus = async () => {
       })
       .filter(Boolean)
   } catch {
-    // 网络抖动时保持静默，避免轮询提示干扰
+    // silent
   }
 }
 
@@ -119,12 +156,7 @@ const handleFileSelect = async (event: Event) => {
 
   for (const file of fileList) {
     const id = createUid()
-    images.value.push({
-      id,
-      preview: '',
-      url: '',
-      uploading: true,
-    })
+    images.value.push({ id, preview: '', url: '', uploading: true })
 
     const reader = new FileReader()
     reader.onload = async (readerEvent) => {
@@ -134,9 +166,7 @@ const handleFileSelect = async (event: Event) => {
         message.error(`图片读取失败：${file.name}`)
         return
       }
-
       updateImage(id, { preview: base64 })
-
       try {
         const uploadRes = await fetch('/api/runway/upload', {
           method: 'POST',
@@ -144,7 +174,6 @@ const handleFileSelect = async (event: Event) => {
           body: JSON.stringify({ data: base64, filename: file.name }),
         })
         if (!uploadRes.ok) throw new Error('上传失败')
-
         const uploadData = await uploadRes.json()
         updateImage(id, { url: uploadData.url, uploading: false })
       } catch (error: any) {
@@ -152,10 +181,8 @@ const handleFileSelect = async (event: Event) => {
         message.error(`上传失败：${error.message || file.name}`)
       }
     }
-
     reader.readAsDataURL(file)
   }
-
   input.value = ''
 }
 
@@ -163,9 +190,38 @@ const removeImage = (index: number) => {
   images.value.splice(index, 1)
 }
 
+const handleVideoSelect = async (event: Event) => {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  refVideo.value = { preview: '', url: '', uploading: true }
+  const reader = new FileReader()
+  reader.onload = async (readerEvent) => {
+    const base64 = String(readerEvent.target?.result || '')
+    if (!base64) { refVideo.value = null; message.error('视频读取失败'); return }
+    if (refVideo.value) refVideo.value.preview = base64
+    try {
+      const uploadRes = await fetch('/api/runway/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ data: base64, filename: file.name }),
+      })
+      if (!uploadRes.ok) throw new Error('上传失败')
+      const uploadData = await uploadRes.json()
+      if (refVideo.value) { refVideo.value.url = uploadData.url; refVideo.value.uploading = false }
+    } catch (error: any) {
+      refVideo.value = null
+      message.error(`视频上传失败：${error.message || file.name}`)
+    }
+  }
+  reader.readAsDataURL(file)
+  input.value = ''
+}
+
+const removeVideo = () => { refVideo.value = null }
+
 const submit = async () => {
   if (!canSubmit.value) return
-
   loading.value = true
   try {
     const payload = {
@@ -173,21 +229,25 @@ const submit = async () => {
       mode: 'image_to_video',
       exploreMode: exploreMode.value,
       duration: duration.value,
+      resolution: resolution.value || undefined,
+      quality: quality.value,
+      cfgScale: cfgScale.value,
+      sound: sound.value,
       remark: remark.value.trim() || undefined,
       imageUrls: uploadedUrls.value,
+      videoUrl: (quality.value === 'pro' && refVideo.value?.url) ? refVideo.value.url : undefined,
     }
-
     const res = await fetch('/api/runway/jobs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify(payload),
     })
     if (!res.ok) throw new Error(`任务提交失败（${res.status}）`)
-
     message.success('任务已提交，正在排队处理')
     prompt.value = ''
     remark.value = ''
     images.value = []
+    refVideo.value = null
     homeStore.setMyData({ act: 'RunwayMvpRefresh' })
     fetchTokenStatus()
   } catch (error: any) {
@@ -201,7 +261,6 @@ onMounted(() => {
   fetchTokenStatus()
   tokenTimer = setInterval(fetchTokenStatus, 15000)
 })
-
 onUnmounted(() => {
   if (tokenTimer) clearInterval(tokenTimer)
 })
@@ -209,172 +268,236 @@ onUnmounted(() => {
 
 <template>
   <div class="space-y-4 p-3">
-    <div
-      class="rounded-2xl border border-slate-200 bg-white/95 p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900/95"
-    >
+    <!-- 用户信息 -->
+    <div class="rounded-2xl border border-slate-200 bg-white/95 p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900/95">
       <div class="mb-3 flex items-center justify-between gap-3">
         <div class="min-w-0">
-          <p class="truncate text-sm font-semibold text-slate-800 dark:text-slate-100">
-            {{ jwtToken ? jwtUsername : '未登录' }}
-          </p>
-          <p class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-            {{ jwtRole === 'admin' ? '管理员账号' : '普通账号' }}
-          </p>
+          <p class="truncate text-sm font-semibold text-slate-800 dark:text-slate-100">{{ jwtToken ? jwtUsername : '未登录' }}</p>
+          <p class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">{{ jwtRole === 'admin' ? '管理员账号' : '普通账号' }}</p>
         </div>
-        <NTag :bordered="false" type="info" size="small">{{ concurrencyLabel }}</NTag>
+        <div class="flex items-center gap-2">
+          <span :class="['text-xs font-medium', concurrencyClass]">{{ concurrencyLabel }}</span>
+        </div>
       </div>
 
-      <div class="flex items-center gap-2 text-xs" :class="concurrencyClass">
-        <span
-          class="h-2 w-2 rounded-full"
-          :class="
-            activeTasks >= maxConcurrency
-              ? 'bg-amber-500'
-              : activeTasks > 0
-                ? 'bg-cyan-500'
-                : 'bg-slate-400 dark:bg-slate-500'
-          "
-        />
-        <span>{{ concurrencyLabel }}</span>
-      </div>
+      <template v-if="tokenWarnings.length">
+        <NAlert v-for="(warn, i) in tokenWarnings" :key="i" type="warning" class="mb-2 text-xs">{{ warn }}</NAlert>
+      </template>
     </div>
 
-    <NAlert
-      v-if="!jwtToken"
-      type="warning"
-      class="rounded-xl"
-      title="尚未登录"
-    >
-      请先登录账号，再上传图片并提交视频任务。
-    </NAlert>
+    <!-- 提示词 -->
+    <div class="rounded-2xl border border-slate-200 bg-white/95 p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900/95">
+      <label class="mb-2 block text-xs font-medium text-slate-600 dark:text-slate-300">提示词 *</label>
+      <NInput
+        v-model:value="prompt"
+        type="textarea"
+        placeholder="描述你想要生成的视频内容..."
+        :autosize="{ minRows: 3, maxRows: 6 }"
+        class="rounded-lg"
+      />
+    </div>
 
-    <NAlert
-      v-if="tokenWarnings.length > 0"
-      type="warning"
-      class="rounded-xl"
-      title="令牌状态提醒"
-    >
-      <div class="space-y-1 text-xs">
-        <p v-for="warning in tokenWarnings" :key="warning">{{ warning }}</p>
-      </div>
-    </NAlert>
-
-    <div
-      class="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900"
-    >
-      <div class="mb-3 flex items-center justify-between">
-        <p class="text-sm font-semibold text-slate-800 dark:text-slate-100">参考图片</p>
-        <p class="text-xs text-slate-500 dark:text-slate-400">最多 {{ MAX_IMAGES }} 张</p>
-      </div>
-
-      <div v-if="images.length > 0" class="grid grid-cols-2 gap-2 sm:grid-cols-4">
-        <div
-          v-for="(image, index) in images"
-          :key="image.id"
-          class="group relative aspect-square overflow-hidden rounded-xl border border-slate-200 bg-slate-100 dark:border-slate-700 dark:bg-slate-800"
-        >
-          <img v-if="image.preview" :src="image.preview" class="h-full w-full object-cover" />
-
-          <div v-if="image.uploading" class="absolute inset-0 flex items-center justify-center bg-black/45">
+    <!-- 参考图片 -->
+    <div class="rounded-2xl border border-slate-200 bg-white/95 p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900/95">
+      <label class="mb-2 block text-xs font-medium text-slate-600 dark:text-slate-300">参考图片 *（最多 {{ MAX_IMAGES }} 张）</label>
+      <div class="flex flex-wrap gap-2">
+        <div v-for="(img, idx) in images" :key="img.id" class="group relative h-20 w-20 overflow-hidden rounded-lg border border-slate-200 dark:border-slate-700">
+          <img v-if="img.preview" :src="img.preview" class="h-full w-full object-cover" />
+          <div v-if="img.uploading" class="absolute inset-0 flex items-center justify-center bg-black/40">
             <NSpin size="small" />
           </div>
-
           <button
             v-else
-            class="absolute right-1.5 top-1.5 flex h-6 w-6 items-center justify-center rounded-full bg-black/65 text-white opacity-0 transition group-hover:opacity-100"
-            @click="removeImage(index)"
+            class="absolute right-0.5 top-0.5 hidden rounded-full bg-black/60 p-0.5 text-white group-hover:block"
+            @click="removeImage(idx)"
           >
-            <SvgIcon icon="ri:close-line" />
+            <SvgIcon icon="ri:close-line" class="text-sm" />
           </button>
-
-          <div
-            v-if="image.url && !image.uploading"
-            class="absolute bottom-1.5 right-1.5 rounded-full bg-emerald-500/95 px-1.5 py-0.5 text-[10px] text-white"
-          >
-            已上传
-          </div>
         </div>
-
         <label
           v-if="remainingSlots > 0"
-          class="flex aspect-square cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed border-slate-300 bg-slate-50 transition hover:border-cyan-400 dark:border-slate-700 dark:bg-slate-800/70 dark:hover:border-cyan-500"
+          class="flex h-20 w-20 cursor-pointer items-center justify-center rounded-lg border-2 border-dashed border-slate-300 text-slate-400 transition hover:border-blue-400 hover:text-blue-400 dark:border-slate-600"
         >
-          <input type="file" class="hidden" accept="image/*" multiple @change="handleFileSelect" />
-          <SvgIcon icon="ri:image-add-line" class="text-2xl text-slate-400 dark:text-slate-500" />
-          <span class="mt-1 text-xs text-slate-500 dark:text-slate-400">继续添加</span>
+          <SvgIcon icon="ri:add-line" class="text-2xl" />
+          <input type="file" accept="image/*" multiple class="hidden" @change="handleFileSelect" />
         </label>
       </div>
-
-      <label
-        v-else
-        class="block cursor-pointer rounded-xl border-2 border-dashed border-slate-300 bg-slate-50 p-8 text-center transition hover:border-cyan-400 dark:border-slate-700 dark:bg-slate-800/70 dark:hover:border-cyan-500"
-      >
-        <input type="file" class="hidden" accept="image/*" multiple @change="handleFileSelect" />
-        <div class="mx-auto mb-2 flex h-14 w-14 items-center justify-center rounded-full bg-slate-200/70 dark:bg-slate-700/70">
-          <SvgIcon icon="ri:upload-cloud-2-line" class="text-3xl text-slate-500 dark:text-slate-300" />
-        </div>
-        <p class="text-sm font-medium text-slate-700 dark:text-slate-200">点击上传参考图片</p>
-        <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">支持常见图片格式，最多 4 张</p>
-      </label>
     </div>
 
-    <div class="space-y-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
-      <div>
-        <p class="mb-1 text-xs text-slate-500 dark:text-slate-400">提示词</p>
-        <NInput
-          v-model:value="prompt"
-          type="textarea"
-          :rows="4"
-          placeholder="描述你想生成的视频内容、风格、镜头语言和动作细节"
-          @keydown.ctrl.enter="submit"
-        />
-      </div>
+    <!-- 生成设置 -->
+    <div class="rounded-2xl border border-slate-200 bg-white/95 p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900/95">
+      <label class="mb-3 block text-xs font-medium text-slate-600 dark:text-slate-300">生成设置</label>
+      <div class="space-y-4">
 
-      <div>
-        <p class="mb-1 text-xs text-slate-500 dark:text-slate-400">备注（可选）</p>
-        <NInput v-model:value="remark" placeholder="例如：用于电商首页首屏素材" />
-      </div>
-
-      <div>
-        <p class="mb-2 text-xs text-slate-500 dark:text-slate-400">视频时长</p>
-        <div class="grid grid-cols-3 gap-2">
-          <button
-            v-for="second in [5, 10, 15]"
-            :key="second"
-            class="rounded-lg border px-3 py-2 text-sm font-medium transition"
-            :class="
-              duration === second
-                ? 'border-cyan-500 bg-cyan-500 text-white'
-                : 'border-slate-200 bg-white text-slate-600 hover:border-cyan-300 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300 dark:hover:border-cyan-600'
-            "
-            @click="duration = second"
-          >
-            {{ second }} 秒
-          </button>
-        </div>
-      </div>
-
-      <div class="flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2 dark:bg-slate-800/80">
+        <!-- 分辨率 -->
         <div>
-          <p class="text-sm font-medium text-slate-700 dark:text-slate-200">探索模式</p>
-          <p class="text-xs text-slate-500 dark:text-slate-400">开启后会提供更有探索性的生成结果</p>
+          <div class="mb-1 flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
+            <span>分辨率</span>
+          </div>
+          <div class="flex gap-2">
+            <button
+              v-for="opt in resolutionOptions"
+              :key="opt.value"
+              class="rounded-lg border px-3 py-1.5 text-xs font-medium transition"
+              :class="resolution === opt.value
+                ? 'border-blue-500 bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400'
+                : 'border-slate-200 text-slate-600 hover:border-slate-300 dark:border-slate-700 dark:text-slate-400'"
+              @click="resolution = opt.value"
+            >
+              {{ opt.label }}
+            </button>
+          </div>
+          <Transition name="hint-fade">
+            <p v-if="resolutionHints[resolution]" class="mt-1 text-[11px] text-slate-400 dark:text-slate-500">{{ resolutionHints[resolution] }}</p>
+          </Transition>
         </div>
-        <NSwitch v-model:value="exploreMode" size="small" />
-      </div>
 
-      <NButton
-        type="primary"
-        size="large"
-        block
-        :loading="loading"
-        :disabled="!canSubmit"
-        @click="submit"
-      >
-        <template #icon>
-          <SvgIcon icon="ri:sparkling-2-line" />
-        </template>
-        {{ loading ? '提交中...' : '提交视频任务' }}
-      </NButton>
+        <!-- 生成模式 -->
+        <div>
+          <div class="mb-1 flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
+            <span>生成模式</span>
+          </div>
+          <div class="flex gap-2">
+            <button
+              class="rounded-lg border px-3 py-1.5 text-xs font-medium transition"
+              :class="quality === 'std'
+                ? 'border-blue-500 bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400'
+                : 'border-slate-200 text-slate-600 hover:border-slate-300 dark:border-slate-700 dark:text-slate-400'"
+              @click="quality = 'std'"
+            >
+              标准 std
+            </button>
+            <button
+              class="rounded-lg border px-3 py-1.5 text-xs font-medium transition"
+              :class="quality === 'pro'
+                ? 'border-blue-500 bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400'
+                : 'border-slate-200 text-slate-600 hover:border-slate-300 dark:border-slate-700 dark:text-slate-400'"
+              @click="quality = 'pro'"
+            >
+              专业 pro
+            </button>
+          </div>
+          <Transition name="hint-fade">
+            <p v-if="qualityHints[quality]" class="mt-1 text-[11px] text-slate-400 dark:text-slate-500">{{ qualityHints[quality] }}</p>
+          </Transition>
+        </div>
+
+        <!-- 参考视频（仅 pro 模式） -->
+        <Transition name="hint-fade">
+          <div v-if="quality === 'pro'">
+            <div class="mb-1 flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
+              <span>参考视频（可选）</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <div v-if="refVideo" class="group relative h-20 w-32 overflow-hidden rounded-lg border border-slate-200 dark:border-slate-700">
+                <video v-if="refVideo.preview" :src="refVideo.preview" class="h-full w-full object-cover" muted />
+                <div v-if="refVideo.uploading" class="absolute inset-0 flex items-center justify-center bg-black/40">
+                  <NSpin size="small" />
+                </div>
+                <button
+                  v-else
+                  class="absolute right-0.5 top-0.5 hidden rounded-full bg-black/60 p-0.5 text-white group-hover:block"
+                  @click="removeVideo"
+                >
+                  <SvgIcon icon="ri:close-line" class="text-sm" />
+                </button>
+              </div>
+              <label
+                v-if="!refVideo"
+                class="flex h-20 w-32 cursor-pointer flex-col items-center justify-center gap-1 rounded-lg border-2 border-dashed border-slate-300 text-slate-400 transition hover:border-blue-400 hover:text-blue-400 dark:border-slate-600"
+              >
+                <SvgIcon icon="ri:video-add-line" class="text-xl" />
+                <span class="text-[10px]">上传视频</span>
+                <input type="file" accept="video/*" class="hidden" @change="handleVideoSelect" />
+              </label>
+            </div>
+            <p class="mt-1 text-[11px] text-slate-400 dark:text-slate-500">专业模式支持参考视频+图片混合输入，AI 会参考视频中的运动轨迹和节奏来生成新视频</p>
+          </div>
+        </Transition>
+
+        <!-- 时长 -->
+        <div>
+          <div class="mb-1 flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
+            <span>时长</span>
+          </div>
+          <div class="flex gap-2">
+            <button
+              v-for="d in [5, 10, 15]"
+              :key="d"
+              class="rounded-lg border px-3 py-1.5 text-xs font-medium transition"
+              :class="duration === d
+                ? 'border-blue-500 bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400'
+                : 'border-slate-200 text-slate-600 hover:border-slate-300 dark:border-slate-700 dark:text-slate-400'"
+              @click="duration = d"
+            >
+              {{ d }}s
+            </button>
+          </div>
+          <Transition name="hint-fade">
+            <p v-if="durationHints[duration]" class="mt-1 text-[11px] text-slate-400 dark:text-slate-500">{{ durationHints[duration] }}</p>
+          </Transition>
+        </div>
+
+        <!-- 提示词关联度 cfgScale -->
+        <div>
+          <div class="mb-1 flex items-center justify-between text-xs text-slate-600 dark:text-slate-300">
+            <span>提示词关联度</span>
+            <span class="font-mono text-[11px] text-slate-400">{{ cfgScale.toFixed(2) }}</span>
+          </div>
+          <NSlider v-model:value="cfgScale" :min="0" :max="1" :step="0.05" :tooltip="false" />
+          <Transition name="hint-fade">
+            <p class="mt-1 text-[11px] text-slate-400 dark:text-slate-500">{{ cfgHint }}</p>
+          </Transition>
+        </div>
+
+        <!-- 声音 -->
+        <div class="flex items-center justify-between">
+          <div>
+            <span class="text-xs text-slate-600 dark:text-slate-300">生成声音</span>
+            <p class="text-[11px] text-slate-400 dark:text-slate-500">开启后视频将包含 AI 生成的环境音效和背景音</p>
+          </div>
+          <NSwitch v-model:value="sound" size="small" />
+        </div>
+
+        <!-- 探索模式 -->
+        <div class="flex items-center justify-between">
+          <div>
+            <span class="text-xs text-slate-600 dark:text-slate-300">探索模式</span>
+            <p class="text-[11px] text-slate-400 dark:text-slate-500">开启后 AI 会尝试更多创意方向，生成效果更多样但可能不够稳定</p>
+          </div>
+          <NSwitch v-model:value="exploreMode" size="small" />
+        </div>
+      </div>
     </div>
+
+    <!-- 备注 -->
+    <div class="rounded-2xl border border-slate-200 bg-white/95 p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900/95">
+      <label class="mb-2 block text-xs font-medium text-slate-600 dark:text-slate-300">备注（可选）</label>
+      <NInput v-model:value="remark" placeholder="给这个任务加个备注..." class="rounded-lg" />
+    </div>
+
+    <!-- 提交按钮 -->
+    <NButton
+      type="primary"
+      block
+      :loading="loading"
+      :disabled="!canSubmit"
+      class="rounded-2xl"
+      @click="submit"
+    >
+      {{ loading ? '提交中...' : '生成视频' }}
+    </NButton>
   </div>
 </template>
+
+<style scoped>
+.hint-fade-enter-active,
+.hint-fade-leave-active {
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+.hint-fade-enter-from,
+.hint-fade-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
+}
+</style>

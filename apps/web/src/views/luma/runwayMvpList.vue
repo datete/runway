@@ -24,6 +24,8 @@ interface RunwayJob {
   updatedAt: string
   startedAt: string | null
   finishedAt: string | null
+  queuePosition: number | null
+  queueTotal: number | null
 }
 
 type TabKey = 'all' | 'active' | 'completed' | 'failed'
@@ -117,15 +119,7 @@ const getFirstImage = (job: RunwayJob) => {
   return job.imageUrl || null
 }
 
-const queuePosition = (job: RunwayJob) => {
-  if (!['pending', 'queued'].includes(job.status)) return null
-  const aheadCount = allJobs.value.filter((item) => {
-    if (!isActive(item.status)) return false
-    if (item.id === job.id) return false
-    return new Date(item.createdAt).getTime() <= new Date(job.createdAt).getTime()
-  }).length
-  return aheadCount + 1
-}
+const queuePosition = (job: RunwayJob) => job.queuePosition || null
 
 const formatTime = (iso: string) => new Date(iso).toLocaleString('zh-CN', { hour12: false })
 
@@ -249,7 +243,7 @@ const downloadVideo = async (job: RunwayJob) => {
     const objectUrl = URL.createObjectURL(blob)
     const anchor = document.createElement('a')
     anchor.href = objectUrl
-    anchor.download = `runway-${job.id.slice(0, 8)}.mp4`
+    anchor.download = `video-${job.id.slice(0, 8)}.mp4`
     anchor.click()
     URL.revokeObjectURL(objectUrl)
   } catch {
@@ -385,7 +379,7 @@ onUnmounted(() => stopPolling())
             <div class="absolute inset-x-0 bottom-0 flex items-center gap-2 bg-gradient-to-t from-black/80 to-transparent px-3 py-3">
               <NSpin size="small" />
               <span class="text-sm text-white">{{ statusLabel[job.status] || job.status }}</span>
-              <span v-if="queuePosition(job) !== null" class="text-xs text-cyan-200">队列第 {{ queuePosition(job) }} 位</span>
+              <span v-if="queuePosition(job) !== null" class="text-xs text-cyan-200">队列第 {{ queuePosition(job) }}/{{ job.queueTotal || '?' }} 位</span>
             </div>
           </div>
 
