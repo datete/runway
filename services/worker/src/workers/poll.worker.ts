@@ -25,14 +25,19 @@ async function getClientForJob(accountId?: string): Promise<RunwayDirectClient> 
 const VIDEOS_DIR = '/root/runway/uploads/videos';
 if (!fs.existsSync(VIDEOS_DIR)) fs.mkdirSync(VIDEOS_DIR, { recursive: true });
 
+const CACHE_TIMEOUT = 60000; // 60s timeout for video download
+
 async function cacheVideo(remoteUrl: string, jobId: string): Promise<string> {
   const filename = `video_${jobId.slice(0, 8)}_${Date.now()}.mp4`;
   const dest = path.join(VIDEOS_DIR, filename);
   try {
     console.log(`[poll-worker] caching video for job ${jobId.slice(0,8)}`);
-    const res = await fetch(remoteUrl);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), CACHE_TIMEOUT);
+    const res = await fetch(remoteUrl, { signal: controller.signal as any });
     if (!res.ok) throw new Error(`fetch failed: ${res.status}`);
     const buf = await res.buffer();
+    clearTimeout(timer);
     fs.writeFileSync(dest, buf);
     console.log(`[poll-worker] cached ${filename} (${Math.round(buf.length/1024)}KB)`);
     return `/img/videos/${filename}`;

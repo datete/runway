@@ -20,7 +20,7 @@ export async function triggerSubmit(delay = 0): Promise<void> {
   } catch {}
 }
 
-type SubmitResult = "submitted" | "no_pending" | "concurrency_full" | "rate_limited" | "job_failed";
+type SubmitResult = "submitted" | "no_pending" | "concurrency_full" | "rate_limited" | "network_error" | "job_failed";
 
 /** Try to submit one pending job. Returns status string. */
 async function trySubmitOne(): Promise<SubmitResult> {
@@ -109,12 +109,23 @@ async function trySubmitOne(): Promise<SubmitResult> {
     const msg = err.message || String(err);
     console.error(`[submit-worker] jobId=${jobId.slice(0,8)} error: ${msg.slice(0, 120)}`);
 
+    const isNetworkError = /socket hang up|ECONNRESET|ETIMEDOUT|ENOTFOUND|EPIPE|EAI_AGAIN|network|fetch failed/i.test(msg);
+
     if (msg === "RATE_LIMITED") {
       // Release without jobId guard — same job will be retried
       await accountPool.release(account.id);
       await accountPool.recordError(account.id, "429 Rate Limited");
       await prisma.runwayJob.update({ where: { id: jobId }, data: { status: "pending" } });
       return "rate_limited";
+    }
+
+    if (isNetworkError) {
+      // Network error — release slot, keep job pending, retry after delay
+      await accountPool.release(account.id);
+      await accountPool.recordError(account.id, msg.slice(0, 200));
+      await prisma.runwayJob.update({ where: { id: jobId }, data: { status: "pending", errorMessage: `网络错误(将重试): ${msg.slice(0, 300)}` } });
+      console.log(`[submit-worker] network error, will retry in 10s`);
+      return "network_error";
     }
 
     await accountPool.release(account.id, jobId);
@@ -139,8 +150,11 @@ new Worker("runway-submit", async (job: Job) => {
       break;
     case "rate_limited":
       // 429 — wait 30s before trying again
-      console.log(`[submit-worker] rate limited, will retry in 30s`);
       await triggerSubmit(30000);
+      break;
+    case "network_error":
+      // Network error — retry after 10s
+      await triggerSubmit(10000);
       break;
     case "concurrency_full":
       // All slots occupied — poll worker will trigger when slot frees
