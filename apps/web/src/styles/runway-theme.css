@@ -1,0 +1,140 @@
+/* ============================================================
+   Runway Theme — Unified Design Tokens
+   ============================================================
+   Extracted from: RunwayQueue.vue, runwayMvpInput.vue,
+                   runwayMvpList.vue, RunwayAdminPanel.vue
+   ============================================================ */
+
+:root {
+  /* ── Primary (purple accent, from Queue & Admin) ── */
+  --rw-primary: rgb(139, 92, 246);            /* #8b5cf6 */
+  --rw-primary-hover: rgb(167, 139, 250);     /* #a78bfa */
+  --rw-primary-light: rgb(196, 181, 253);     /* #c4b5fd — text on dark */
+  --rw-primary-deep: rgb(99, 102, 241);       /* #6366f1 — indigo end of gradient */
+  --rw-primary-soft: rgb(129, 140, 248);      /* #818cf8 — mid-tone */
+
+  /* ── Accent (sky-blue, from MvpInput & MvpList) ── */
+  --rw-accent: rgb(56, 189, 248);             /* #38bdf8 — sky-400 */
+  --rw-accent-hover: rgb(14, 165, 233);       /* #0ea5e9 — sky-500 */
+  --rw-accent-deep: rgb(59, 130, 246);        /* #3b82f6 — blue-500 */
+
+  /* ── Status colors ── */
+  --rw-status-pending: rgb(156, 163, 175);    /* #9ca3af — gray-400 */
+  --rw-status-processing: rgb(167, 139, 250); /* #a78bfa — violet-400 */
+  --rw-status-processing-alt: rgb(96, 165, 250); /* #60a5fa — blue-400 (Queue glow) */
+  --rw-status-completed: rgb(52, 211, 153);   /* #34d399 — emerald-400 */
+  --rw-status-completed-deep: rgb(16, 185, 129); /* #10b981 — emerald-500 */
+  --rw-status-failed: rgb(248, 113, 113);     /* #f87171 — red-400 */
+  --rw-status-failed-deep: rgb(239, 68, 68);  /* #ef4444 — red-500 */
+
+  /* ── Success (submit / upload flash) ── */
+  --rw-success: rgb(52, 211, 153);            /* #34d399 */
+  --rw-success-text: rgb(110, 231, 183);      /* #6ee7b7 */
+
+  /* ── Background / Surface (dark glass-morphism) ── */
+  --rw-bg-base: rgb(8, 10, 18);              /* near-black base */
+  --rw-bg-card: rgba(255, 255, 255, 0.04);
+  --rw-bg-card-hover: rgba(255, 255, 255, 0.07);
+  --rw-bg-surface: rgba(255, 255, 255, 0.03);
+  --rw-bg-surface-hover: rgba(255, 255, 255, 0.05);
+  --rw-bg-overlay: rgba(0, 0, 0, 0.25);
+  --rw-bg-input: rgba(255, 255, 255, 0.03);
+  --rw-bg-input-focus: rgba(255, 255, 255, 0.05);
+
+  /* ── Text ── */
+  --rw-text-primary: rgba(255, 255, 255, 0.9);
+  --rw-text-secondary: rgba(255, 255, 255, 0.7);
+  --rw-text-tertiary: rgba(255, 255, 255, 0.5);
+  --rw-text-muted: rgba(255, 255, 255, 0.4);
+  --rw-text-faint: rgba(255, 255, 255, 0.25);
+  --rw-text-disabled: rgba(255, 255, 255, 0.2);
+
+  /* ── Borders ── */
+  --rw-border: rgba(255, 255, 255, 0.08);
+  --rw-border-light: rgba(255, 255, 255, 0.06);
+  --rw-border-hover: rgba(255, 255, 255, 0.12);
+  --rw-border-strong: rgba(255, 255, 255, 0.15);
+  --rw-border-accent: rgba(56, 189, 248, 0.3);
+  --rw-border-primary: rgba(139, 92, 246, 0.3);
+
+  /* ── Border Radius ── */
+  --rw-radius-xs: 4px;
+  --rw-radius-sm: 6px;
+  --rw-radius-md: 10px;
+  --rw-radius-lg: 12px;
+  --rw-radius-xl: 14px;
+  --rw-radius-2xl: 16px;
+  --rw-radius-full: 9999px;
+
+  /* ── Shadows ── */
+  --rw-shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.15);
+  --rw-shadow-md: 0 4px 16px rgba(0, 0, 0, 0.25);
+  --rw-shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.25);
+  --rw-shadow-glow-primary: 0 0 12px rgba(139, 92, 246, 0.15);
+  --rw-shadow-glow-accent: 0 0 12px rgba(56, 189, 248, 0.15);
+
+  /* ── Backdrop blur ── */
+  --rw-blur-sm: blur(8px);
+  --rw-blur-md: blur(12px);
+  --rw-blur-lg: blur(16px);
+
+  /* ── Gradients (reusable) ── */
+  --rw-gradient-primary: linear-gradient(135deg, rgb(139, 92, 246), rgb(99, 102, 241));
+  --rw-gradient-accent: linear-gradient(135deg, rgba(56, 189, 248, 0.25), rgba(59, 130, 246, 0.2));
+  --rw-gradient-glass: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.03));
+  --rw-gradient-divider: linear-gradient(to right, transparent, rgba(255, 255, 255, 0.08), transparent);
+
+  /* ── Scrollbar ── */
+  --rw-scrollbar-thumb: rgba(255, 255, 255, 0.1);
+  --rw-scrollbar-thumb-hover: rgba(255, 255, 255, 0.18);
+
+  /* ── Transition timing ── */
+  --rw-ease-default: cubic-bezier(0.4, 0, 0.2, 1);
+  --rw-ease-bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* ── Dark mode (explicit selector, values same as :root for this dark-first design) ── */
+.dark,
+[data-theme=dark] {
+  --rw-bg-base: rgb(8, 10, 18);
+  --rw-bg-card: rgba(255, 255, 255, 0.04);
+  --rw-bg-card-hover: rgba(255, 255, 255, 0.07);
+  --rw-bg-surface: rgba(255, 255, 255, 0.03);
+  --rw-bg-surface-hover: rgba(255, 255, 255, 0.05);
+  --rw-bg-overlay: rgba(0, 0, 0, 0.25);
+  --rw-text-primary: rgba(255, 255, 255, 0.9);
+  --rw-text-secondary: rgba(255, 255, 255, 0.7);
+  --rw-text-muted: rgba(255, 255, 255, 0.4);
+  --rw-border: rgba(255, 255, 255, 0.08);
+  --rw-border-hover: rgba(255, 255, 255, 0.12);
+}
+
+/* ── Light mode overrides (future-ready) ── */
+.light,
+[data-theme=light] {
+  --rw-bg-base: rgb(249, 250, 251);
+  --rw-bg-card: rgba(255, 255, 255, 0.85);
+  --rw-bg-card-hover: rgba(255, 255, 255, 0.95);
+  --rw-bg-surface: rgba(255, 255, 255, 0.7);
+  --rw-bg-surface-hover: rgba(255, 255, 255, 0.8);
+  --rw-bg-overlay: rgba(0, 0, 0, 0.08);
+  --rw-bg-input: rgba(0, 0, 0, 0.03);
+  --rw-bg-input-focus: rgba(0, 0, 0, 0.05);
+  --rw-text-primary: rgba(0, 0, 0, 0.88);
+  --rw-text-secondary: rgba(0, 0, 0, 0.65);
+  --rw-text-tertiary: rgba(0, 0, 0, 0.45);
+  --rw-text-muted: rgba(0, 0, 0, 0.35);
+  --rw-text-faint: rgba(0, 0, 0, 0.2);
+  --rw-text-disabled: rgba(0, 0, 0, 0.15);
+  --rw-border: rgba(0, 0, 0, 0.08);
+  --rw-border-light: rgba(0, 0, 0, 0.05);
+  --rw-border-hover: rgba(0, 0, 0, 0.12);
+  --rw-border-strong: rgba(0, 0, 0, 0.15);
+  --rw-scrollbar-thumb: rgba(0, 0, 0, 0.12);
+  --rw-scrollbar-thumb-hover: rgba(0, 0, 0, 0.2);
+  --rw-shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06);
+  --rw-shadow-md: 0 4px 16px rgba(0, 0, 0, 0.08);
+  --rw-shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.1);
+  --rw-gradient-glass: linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0.7));
+  --rw-gradient-divider: linear-gradient(to right, transparent, rgba(0, 0, 0, 0.06), transparent);
+}
