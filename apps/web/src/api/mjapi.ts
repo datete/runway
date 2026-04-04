@@ -373,7 +373,7 @@ export const getSeed = async (cchat:Chat.Chat,message:any )=>{
 }
 
 export const getLastVersion=  async ()=>{
-    const url='https://api.github.com/repos/Dooy/chatgpt-web-midjourney-proxy/tags?per_page=1';
+    const url=''; // disabled
     const a= await myFetch(url);
     mlog('lastVersion', a ); 
     return a;

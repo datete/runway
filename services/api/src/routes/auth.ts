@@ -124,4 +124,49 @@ router.get("/sessions", authMiddleware, async (req: Request, res: Response) => {
   }
 });
 
+
+
+// POST /api/runway/auth/change-password
+router.post("/change-password", authMiddleware, async (req: Request, res: Response) => {
+  const { oldPassword, newPassword } = req.body;
+  if (!oldPassword || !newPassword) {
+    return res.status(400).json({ error: "请输入当前密码和新密码" });
+  }
+  if (newPassword.length < 6) {
+    return res.status(400).json({ error: "新密码至少6位" });
+  }
+  try {
+    const user = await prisma.user.findUnique({ where: { id: req.user!.id } });
+    if (!user) return res.status(404).json({ error: "用户不存在" });
+
+    const valid = await bcrypt.compare(oldPassword, user.passwordHash);
+    if (!valid) return res.status(401).json({ error: "当前密码错误" });
+
+    const hash = await bcrypt.hash(newPassword, 10);
+    await prisma.user.update({ where: { id: user.id }, data: { passwordHash: hash } });
+
+    await prisma.userLog.create({
+      data: { userId: user.id, action: "change_password", ip: (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.socket.remoteAddress || "" },
+    }).catch(() => {});
+
+    res.json({ success: true, message: "密码修改成功" });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// DELETE /api/runway/auth/devices/:id — admin-only device unbind
+router.delete("/devices/:id", authMiddleware, async (req: Request, res: Response) => {
+  try {
+    if (req.user!.role !== 'admin') {
+      return res.status(403).json({ error: "只有管理员可以解绑设备，请联系管理员" });
+    }
+    const deviceId = req.params.id;
+    await DeviceService.removeDevice(deviceId);
+    res.json({ success: true });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 export { router as authRouter };

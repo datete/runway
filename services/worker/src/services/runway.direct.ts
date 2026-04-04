@@ -20,13 +20,35 @@ export class RunwayDirectClient implements RunwayProvider {
     console.log(`[runway] client init, teamId=${this.teamId}${this.proxyUrl ? ', proxy=' + this.proxyUrl.split('@').pop() : ''}`);
   }
 
+  // Chrome UA pool — rotate per-client instance to spread fingerprint
+  private static readonly UA_POOL = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+  ];
+  private readonly userAgent = RunwayDirectClient.UA_POOL[Math.floor(Math.random() * RunwayDirectClient.UA_POOL.length)];
+
   private get headers() {
     return {
       "Authorization":              `Bearer ${this.token}`,
       "Content-Type":               "application/json",
       "Accept":                     "application/json",
+      "Accept-Language":            "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
+      "Accept-Encoding":            "gzip, deflate, br",
+      "Origin":                     "https://app.runwayml.com",
+      "Referer":                    "https://app.runwayml.com/",
+      "User-Agent":                 this.userAgent,
       "X-Runway-Workspace":         String(this.teamId),
       "X-Runway-Source-Application":"web",
+      "Sec-Ch-Ua":                  `"Chromium";v="131", "Not_A Brand";v="24", "Google Chrome";v="131"`,
+      "Sec-Ch-Ua-Mobile":           "?0",
+      "Sec-Ch-Ua-Platform":         `"Windows"`,
+      "Sec-Fetch-Dest":             "empty",
+      "Sec-Fetch-Mode":             "cors",
+      "Sec-Fetch-Site":             "same-site",
+      "Connection":                 "keep-alive",
     };
   }
 
@@ -100,7 +122,7 @@ export class RunwayDirectClient implements RunwayProvider {
     let finalBuf = imgBuf;
     let finalCt = ct;
     if (isImage) {
-      const [tw, th] = isPro ? [1080, 1920] : [720, 1280];
+      const [tw, th] = [1076, 1920];
       finalBuf = await this.upscaleImage(imgBuf, tw, th) as any;
       finalCt = "image/png";
     }
@@ -121,15 +143,30 @@ export class RunwayDirectClient implements RunwayProvider {
     const s3Url: string    = init.uploadUrls[0];
     console.log(`[runway:upload] initiated uploadId=${uploadId}`);
 
-    // Step 3 – PUT to S3 presigned URL (S3 direct, no proxy needed)
-    const putRes = await fetch(s3Url, {
-      method: "PUT",
-      headers: { "Content-Type": finalCt },
-      body: finalBuf,
-    });
-    if (!putRes.ok) throw new Error(`S3 PUT ${putRes.status}`);
-    const etag = (putRes.headers.get("ETag") || "").replace(/"/g, "");
-    console.log(`[runway:upload] S3 PUT ok, ETag=${etag}`);
+    // Step 3 – PUT to S3 presigned URL (with retry)
+    let putRes: any = null;
+    let etag = '';
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        putRes = await fetch(s3Url, {
+          method: "PUT",
+          headers: { "Content-Type": finalCt },
+          body: finalBuf,
+        });
+        if (putRes.ok) {
+          etag = (putRes.headers.get("ETag") || "").replace(/"/g, "");
+          console.log(`[runway:upload] S3 PUT ok (attempt ${attempt}), ETag=${etag}`);
+          break;
+        }
+        console.warn(`[runway:upload] S3 PUT ${putRes.status} (attempt ${attempt}/3)`);
+        if (attempt < 3) await new Promise(r => setTimeout(r, 2000 * attempt));
+      } catch (e: any) {
+        console.warn(`[runway:upload] S3 PUT error (attempt ${attempt}/3): ${e.message}`);
+        if (attempt === 3) throw e;
+        await new Promise(r => setTimeout(r, 2000 * attempt));
+      }
+    }
+    if (!putRes || !putRes.ok) throw new Error(`S3 PUT failed after 3 attempts`);
 
     // Step 4 – complete upload
     const completeRes = await fetch(`${API_BASE}/v1/uploads/${uploadId}/complete`, {
@@ -211,8 +248,8 @@ export class RunwayDirectClient implements RunwayProvider {
   }
 
   async createTask(input: CreateRunwayTaskInput): Promise<{ remoteTaskId: string }> {
-    const isPro = input.quality === "pro";
-    const taskType = isPro ? "kling_3_0_pro" : "kling_3_0_standard";
+    const taskType = "kling_3_0_pro";
+    const isPro = true; // both tiers use pro model and max resolution
     console.log(`[runway:task] creating ${taskType} (quality=${input.quality || "std"})`);
     console.log(`[runway:task] prompt: "${input.prompt.slice(0, 80)}"`);
     console.log(`[runway:task] duration=${input.duration || 5}s, exploreMode=${input.exploreMode ?? true}`);
@@ -240,8 +277,8 @@ export class RunwayDirectClient implements RunwayProvider {
     }
 
     // Use resolution from frontend directly; fallback to defaults if missing
-    const defaultRes = isPro ? "1080x1920" : "720x1280";
-    const stdToProRes: Record<string, string> = { "720x1280": "1080x1920", "1280x720": "1920x1080", "960x960": "1440x1440" };
+    const defaultRes = "1076x1920";
+    const stdToProRes: Record<string, string> = { "720x1280": "1076x1920", "1280x720": "1920x1080", "960x960": "1440x1440" };
     const effectiveResolution = input.resolution
       ? (isPro && stdToProRes[input.resolution] ? stdToProRes[input.resolution] : input.resolution)
       : defaultRes;
@@ -250,7 +287,7 @@ export class RunwayDirectClient implements RunwayProvider {
       taskType,
       options: {
         name:           input.prompt.slice(0, 100),
-        mode:           isPro ? "std" : (input.quality || "std"),
+        mode:           "std",
         textPrompt:     input.prompt,
         duration:       input.duration || 5,
         cfgScale:       input.cfgScale ?? 0.5,

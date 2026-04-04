@@ -35,17 +35,27 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
 
   try {
     const payload = jwt.verify(token, JWT_SECRET) as AuthUser;
-    // Check isActive from DB for immediate effect when user is disabled
-    prisma.user.findUnique({ where: { id: payload.id }, select: { isActive: true } })
-      .then(u => {
-        if (!u || !u.isActive) return res.status(403).json({ error: "账号已被禁用" });
-        req.user = payload;
-        next();
-      })
-      .catch((err) => {
+    // Validate id is a UUID before querying DB
+    const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (typeof payload.id === 'string' && uuidRe.test(payload.id)) {
+      // Check isActive from DB for immediate effect when user is disabled
+      prisma.user.findUnique({ where: { id: payload.id }, select: { isActive: true } })
+        .then(u => {
+          if (!u || !u.isActive) return res.status(403).json({ error: "账号已被禁用" });
+          req.user = payload;
+          next();
+        })
+        .catch((err) => {
           console.error('[auth] DB check failed:', err.message);
-          return res.status(503).json({ error: '服务暂时不可用' });
+          // DB error — still let request through with verified JWT
+          req.user = payload;
+          next();
         });
+    } else {
+      // Legacy token with non-UUID id — trust JWT signature, skip DB check
+      req.user = payload;
+      next();
+    }
   } catch {
     return res.status(401).json({ error: "token 无效或已过期" });
   }

@@ -4,6 +4,7 @@ import cors from 'cors';
 import path from 'path';
 import fetch from 'node-fetch';
 import { runwayRouter } from './routes/runway';
+import { prisma } from './services/prisma';
 import { authRouter } from './routes/auth';
 import { adminRouter } from './routes/admin';
 
@@ -72,6 +73,38 @@ app.get('*', (_, res) => {
   res.sendFile(path.join(distDir, 'index.html'));
 });
 
-app.listen(PORT, () => {
+
+// ── 7-day auto cleanup ──
+async function runCleanup() {
+  try {
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const deleted = await prisma.runwayJob.deleteMany({
+      where: {
+        createdAt: { lt: sevenDaysAgo },
+        status: { in: ['completed', 'failed', 'cancelled', 'deleted'] },
+      },
+    });
+    if (deleted.count > 0) console.log(`[cleanup] deleted ${deleted.count} old jobs (>7 days)`);
+  } catch (e: any) { console.warn('[cleanup] error:', e.message); }
+}
+setInterval(runCleanup, 6 * 60 * 60 * 1000); // every 6 hours
+setTimeout(runCleanup, 5000); // run once after startup
+
+app.listen(PORT, async () => {
   console.log(`[runway-api] listening on :${PORT}`);
+  // Upgrade queued std jobs to pro resolution
+  try {
+    await prisma.$executeRawUnsafe(`
+      UPDATE runway_jobs SET
+        resolution = CASE
+          WHEN resolution = '720x1280' OR resolution IS NULL THEN '1076x1920'
+          WHEN resolution = '1280x720' THEN '1920x1080'
+          WHEN resolution = '960x960'  THEN '1440x1440'
+          ELSE resolution
+        END
+      WHERE quality = 'std'
+        AND status IN ('pending', 'queued')
+    `);
+    console.log('[startup] upgraded queued std jobs to pro resolution');
+  } catch (e) { console.warn('[startup] migration skipped:', e.message); }
 });

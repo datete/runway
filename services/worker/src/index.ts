@@ -5,6 +5,7 @@ import "./workers/submit.worker";
 import "./workers/poll.worker";
 import { Queue } from "bullmq";
 import { triggerSubmit } from "./workers/submit.worker";
+import { RunwayDirectClient } from "./services/runway.direct";
 import fs from "fs";
 import path from "path";
 
@@ -12,18 +13,95 @@ console.log("[runway-worker] started (single-trigger FIFO mode)");
 
 const pollQueue = new Queue("runway-poll", { connection: redis });
 
+/** Create a RunwayDirectClient for a specific account by ID */
+async function makeClientForAccount(accountId: string): Promise<RunwayDirectClient | null> {
+  const account = await prisma.runwayAccount.findUnique({ where: { id: accountId } });
+  if (!account) return null;
+  return new RunwayDirectClient(account.token, Number(account.teamId), account.proxyUrl || undefined);
+}
+
 async function recoverStuckJobs() {
   try {
-    const stuckJobs = await prisma.runwayJob.findMany({
-      where: { status: { in: ["pending", "queued", "submitted", "processing"] } },
+    // Step 0: Verify remote task states via Runway API
+    // For submitted/processing jobs with remoteTaskId, check if they still exist on Runway
+    const activeJobs = await prisma.runwayJob.findMany({
+      where: {
+        status: { in: ["submitted", "processing"] },
+        remoteTaskId: { not: null },
+      },
     });
 
-    if (stuckJobs.length === 0) {
-      console.log("[startup-recovery] no stuck jobs");
-      return;
+    if (activeJobs.length > 0) {
+      console.log(`[startup-recovery] verifying ${activeJobs.length} active job(s) with Runway API...`);
+      for (const job of activeJobs) {
+        const j = job as any;
+        try {
+          let client: RunwayDirectClient | null = null;
+          if (j.accountId) {
+            client = await makeClientForAccount(j.accountId);
+          }
+          if (!client) {
+            client = new RunwayDirectClient();
+          }
+          const remote = await client.getTask(j.remoteTaskId);
+
+          if (remote.status === 'completed') {
+            console.log(`[startup-recovery] ${job.id.slice(0,8)} already completed on Runway, will poll to cache video`);
+            // Let poll worker handle caching
+          } else if (remote.status === 'failed') {
+            console.log(`[startup-recovery] ${job.id.slice(0,8)} failed on Runway: ${remote.errorMessage || 'unknown'}`);
+            await prisma.runwayJob.update({
+              where: { id: job.id },
+              data: {
+                status: 'failed',
+                errorMessage: remote.errorMessage || '远程任务已失败',
+                finishedAt: new Date(),
+              },
+            });
+            if (j.accountId) await accountPool.release(j.accountId, job.id);
+            continue; // Don't add to poll queue
+          } else {
+            console.log(`[startup-recovery] ${job.id.slice(0,8)} remote status: ${remote.status}`);
+          }
+        } catch (err: any) {
+          const errMsg = err.message || String(err);
+          if (errMsg.includes('404') || errMsg.includes('Could not find')) {
+            console.warn(`[startup-recovery] ${job.id.slice(0,8)} remote task 404, marking failed`);
+            await prisma.runwayJob.update({
+              where: { id: job.id },
+              data: {
+                status: 'failed',
+                errorMessage: '远程任务不存在(404)，启动时验证失败',
+                finishedAt: new Date(),
+              },
+            });
+            if (j.accountId) await accountPool.release(j.accountId, job.id);
+            continue;
+          }
+          // Network error — leave for poll worker to handle
+          console.warn(`[startup-recovery] ${job.id.slice(0,8)} API check error: ${errMsg.slice(0, 80)}, will poll normally`);
+        }
+      }
     }
 
-    console.log(`[startup-recovery] found ${stuckJobs.length} stuck job(s)`);
+    // Step 1: Reset queued jobs back to pending (submit worker will pick them up)
+    const queuedReset = await prisma.runwayJob.updateMany({
+      where: { status: "queued" },
+      data: { status: "pending" },
+    });
+    if (queuedReset.count > 0) {
+      console.log(`[startup-recovery] reset ${queuedReset.count} queued job(s) to pending`);
+    }
+
+    // Step 2: Find stuck submitted/processing jobs (re-read after Step 0 may have changed some)
+    const stuckJobs = await prisma.runwayJob.findMany({
+      where: { status: { in: ["submitted", "processing"] } },
+    });
+
+    if (stuckJobs.length === 0 && queuedReset.count === 0) {
+      console.log("[startup-recovery] no stuck jobs");
+    }
+
     for (const job of stuckJobs) {
       const j = job as any;
 
@@ -37,33 +115,41 @@ async function recoverStuckJobs() {
         continue;
       }
 
-      // processing + remoteTaskId -> poll queue
-      if (j.status === "processing" && j.remoteTaskId) {
+      // processing/submitted + remoteTaskId -> poll queue (continue tracking)
+      if (j.remoteTaskId) {
         await pollQueue.add("poll", {
           jobId: job.id,
           remoteTaskId: j.remoteTaskId,
           accountId: j.accountId || undefined,
         }, { delay: 5000 });
-        console.log(`[startup-recovery] ${job.id.slice(0,8)} processing -> poll queue`);
+        console.log(`[startup-recovery] ${job.id.slice(0,8)} ${j.status} -> poll queue`);
         continue;
       }
 
-      // pending/queued/submitted -> reset to pending
+      // submitted/processing WITHOUT remoteTaskId -> reset to pending
       await prisma.runwayJob.update({
         where: { id: job.id },
-        data: { status: "pending", errorMessage: null },
+        data: { status: "pending", errorMessage: null, accountId: null },
       });
-      console.log(`[startup-recovery] ${job.id.slice(0,8)} -> pending`);
+      console.log(`[startup-recovery] ${job.id.slice(0,8)} (no remoteTaskId) -> pending`);
     }
 
-    // Reconcile Redis counters with DB BEFORE triggering submit
-    // This fixes leaked concurrency slots from crashed workers
+    // Reconcile Redis counters with DB
     await accountPool.reconcile();
     console.log("[startup-recovery] reconciled concurrency counters");
 
-    // Single trigger to process all pending jobs in FIFO order
-    await triggerSubmit(2000);
-    console.log("[startup-recovery] triggered submit worker");
+    // Check if there are pending jobs and trigger submit once with delay
+    const pendingCount = await prisma.runwayJob.count({
+      where: { status: "pending" },
+    });
+    if (pendingCount > 0) {
+      // Delay 15-30s to let everything settle before first submission
+      const startDelay = 15000 + Math.floor(Math.random() * 15000);
+      await triggerSubmit(startDelay);
+      console.log(`[startup-recovery] ${pendingCount} pending job(s), first submit in ${Math.round(startDelay/1000)}s`);
+    } else {
+      console.log("[startup-recovery] no pending jobs, submit worker will wait for triggers");
+    }
   } catch (e) {
     console.error("[startup-recovery] error:", e);
   }
@@ -158,14 +244,12 @@ function startUploadCleanup() {
 async function shutdown() {
   console.log('[worker] shutting down gracefully...');
   try {
-    // Close Redis connection
     await redis.quit();
     console.log('[worker] Redis closed');
   } catch (e: any) {
     console.warn('[worker] Redis close error:', e.message);
   }
   try {
-    // Close Prisma
     await prisma.$disconnect();
     console.log('[worker] Prisma disconnected');
   } catch (e: any) {

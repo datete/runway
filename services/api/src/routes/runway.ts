@@ -11,6 +11,7 @@ export const runwayRouter = Router();
 
 // Jobs routes — require auth
 runwayRouter.post("/jobs", authMiddleware, (req, res) => ctrl.createJob(req, res));
+runwayRouter.post("/jobs/batch", authMiddleware, (req, res) => ctrl.batchCreateJobs(req, res));
 runwayRouter.get("/jobs", authMiddleware, (req, res) => ctrl.listJobs(req, res));
 runwayRouter.get("/jobs/:id", authMiddleware, (req, res) => ctrl.getJob(req, res));
 runwayRouter.post("/jobs/:id/cancel", authMiddleware, (req, res) => ctrl.cancelJob(req, res));
@@ -43,6 +44,88 @@ runwayRouter.post("/upload", authMiddleware, (req, res) => {
 // Capture endpoint (internal, no auth needed)
 const captureDir = path.join(process.cwd(), "../../captures");
 if (!fs.existsSync(captureDir)) fs.mkdirSync(captureDir, { recursive: true });
+
+
+// AI Prompt Optimization Proxy (avoids CORS issues with external API)
+runwayRouter.post("/ai/optimize", authMiddleware, async (req: any, res: any) => {
+  try {
+    const fetchMod = await import("node-fetch");
+    const fetchFn = fetchMod.default;
+    const AbortController = globalThis.AbortController;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 90000); // 90s timeout
+    const apiRes = await fetchFn("https://api.iplcz.cn/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer sk-f9187e54389586de83e738defaa509dfbcb3ccb1314c4799833a325282e0864e",
+      },
+      body: JSON.stringify(req.body),
+      signal: controller.signal as any,
+    });
+    clearTimeout(timeout);
+    res.writeHead(apiRes.status, {
+      "Content-Type": apiRes.headers.get("content-type") || "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+    });
+    if (apiRes.body) {
+      // Body-stream timeout: abort if stalls 90s after headers received
+      const bodyTimeout = setTimeout(() => {
+        console.error("[ai/optimize] body stream timeout");
+        try { (apiRes.body as any).destroy?.(); } catch {}
+        // Write SSE error event before closing so frontend knows
+        if (!res.writableEnded) {
+          try { res.write("data: {\"error\":\"stream_timeout\"}\n\n"); } catch {}
+          try { res.end(); } catch {}
+        }
+      }, 90000);
+      (apiRes.body as any).on("error", (err: any) => {
+        console.error("[ai/optimize] body stream error:", err.message);
+        clearTimeout(bodyTimeout);
+        if (!res.writableEnded) { try { res.end(); } catch {} }
+      });
+      apiRes.body.pipe(res);
+      res.on("finish", () => clearTimeout(bodyTimeout));
+      res.on("close", () => clearTimeout(bodyTimeout));
+    } else {
+      const text = await apiRes.text();
+      res.end(text);
+    }
+  } catch (err: any) {
+    console.error("[ai/optimize] error:", err.message);
+    if (!res.headersSent) res.status(500).json({ error: err.message || "AI proxy error" });
+  }
+});
+
+// Admin: prioritize a pending job (move to front of queue)
+runwayRouter.post("/jobs/:id/prioritize", authMiddleware, async (req: any, res: any) => {
+  try {
+    if (req.user!.role !== "admin") {
+      return res.status(403).json({ error: "仅管理员可操作" });
+    }
+    const jobId = req.params.id;
+    const { priority = 10 } = req.body || {};
+
+    // Only allow prioritizing pending/queued jobs
+    const job = await prisma.runwayJob.findUnique({ where: { id: jobId } }) as any;
+    if (!job) return res.status(404).json({ error: "任务不存在" });
+    if (!["pending", "queued"].includes(job.status)) {
+      return res.status(400).json({ error: "只能优先排队等待中的任务" });
+    }
+
+    await prisma.$executeRawUnsafe(
+      `UPDATE runway_jobs SET priority = $1 WHERE id = $2::uuid`,
+      priority, jobId
+    );
+
+    console.log(`[admin] Job ${jobId} priority set to ${priority} by ${req.user!.username}`);
+    res.json({ ok: true, priority });
+  } catch (err: any) {
+    console.error("[prioritize] error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 runwayRouter.post("/capture", (req, res) => {
   const data = req.body;

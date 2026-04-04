@@ -1,4 +1,5 @@
 import { createApp } from 'vue'
+import { startVersionCheck } from "./utils/versionCheck"
 import App from './App.vue'
 import { setupI18n } from './locales'
 import { setupAssets, setupScrollbarStyle } from './plugins'
@@ -18,6 +19,8 @@ async function bootstrap() {
   await setupRouter(app)
 
   app.mount('#app')
+  // Auto-reload on new deployment
+  startVersionCheck()
 }
 
 bootstrap()

@@ -108,7 +108,7 @@ router.get("/accounts", async (_req: Request, res: Response) => {
     });
     // Get recent jobs per account (max 5 per account, newest first)
     const acctJobs = await prisma.runwayJob.findMany({
-      where: { accountId: { not: null } },
+      where: { accountId: { not: null }, status: { not: "deleted" } },
       orderBy: { updatedAt: "desc" },
       take: 50,
       select: { id: true, accountId: true, userId: true, status: true, progress: true, prompt: true, createdAt: true, updatedAt: true, user: { select: { username: true } } },
@@ -431,17 +431,20 @@ router.get("/dashboard", async (_req: Request, res: Response) => {
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
 
-    const [totalUsers, activeUsers, totalJobs, todayJobs, queuedJobs, processingJobs, completedJobs, failedJobs, recentJobs] = await Promise.all([
+    const notDeleted = { not: "deleted" };
+    const [totalUsers, activeUsers, totalJobs, todayJobs, queuedJobs, processingJobs, completedJobs, failedJobs, todayCompleted, todayFailed, recentJobs] = await Promise.all([
       prisma.user.count(),
       prisma.user.count({ where: { isActive: true } }),
-      prisma.runwayJob.count(),
-      prisma.runwayJob.count({ where: { createdAt: { gte: todayStart } } }),
+      prisma.runwayJob.count({ where: { status: notDeleted } }),
+      prisma.runwayJob.count({ where: { createdAt: { gte: todayStart }, status: notDeleted } }),
       prisma.runwayJob.count({ where: { status: { in: ["pending", "queued"] } } }),
       prisma.runwayJob.count({ where: { status: { in: ["submitted", "processing"] } } }),
       prisma.runwayJob.count({ where: { status: "completed" } }),
       prisma.runwayJob.count({ where: { status: "failed" } }),
+      prisma.runwayJob.count({ where: { status: "completed", createdAt: { gte: todayStart } } }),
+      prisma.runwayJob.count({ where: { status: "failed", createdAt: { gte: todayStart } } }),
       prisma.runwayJob.findMany({
-        where: { createdAt: { gte: todayStart } },
+        where: { createdAt: { gte: todayStart }, status: notDeleted },
         select: { userId: true, status: true },
       }),
     ]);
@@ -456,9 +459,10 @@ router.get("/dashboard", async (_req: Request, res: Response) => {
       if (j.status === "failed") userTodayMap[uid].failed++;
     }
 
-    // Per-user total job counts
+    // Per-user total job counts (exclude deleted)
     const userJobCounts = await prisma.runwayJob.groupBy({
       by: ["userId"],
+      where: { status: { not: "deleted" } },
       _count: { id: true },
     });
 
@@ -503,7 +507,7 @@ router.get("/dashboard", async (_req: Request, res: Response) => {
     });
     // Get recent jobs per account (active first, then recent completed, max 5 per account)
     const accountRecentJobs = await prisma.runwayJob.findMany({
-      where: { accountId: { not: null } },
+      where: { accountId: { not: null }, status: { not: "deleted" } },
       orderBy: { updatedAt: "desc" },
       take: 50,
       select: { id: true, accountId: true, userId: true, status: true, progress: true, prompt: true, createdAt: true, updatedAt: true, user: { select: { username: true } } },
@@ -542,7 +546,7 @@ router.get("/dashboard", async (_req: Request, res: Response) => {
 
     res.json({
       overview: {
-        totalUsers, activeUsers, totalJobs, todayJobs, queuedJobs, processingJobs, completedJobs, failedJobs,
+        totalUsers, activeUsers, totalJobs, todayJobs, queuedJobs, processingJobs, completedJobs, failedJobs, todayCompleted, todayFailed,
         totalAccounts: accounts.length,
         activeAccounts: accounts.filter(a => a.isActive).length,
         totalMaxConcurrency,

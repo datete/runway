@@ -49,7 +49,7 @@ export class RunwayService {
             const todayStart = new Date();
             todayStart.setHours(0, 0, 0, 0);
             const todayCount = await tx.runwayJob.count({
-              where: { userId: input.userId, createdAt: { gte: todayStart } },
+              where: { userId: input.userId, createdAt: { gte: todayStart }, status: { not: "deleted" } },
             });
             if (todayCount >= user.dailyQuota) {
               throw new Error(`今日配额已用完（上限 ${user.dailyQuota} 个）`);
@@ -58,7 +58,7 @@ export class RunwayService {
           // Total quota — hard limit
           if (user.totalQuota !== null) {
             const totalCount = await tx.runwayJob.count({
-              where: { userId: input.userId },
+              where: { userId: input.userId, status: { not: "deleted" } },
             });
             if (totalCount >= user.totalQuota) {
               throw new Error(`总提交配额已用完（上限 ${user.totalQuota} 个）`);
@@ -77,7 +77,7 @@ export class RunwayService {
           imageUrl: input.imageUrl,
           referenceImages: input.imageUrls ? JSON.stringify(input.imageUrls) : undefined,
           exploreMode: input.exploreMode ?? true,
-          modelName: "kling_3_0_standard",
+          modelName: "kling_3_0_pro",
           status: "pending",
           provider: "direct",
           duration: input.duration || 5,
@@ -110,13 +110,47 @@ export class RunwayService {
   }
 
   async listJobs(userId?: string, role?: string) {
-    const where = role === "admin" ? {} : { userId: userId ?? null };
+    const where = role === "admin"
+      ? { status: { not: "deleted" } }
+      : { userId: userId ?? null, status: { not: "deleted" } };
     const include = role === "admin" ? { user: { select: { username: true } } } : undefined;
     const jobs = await prisma.runwayJob.findMany({ where, orderBy: { createdAt: "desc" }, take: 100, include });
-    if (role === "admin") {
-      return jobs.map((j: any) => ({ ...j, username: j.user?.username || null, user: undefined }));
+
+    // Fetch priority values (not in Prisma schema, added via raw SQL)
+    const jobIds = jobs.map((j: any) => j.id);
+    let priorityMap: Record<string, number> = {};
+    if (jobIds.length > 0) {
+      try {
+        const placeholders = jobIds.map((_: any, i: number) => `$${i + 1}::uuid`).join(',');
+        const rows: any[] = await (prisma as any).$queryRawUnsafe(
+          `SELECT id::text, COALESCE(priority, 0) as priority FROM runway_jobs WHERE id IN (${placeholders})`,
+          ...jobIds
+        );
+        for (const r of rows) priorityMap[r.id] = r.priority;
+      } catch (e: any) { console.warn('[listJobs] priority fetch error:', e.message); }
     }
-    return jobs;
+
+    // Calculate queue positions for pending/queued jobs (by priority DESC, createdAt ASC)
+    const queuedJobs = jobs.filter((j: any) => ['pending', 'queued'].includes(j.status));
+    const sorted = [...queuedJobs].sort((a: any, b: any) => {
+      const pa = priorityMap[a.id] || 0, pb = priorityMap[b.id] || 0;
+      if (pb !== pa) return pb - pa;
+      return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+    });
+    const posMap: Record<string, number> = {};
+    sorted.forEach((j: any, i: number) => { posMap[j.id] = i + 1; });
+    const queueTotal = sorted.length;
+
+    const enriched = jobs.map((j: any) => ({
+      ...j,
+      priority: priorityMap[j.id] || 0,
+      queuePosition: posMap[j.id] || null,
+      queueTotal: ['pending', 'queued'].includes(j.status) ? queueTotal : null,
+    }));
+    if (role === "admin") {
+      return enriched.map((j: any) => ({ ...j, username: j.user?.username || null, user: undefined }));
+    }
+    return enriched;
   }
 
   async retryJob(id: string, userId?: string, role?: string) {
@@ -140,11 +174,12 @@ export class RunwayService {
     await this._cancelRemote(job as any);
     // Clean up BullMQ jobs
     await this._cleanupQueues(id);
-    await prisma.runwayJob.update({
+    // Soft delete: mark as deleted instead of removing from DB
+    // This preserves the record for accurate dashboard statistics
+    return prisma.runwayJob.update({
       where: { id },
-      data: { status: "cancelled", finishedAt: new Date() },
-    }).catch(() => {});
-    return prisma.runwayJob.delete({ where: { id } });
+      data: { status: "deleted", finishedAt: new Date() },
+    });
   }
 
   async cancelJob(id: string, userId?: string, role?: string) {

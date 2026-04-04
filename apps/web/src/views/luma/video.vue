@@ -7,6 +7,7 @@ import KlingList from '../kling/kgList.vue'
 import RunmlList from './runmlList.vue'
 import PixList from './pixList.vue'
 import VideoList from '../video/list.vue'
+import RunwayQueue from './RunwayQueue.vue'
 import RunwayLoginModal from './RunwayLoginModal.vue'
 import { gptServerStore } from '@/store'
 import { computed, ref, watch } from 'vue'
@@ -67,6 +68,7 @@ const handleLoggedIn = () => {
       <RunmlList v-else-if="gptServerStore.myData.TAB_VIDEO === 'runwayml'" />
       <PixList v-else-if="gptServerStore.myData.TAB_VIDEO === 'pixverse'" />
       <VideoList v-else-if="gptServerStore.myData.TAB_VIDEO === 'all'" />
+      <RunwayQueue v-else-if="gptServerStore.myData.TAB_VIDEO === 'batch'" />
       <VoList v-else />
     </div>
   </div>

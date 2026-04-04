@@ -41,6 +41,7 @@ model UserLog {
 
 model RunwayJob {
   id              String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  seq             Int              @default(autoincrement())
   userId          String?          @map("user_id") @db.Uuid
   provider        String           @default("useapi") @db.VarChar(32)
   mode            String           @db.VarChar(32)

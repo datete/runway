@@ -95,4 +95,47 @@ export class RunwayController {
       res.status(500).json({ error: e.message });
     }
   }
+
+  async batchCreateJobs(req: Request, res: Response) {
+    try {
+      const { prompts, mode, imageUrl, duration, resolution, quality, cfgScale, sound, videoUrl } = req.body;
+
+      if (!Array.isArray(prompts) || prompts.length === 0) {
+        return res.status(400).json({ error: "prompts must be a non-empty array" });
+      }
+      if (prompts.length > 20) {
+        return res.status(400).json({ error: "prompts array exceeds maximum of 20 items" });
+      }
+      if (!mode) {
+        return res.status(400).json({ error: "mode is required" });
+      }
+
+      const userId = req.user?.id;
+      const created: { jobId: string; prompt: string }[] = [];
+      const errors: { prompt: string; error: string }[] = [];
+
+      for (const prompt of prompts) {
+        if (!prompt || typeof prompt !== "string") {
+          errors.push({ prompt: String(prompt), error: "invalid or empty prompt" });
+          continue;
+        }
+        try {
+          const job = await svc.createJob({
+            prompt, mode, imageUrl, duration, resolution, quality, cfgScale, sound, videoUrl, userId,
+          });
+          created.push({ jobId: job.id, prompt });
+        } catch (e: any) {
+          errors.push({ prompt, error: e.message ?? "unknown error" });
+        }
+      }
+
+      logAction(userId, "batch_create_jobs",
+        `total=${prompts.length} created=${created.length} errors=${errors.length} mode=${mode}`,
+        req.socket.remoteAddress);
+
+      return res.status(201).json({ total: prompts.length, created, errors });
+    } catch (e: any) {
+      return res.status(500).json({ error: e.message });
+    }
+  }
 }

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { NAlert, NButton, NInput, NSpin, NSwitch, NTag, NSlider, NTooltip, useMessage } from 'naive-ui'
+import { NAlert, NButton, NDrawer, NDrawerContent, NInput, NSpin, NSwitch, NTag, NSlider, NTooltip, useMessage } from 'naive-ui'
 import { SvgIcon } from '@/components/common'
 import { homeStore } from '@/store'
 import { useRunwayJwt } from '@/composables/useRunwayJwt'
@@ -33,7 +33,7 @@ const remark = ref('')
 const images = ref<UploadedImage[]>([])
 const exploreMode = ref(true)
 const duration = ref(5)
-const resolution = ref('720x1280')
+const resolution = ref('1076x1920')
 const quality = ref('std')
 const sound = ref(true)
 const cfgScale = ref(0.5)
@@ -42,26 +42,18 @@ const cfgScale = ref(0.5)
 const refVideo = ref<{ preview: string; url: string; uploading: boolean } | null>(null)
 
 const stdResolutions = [
-  { value: '720x1280', label: '9:16', desc: '竖屏 720p', iconW: 20, iconH: 34 },
-  { value: '1280x720', label: '16:9', desc: '横屏 720p', iconW: 34, iconH: 20 },
-  { value: '960x960', label: '1:1', desc: '方形 960p', iconW: 26, iconH: 26 },
-]
-const proResolutions = [
-  { value: '1080x1920', label: '9:16', desc: '竖屏 1080p', iconW: 20, iconH: 34 },
+  { value: '1076x1920', label: '9:16', desc: '竖屏 1080p', iconW: 20, iconH: 34 },
   { value: '1920x1080', label: '16:9', desc: '横屏 1080p', iconW: 34, iconH: 20 },
   { value: '1440x1440', label: '1:1', desc: '方形 1440p', iconW: 26, iconH: 26 },
 ]
-const resolutionOptions = computed(() => quality.value === 'pro' ? proResolutions : stdResolutions)
+const proResolutions = [
+  { value: '1076x1920', label: '9:16', desc: '竖屏 1080p', iconW: 20, iconH: 34 },
+  { value: '1920x1080', label: '16:9', desc: '横屏 1080p', iconW: 34, iconH: 20 },
+  { value: '1440x1440', label: '1:1', desc: '方形 1440p', iconW: 26, iconH: 26 },
+]
+const resolutionOptions = computed(() => proResolutions)
 
-const stdToProMap: Record<string, string> = { '720x1280': '1080x1920', '1280x720': '1920x1080', '960x960': '1440x1440' }
-const proToStdMap: Record<string, string> = { '1080x1920': '720x1280', '1920x1080': '1280x720', '1440x1440': '960x960' }
-watch(quality, (newQ) => {
-  if (newQ === 'pro') {
-    resolution.value = stdToProMap[resolution.value] || '1080x1920'
-  } else {
-    resolution.value = proToStdMap[resolution.value] || '720x1280'
-  }
-})
+
 
 const durationHints: Record<number, string> = {
   5: '适合产品展示、短镜头动作，生成速度最快',
@@ -72,8 +64,8 @@ const durationHints: Record<number, string> = {
 
 
 const qualityHints: Record<string, string> = {
-  std: '标准模式 — 基于参考图片生成视频，适合大多数场景，消耗 1 个配额',
-  pro: '专业模式 — 支持参考视频+图片混合输入，运动控制更精准，画质更高，消耗 2 个配额',
+  std: 'Pro 模式 — 基于参考图片生成视频，最高 1080p 分辨率，适合大多数场景，消耗 1 个配额',
+  pro: '大师模式 — 支持参考视频+图片混合输入，运动控制更精准，消耗 2 个配额',
 }
 
 const cfgHint = computed(() => {
@@ -89,11 +81,24 @@ const maxConcurrency = ref(2)
 const tokenList = ref<TokenStatus[]>([])
 let tokenTimer: ReturnType<typeof setInterval> | null = null
 
+const dailyUsed = ref(0)
+const dailyQuota = ref<number | null>(null)
+const totalUsed = ref(0)
+const totalQuota = ref<number | null>(null)
+
 const isUploading = computed(() => images.value.some((item) => item.uploading))
 const uploadedUrls = computed(() => images.value.filter((item) => item.url).map((item) => item.url))
 const remainingSlots = computed(() => Math.max(0, MAX_IMAGES - images.value.length))
 
 const isVideoUploading = computed(() => refVideo.value?.uploading === true)
+
+const promptLength = computed(() => prompt.value.length)
+const promptHint = computed(() => {
+  if (promptLength.value === 0) return ''
+  if (promptLength.value < 10) return '建议更详细地描述'
+  if (promptLength.value > 500) return '提示词过长可能影响效果'
+  return ''
+})
 
 const canSubmit = computed(() => {
   if (!jwtToken.value) return false
@@ -101,6 +106,7 @@ const canSubmit = computed(() => {
   if (uploadedUrls.value.length === 0) return false
   if (quality.value === 'pro' && (!refVideo.value || !refVideo.value.url)) return false
   if (loading.value || isUploading.value || isVideoUploading.value) return false
+  if (quotaExceeded.value) return false
   return true
 })
 
@@ -115,13 +121,49 @@ const concurrencyClass = computed(() => {
   return 'text-slate-500 dark:text-slate-400'
 })
 
+const quotaLabel = computed(() => {
+  const parts: string[] = []
+  if (dailyQuota.value !== null) {
+    parts.push(`今日 ${dailyUsed.value}/${dailyQuota.value}`)
+  }
+  if (totalQuota.value !== null) {
+    parts.push(`总计 ${totalUsed.value}/${totalQuota.value}`)
+  }
+  return parts.join(' · ') || null
+})
+
+const quotaExceeded = computed(() => {
+  if (dailyQuota.value !== null && dailyUsed.value >= dailyQuota.value) return '今日配额已用完'
+  if (totalQuota.value !== null && totalUsed.value >= totalQuota.value) return '总配额已用完'
+  return null
+})
+
+const quotaWarning = computed(() => {
+  if (quotaExceeded.value) return null
+  if (dailyQuota.value !== null && dailyUsed.value >= dailyQuota.value * 0.8) {
+    return `今日配额即将用完（${dailyUsed.value}/${dailyQuota.value}）`
+  }
+  if (totalQuota.value !== null && totalUsed.value >= totalQuota.value * 0.8) {
+    return `总配额即将用完（${totalUsed.value}/${totalQuota.value}）`
+  }
+  return null
+})
+
 const createUid = () =>
   globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`
+
+const uploadFlash = ref<Set<string>>(new Set())
 
 const updateImage = (id: string, patch: Partial<UploadedImage>) => {
   const index = images.value.findIndex((item) => item.id === id)
   if (index < 0) return
+  const wasUploading = images.value[index].uploading
   images.value[index] = { ...images.value[index], ...patch }
+  // Flash green on upload complete
+  if (wasUploading && patch.uploading === false && patch.url) {
+    uploadFlash.value.add(id)
+    setTimeout(() => { uploadFlash.value.delete(id) }, 800)
+  }
 }
 
 const removeImageById = (id: string) => {
@@ -134,6 +176,10 @@ const fetchTokenStatus = async () => {
     maxConcurrency.value = 2
     tokenList.value = []
     tokenWarnings.value = []
+    dailyUsed.value = 0
+    dailyQuota.value = null
+    totalUsed.value = 0
+    totalQuota.value = null
     return
   }
 
@@ -144,6 +190,10 @@ const fetchTokenStatus = async () => {
     const data = await res.json()
     activeTasks.value = data.activeTasks ?? 0
     maxConcurrency.value = data.maxConcurrency ?? 2
+    dailyUsed.value = data.dailyUsed ?? 0
+    dailyQuota.value = data.dailyQuota ?? null
+    totalUsed.value = data.totalUsed ?? 0
+    totalQuota.value = data.totalQuota ?? null
     tokenList.value = data.tokens || []
     tokenWarnings.value = (data.tokens || [])
       .map((token: TokenStatus) => {
@@ -168,7 +218,43 @@ const handleFileSelect = async (event: Event) => {
   const input = event.target as HTMLInputElement
   const fileList = Array.from(input.files || []).slice(0, remainingSlots.value)
   if (fileList.length === 0) return
+  processFiles(fileList)
+  input.value = ''
+}
 
+const removeImage = (index: number) => {
+  images.value.splice(index, 1)
+}
+
+// Drag-and-drop support
+const isDragging = ref(false)
+let dragCounter = 0
+
+const onDragEnter = (e: DragEvent) => {
+  e.preventDefault()
+  dragCounter++
+  if (e.dataTransfer?.types.includes('Files')) isDragging.value = true
+}
+const onDragLeave = (e: DragEvent) => {
+  e.preventDefault()
+  dragCounter--
+  if (dragCounter <= 0) { isDragging.value = false; dragCounter = 0 }
+}
+const onDragOver = (e: DragEvent) => { e.preventDefault() }
+const onDrop = (e: DragEvent) => {
+  e.preventDefault()
+  isDragging.value = false
+  dragCounter = 0
+  const files = e.dataTransfer?.files
+  if (!files || files.length === 0) return
+  // Filter to images only
+  const imageFiles = Array.from(files).filter(f => f.type.startsWith('image/')).slice(0, remainingSlots.value)
+  if (imageFiles.length === 0) { message.warning('请拖入图片文件'); return }
+  // Reuse handleFileSelect logic
+  processFiles(imageFiles)
+}
+
+const processFiles = async (fileList: File[]) => {
   for (const file of fileList) {
     const id = createUid()
     images.value.push({ id, preview: '', url: '', uploading: true })
@@ -182,7 +268,6 @@ const handleFileSelect = async (event: Event) => {
         return
       }
       updateImage(id, { preview: base64 })
-      // Check image dimensions
       const img = new Image()
       img.src = base64
       img.onload = () => {
@@ -208,11 +293,6 @@ const handleFileSelect = async (event: Event) => {
     }
     reader.readAsDataURL(file)
   }
-  input.value = ''
-}
-
-const removeImage = (index: number) => {
-  images.value.splice(index, 1)
 }
 
 const handleVideoSelect = async (event: Event) => {
@@ -244,6 +324,430 @@ const handleVideoSelect = async (event: Event) => {
 }
 
 const removeVideo = () => { refVideo.value = null }
+// ── AI Prompt Optimization ──
+const showAiOptimize = ref(false)
+const aiAutoOptimize = ref(false)
+const aiExtraRequest = ref('')
+const aiStyleTags = ref<string[]>([])
+const aiGenerating = ref(false)
+const aiResult = ref('')
+const aiStreamText = ref('')
+const aiPendingSubmit = ref(false)
+const aiError = ref('')
+const aiThinking = ref(false)
+const aiFollowUp = ref('')
+const aiMessages = ref<Array<{role: 'user' | 'assistant'; content: string}>>([])
+const aiChatScrollEl = ref<HTMLElement | null>(null)
+
+const AI_SKILLS = [
+  // 常用场景
+  { id: 'action', icon: 'ri:body-scan-line', label: '动作优化', desc: '优化人物动作，更好展示商品', hint: '优化人物动作，让展示商品的动作更自然流畅，聚焦商品展示', group: '常用' },
+  { id: 'camera', icon: 'ri:camera-lens-line', label: '镜头优化', desc: '优化镜头运动和构图', hint: '优化镜头语言，用推拉摇移等运镜手法更好地展示商品全貌和细节', group: '常用' },
+  { id: 'product', icon: 'ri:shopping-bag-3-line', label: '产品特写', desc: '镜头聚焦产品，展示细节质感', hint: '镜头缓慢推近产品，聚焦展示产品质感和细节，柔和光影', group: '常用' },
+  { id: 'handshow', icon: 'ri:hand-coin-line', label: '手部展示', desc: '手持/触摸商品，展示细节', hint: '手部细致展示商品，拿起、翻转、触摸材质、按压质感，突出手与商品的互动', group: '动作' },
+  { id: 'catwalk', icon: 'ri:walk-line', label: '走秀步态', desc: '模特步态展示穿搭', hint: '模特自信走来，展示服装穿着效果，自然步态和转身，全身和半身切换', group: '动作' },
+  { id: 'pickup', icon: 'ri:gift-line', label: '拿取展示', desc: '自然拿起商品展示', hint: '人物自然伸手拿起商品，举到镜头前展示，转动展示各角度，表情自然', group: '动作' },
+  { id: 'wear', icon: 'ri:shirt-line', label: '穿戴过程', desc: '展示穿戴/使用过程', hint: '展示穿上/戴上/使用商品的完整过程，动作流畅自然，镜头跟随', group: '动作' },
+  { id: 'interact', icon: 'ri:user-smile-line', label: '互动种草', desc: '对镜展示+推荐', hint: '人物面向镜头，自然展示商品同时配合推荐的表情动作，真实感染力', group: '动作' },
+  { id: 'kol', icon: 'ri:user-smile-line', label: '达人展示', desc: '自然真实，达人原生感', hint: '达人自然展示，保持真实原生感，非摆拍的自然动作和表情', group: '常用' },
+  { id: 'ecom', icon: 'ri:store-2-line', label: '电商带货', desc: '突出卖点，刺激购买', hint: '电商风格展示，突出产品卖点和使用场景，吸引购买', group: '常用' },
+  { id: 'outfit', icon: 'ri:t-shirt-2-line', label: '穿搭展示', desc: '模特走动展示穿搭效果', hint: '模特走动展示穿搭，全身展示服装搭配效果，自然步态', group: '常用' },
+  // 达人原生感
+  { id: 'dailylife', icon: 'ri:home-smile-2-line', label: '日常生活', desc: '居家/出门，自然随拍', hint: '日常生活随拍，居家或出门场景，自然状态的人物动作，不经意间的镜头感', group: '达人' },
+  { id: 'street', icon: 'ri:walk-line', label: '街拍随拍', desc: '街头漫步，自然抓拍', hint: '街头漫步随拍风格，人物走在街道上，自然的步伐和姿态，城市背景虚化', group: '达人' },
+  { id: 'tryout', icon: 'ri:hand-heart-line', label: '试用体验', desc: '真实使用产品过程', hint: '真实试用体验场景，自然拿起产品仔细查看、试用、感受，真实反应和表情', group: '达人' },
+  { id: 'mirror', icon: 'ri:camera-line', label: '镜前自拍', desc: '镜子前展示，真实感', hint: '镜前自拍风格，人物在全身镜前展示穿搭或状态，手机入镜更真实', group: '达人' },
+  { id: 'closeup', icon: 'ri:user-heart-line', label: '口播种草', desc: '面对镜头推荐讲解', hint: '口播种草风格，人物面对镜头自然讲解推荐，表情生动，手势配合展示产品', group: '达人' },
+  { id: 'compare', icon: 'ri:contrast-2-line', label: '对比展示', desc: '前后对比，效果直观', hint: '对比展示风格，分屏或先后对比产品使用前后效果，直观呈现差异', group: '达人' },
+  // 创意拍摄
+  { id: 'unbox', icon: 'ri:gift-line', label: '开箱展示', desc: '拆箱过程，首次体验', hint: '开箱展示过程，从拆封到展示产品，突出第一印象和惊喜感', group: '创意' },
+  { id: 'mood', icon: 'ri:movie-2-line', label: '氛围大片', desc: '电影感运镜，质感画面', hint: '电影感运镜大片，精致的光影氛围，高质感画面，情绪渲染', group: '创意' },
+  { id: 'detail', icon: 'ri:zoom-in-line', label: '细节微距', desc: '超近距离展示纹理材质', hint: '微距镜头展示材质纹理细节，慢速推近，突出工艺品质', group: '创意' },
+  { id: 'cinematic', icon: 'ri:film-line', label: '电影叙事', desc: '故事性镜头语言', hint: '电影叙事风格，有故事性的镜头语言，情节推进感，悬念和张力', group: '创意' },
+  // 场景环境
+  { id: 'scene', icon: 'ri:landscape-line', label: '场景展示', desc: '展示环境和空间氛围', hint: '镜头展示完整场景和空间，从远景到近景的自然过渡', group: '场景' },
+  { id: 'food', icon: 'ri:restaurant-line', label: '美食展示', desc: '食物特写，诱人质感', hint: '美食特写展示，热气腾腾的质感，诱人的色泽和光影，慢动作倾倒或切开', group: '场景' },
+  { id: 'travel', icon: 'ri:road-map-line', label: '旅行Vlog', desc: '旅行记录，风景人文', hint: '旅行Vlog风格，风景与人文结合，手持跟拍，自然随性的记录感', group: '场景' },
+  { id: 'sport', icon: 'ri:run-line', label: '运动活力', desc: '运动场景，动感十足', hint: '运动活力场景，动态捕捉运动瞬间，速度感，慢动作回放精彩瞬间', group: '场景' },
+  // 风格调性
+  { id: 'minimal', icon: 'ri:contrast-line', label: '极简高级', desc: '留白构图，高级质感', hint: '极简高级风格，大量留白，简洁构图，冷淡色调，突出产品本身', group: '风格' },
+  { id: 'vintage', icon: 'ri:ancient-gate-line', label: '复古怀旧', desc: '胶片质感，暖色调', hint: '复古怀旧风格，胶片颗粒感，暖黄色调，慢节奏，有年代感的氛围', group: '风格' },
+  { id: 'tech', icon: 'ri:cpu-line', label: '科技未来', desc: '科技感，未来风格', hint: '科技未来风格，冷色调光效，数码元素，流线型运镜，现代感十足', group: '风格' },
+  { id: 'cute', icon: 'ri:bear-smile-line', label: '可爱萌系', desc: '萌趣风格，轻松活泼', hint: '可爱萌系风格，明亮柔和色调，活泼跳跃的节奏，轻松有趣的动作', group: '风格' },
+]
+
+const selectedSkill = ref<string | null>(null)
+const skillsExpanded = ref(false)
+
+const selectSkill = (skillId: string) => {
+  if (selectedSkill.value === skillId) {
+    selectedSkill.value = null
+    return
+  }
+  selectedSkill.value = skillId
+  const skill = AI_SKILLS.find(s => s.id === skillId)
+  if (skill) {
+    aiStyleTags.value = [skill.label]
+    if (!aiExtraRequest.value.trim()) {
+      aiExtraRequest.value = skill.hint
+    }
+  }
+}
+
+const openAiOptimize = () => {
+  aiExtraRequest.value = ''
+  aiStyleTags.value = []
+  aiGenerating.value = false
+  aiResult.value = ''
+  aiStreamText.value = ''
+  aiError.value = ''
+  aiPendingSubmit.value = false
+  aiThinking.value = false
+  aiFollowUp.value = ''
+  aiMessages.value = []
+  showAiOptimize.value = true
+}
+
+const handleSubmitWithAi = async () => {
+  if (aiAutoOptimize.value && images.value.length > 0 && images.value[0].preview) {
+    openAiOptimize()
+    aiPendingSubmit.value = true
+    // Default to 动作优化 skill when auto-triggered
+    if (!selectedSkill.value) {
+      selectSkill('action')
+    }
+    // Auto-trigger AI generation
+    await nextTick()
+    generateAiPrompt()
+  } else {
+    submit()
+  }
+}
+
+const generateAiFollowUp = async () => {
+  const text = aiFollowUp.value.trim()
+  if (!text) return
+  aiMessages.value.push({ role: 'user', content: text })
+  aiFollowUp.value = ''
+  await doAiGenerate(text)
+}
+
+const generateAiPrompt = async () => {
+  const validImages = images.value.filter(img => img.preview)
+  if (validImages.length === 0) {
+    message.warning('请先上传参考图片')
+    return
+  }
+  // Reset for new generation
+  aiMessages.value = []
+  await doAiGenerate(null)
+}
+
+// Compress image for AI vision (max 768px, JPEG 0.7)
+const compressForVision = (base64: string, maxSize = 768): Promise<string> => {
+  console.log('[AI-OPT] compressForVision called, base64 length:', base64.length)
+  return new Promise((resolve) => {
+    const img = new Image()
+    img.onload = () => {
+      const scale = Math.min(1, maxSize / Math.max(img.width, img.height))
+      const w = Math.round(img.width * scale)
+      const h = Math.round(img.height * scale)
+      const canvas = document.createElement("canvas")
+      canvas.width = w; canvas.height = h
+      canvas.getContext("2d")!.drawImage(img, 0, 0, w, h)
+      resolve(canvas.toDataURL("image/jpeg", 0.7))
+    }
+    img.onerror = () => resolve(base64) // fallback to original
+    img.src = base64
+  })
+}
+
+const doAiGenerate = async (followUpText: string | null) => {
+  console.log('[AI-OPT] doAiGenerate called, followUpText:', followUpText ? 'yes' : 'no')
+  const validImages = images.value.filter(img => img.preview)
+  console.log('[AI-OPT] validImages count:', validImages.length)
+  aiGenerating.value = true
+  aiThinking.value = true
+  aiStreamText.value = ''
+  aiResult.value = ''
+  aiError.value = ''
+  nextTick(() => { aiChatScrollEl.value?.scrollTo({ top: aiChatScrollEl.value.scrollHeight, behavior: 'smooth' }) })
+
+  let abortTimer: ReturnType<typeof setTimeout> | undefined
+  try {
+  // Build skill-aware system prompt
+  const skill = selectedSkill.value ? AI_SKILLS.find(s => s.id === selectedSkill.value) : null
+
+  const SKILL_PROMPTS: Record<string, string> = {
+    action: `【动作优化模式】
+重点：优化人物动作，让商品展示更专业有效。分析图片中的商品类型，生成最适合展示该商品的动作描述。
+- 服装类：走动、转身、拉扯面料展示弹力、整理衣领/袖口、自然甩动展示垂感
+- 鞋类：抬脚展示、走路展示步态、蹲下系鞋带、侧面展示鞋型
+- 包/配饰：拿起展示、打开展示内部、搭配穿搭、手部特写
+- 美妆/护肤：涂抹过程、按压取用、展示质地、使用前后对比
+动作要求：自然不僵硬、有节奏感、动作间过渡流畅、始终让商品处于画面焦点。`,
+
+    camera: `【镜头优化模式】
+重点：用专业运镜手法最大化展示商品。根据商品类型选择最佳镜头策略。
+- 整体展示：中景→特写的推镜、环绕展示360°全貌
+- 细节展示：微距推近纹理材质、浅景深突出细节
+- 动态展示：跟随人物移动的跟拍镜头、平行移动的横移镜头
+- 氛围营造：从远景拉近的戏剧性推镜、低角度仰拍增加气势
+镜头要求：运动平稳流畅、速度节奏有变化（快→慢→停）、始终保持商品在黄金构图位置。`,
+
+    product: `【产品特写模式】
+重点：镜头从中景缓慢推近到产品特写，展示材质、质感、光泽。柔和侧光或逆光突出轮廓和细节。背景简洁干净。如果是食品饮料可加入蒸汽、水珠等动态元素。运镜：慢速环绕、推近、微距切换。`,
+
+    kol: `【达人原生感模式】
+重点：人物动作自然生活化（走路、转身、微笑、整理衣物）。避免摆拍感，强调抓拍质感。场景真实（居家/咖啡店/街道）。镜头跟随人物移动，轻微晃动增加真实感。光线自然。`,
+
+    ecom: `【电商带货模式】
+重点：产品和人物都要出镜，展示使用产品的过程。动作清晰有目的性（拆包、试穿、试用、效果对比）。镜头在人物和产品间切换，特写产品卖点。背景简洁明亮。`,
+
+    outfit: `【穿搭展示模式】
+重点：模特全身入镜，走路/转身展示服装整体效果。镜头从头到脚缓慢扫过展示搭配细节。步态自然优雅，可加入甩头、整理衣领等动作。光线柔和均匀突出服装颜色和材质。`,
+
+    unbox: `【开箱展示模式】
+重点：手部动作为主（拆开包装、取出产品、翻转查看）。俯拍或平视桌面，干净桌面背景。慢动作展示拆封过程营造期待感。产品取出后给特写。光线明亮柔和。`,
+
+    mood: `【氛围大片模式】
+重点：电影级运镜（推拉摇移、跟拍、升降、环绕长镜头）。黄金时段暖光、逆光剪影、冷暖对比。慢动作+正常速度交替。景深变化虚实结合。画面构图精致。`,
+
+    scene: `【场景展示模式】
+重点：镜头从远景到近景，或从入口进入空间的跟随镜头。平稳缓慢移动展示空间全貌和细节。自然光透过窗户。加入环境元素（窗帘飘动、水面波纹、植物微动）。`,
+
+    detail: `【细节微距模式】
+重点：超近距离拍摄展示材质纹理。极浅景深焦点在细节上背景完全虚化。慢速平移或缓慢推近。侧光勾勒纹理、逆光穿透材质。适合布料编织、皮革纹路、金属光泽。`,
+
+    cinematic: `【电影叙事模式】
+重点：有故事性的镜头语言，强调情节推进。镜头从某个细节或画外音起始，缓慢揭示主体。光影有对比（明暗交替），景深变化突出叙事节奏。有起承转合的镜头节奏。可加入人物回望、推门、走入光线等动作。`,
+
+    food: `【美食展示模式】
+重点：食物必须看起来诱人。微距展示食材纹理、色泽、光泽。加入动态元素（蒸汽升腾、酱汁浇淋、芝士拉丝、刀切截面、液体倾倒）。俯拍+平视切换，暖色调灯光，浅景深突出食物主体。`,
+
+    travel: `【旅行Vlog模式】
+重点：手持跟拍风格，自然晃动增加真实感。风景大全景+人物中景交替。金色时段自然光。人物走向镜头或背对镜头走向远方的构图。加入转场动作（手挡镜头、快速平移）。节奏轻松随性。`,
+
+    sport: `【运动活力模式】
+重点：快速运动场景捕捉。慢动作拍摄关键瞬间（跳跃、奔跑、击球、翻转）。多角度切换（仰拍显力量、跟拍显速度）。强对比光线，汗水/水花飞溅等动态元素。节奏快，剪辑感强。`,
+
+    minimal: `【极简高级模式】
+重点：大量留白构图，画面元素极少。纯色/浅色背景。产品或人物居中或三分法构图。慢速平移或静止镜头。冷淡色调（白/灰/米色为主）。光线均匀柔和无明显阴影。动作极简克制。`,
+
+    vintage: `【复古怀旧模式】
+重点：胶片质感画面（轻微颗粒、色彩偏暖黄/橙调）。镜头可加入轻微暗角和色散。慢节奏缓慢运镜。怀旧场景元素（老建筑、复古家具、黑胶唱片）。自然光或钨丝灯暖光。人物动作缓慢优雅。`,
+
+    tech: `【科技未来模式】
+重点：冷色调（蓝/紫/青）光效。产品悬浮或置于暗色科技感台面上。光线从侧面或底部打出轮廓光。可加入光线扫过表面的动态效果。运镜精准流畅（无人机式环绕或线性平移）。背景暗色突出产品。`,
+
+    cute: `【可爱萌系模式】
+重点：明亮柔和的色调（粉/白/浅蓝/浅黄）。人物表情生动活泼（眨眼、歪头、比心）。轻微过曝的柔光效果。节奏轻快跳跃。可加入弹跳动作或翻转动作。背景温馨干净。`,
+
+    dailylife: `【日常生活模式】
+重点：居家或日常外出场景，人物处于自然放松状态。动作不刻意（喝咖啡、整理物品、看窗外、翻书）。镜头稍有距离感，像朋友在旁边随手拍。自然光为主，不打灯。场景真实有生活气息。`,
+
+    street: `【街拍随拍模式】
+重点：街头场景，人物自然行走。镜头跟随或等待人物走入画面。浅景深虚化城市背景。自然步态不看镜头或偶尔回眸。光线取决于实际环境（阳光/阴天/夜景都可）。手持跟拍微晃增加随拍感。`,
+
+    tryout: `【试用体验模式】
+重点：人物真实拿起产品，仔细端详、触摸、试用。表情和反应要自然真实（微微点头、露出满意神情）。镜头在人物面部和产品之间切换。特写手部操作细节。场景居家或办公桌，光线自然。`,
+
+    mirror: `【镜前自拍模式】
+重点：全身镜前展示，镜像画面。人物一手持手机（手机入镜增加真实感），另一手展示穿搭或造型。自然的照镜子姿势（侧身、转身、整理头发/衣服）。卧室或衣帽间场景，自然光。`,
+
+    closeup: `【口播种草模式】
+重点：人物面部中近景，直面镜头讲解。表情自然生动有感染力。手部动作配合展示产品（举起产品、指向细节、比划大小）。背景简洁不抢眼。光线明亮均匀，突出人物肤质。`,
+
+    compare: `【对比展示模式】
+重点：对比前后效果。先展示使用前状态（平铺、未使用），然后展示使用中/后的效果（上身效果、使用效果）。镜头在两个状态间切换或分屏呈现。对比要直观有冲击力。光线一致确保对比公平。`,
+
+    handshow: `【手部展示模式】
+重点：手部动作为画面核心。手指轻触商品表面展示材质，拿起旋转展示各角度，按压展示弹性/质感。镜头跟随手部移动，微距特写指尖与商品接触的细节。光线侧打突出质感和手部线条。节奏缓慢细腻。`,
+
+    catwalk: `【走秀步态模式】
+重点：模特从远处走向镜头或横穿画面，展示服装穿着效果。步态自信优雅有节奏感。镜头先给全身展示整体搭配，然后推近展示上半身或细节。可加入自然转身、回眸。场景简洁不抢眼，光线均匀突出服装。`,
+
+    pickup: `【拿取展示模式】
+重点：人物自然地从桌面/架子/包装中拿起商品，举到合适位置展示。动作要自然不做作，像是日常发现好物的状态。拿起后缓慢转动展示各个角度，表情带有欣赏/满意感。镜头从中景到特写。`,
+
+    wear: `【穿戴过程模式】
+重点：完整展示穿上/戴上/涂上商品的过程。动作连贯流畅有仪式感。例如：拿起眼镜→慢慢戴上→调整→照镜子；拿起外套→套入→整理→展示效果。镜头跟随动作关键节点，注意穿戴前后对比。`,
+
+    interact: `【互动种草模式】
+重点：人物面对镜头，像和朋友视频聊天一样自然展示商品。表情生动真实，有眼神交流感。手势配合展示（指向细节、翻转展示、贴近脸旁对比）。节奏轻松自然，像真实的推荐分享。背景简洁居家感。`,
+  }
+
+  const skillSection = skill ? '\n' + (SKILL_PROMPTS[skill.id] || '') : ''
+
+  const systemPrompt = `你是专业的AI视频生成提示词专家，专精于可灵（Kling）等国产AI视频生成平台。分析参考图片，结合用户需求，生成最优的视频提示词。
+
+## 可灵视频提示词关键要素（按重要性排序）
+
+1. **主体** — 精确描述画面中最重要的人/物（外观特征、姿态、服装、材质颜色）
+2. **动作** — 具体的动作描述（不是"展示产品"而是"双手捧起产品缓慢转动展示各角度"）
+3. **镜头运动** — 动态运镜（"镜头从中景缓慢推近至特写"而不是"近景拍摄"）
+4. **光影** — 光线方向和质感（"柔和侧窗自然光在表面形成温暖高光"）
+5. **氛围节奏** — 整体风格基调和时间节奏
+${skillSection}
+## 输出要求
+
+- 直接输出提示词，不要标题、序号、解释、前缀
+- 中文输出，80-200字
+- 具体有画面感 — 读完脑中能看到这个视频
+- 动作要具体可执行（"轻轻拿起杯子啜饮"✓  "展示产品"✗）
+- 镜头用动态词（"缓慢推近""环绕平移"✓  "近景""特写"✗）
+- 描述要连贯如一个完整的视频片段，有起承转合`
+
+  // Build user message with all images
+  const userContent: Array<{type: string; image_url?: {url: string}; text?: string}> = []
+
+  // Add all reference images (max 4)
+  for (const img of validImages.slice(0, 4)) {
+    const compressed = await compressForVision(img.preview)
+    userContent.push({ type: 'image_url', image_url: { url: compressed } })
+  }
+
+  // Build text instruction
+  let userText = '请仔细分析' + (validImages.length > 1 ? `这${validImages.length}张参考图片` : '这张参考图片') + '，'
+  userText += '识别画面中的主体（人物特征/产品类型/场景环境），然后生成视频提示词。\n\n'
+
+  if (prompt.value.trim()) {
+    userText += '用户当前填写的提示词（在此基础上优化）：\n「' + prompt.value.trim() + '」\n\n'
+  }
+
+  if (skill) {
+    userText += '用户选择的视频风格：' + skill.label + ' — ' + skill.desc + '\n请严格按照该风格要求生成提示词。\n\n'
+  }
+
+  if (aiExtraRequest.value.trim()) {
+    userText += '用户的额外要求（必须满足）：' + aiExtraRequest.value.trim() + '\n\n'
+  }
+
+  if (!prompt.value.trim() && !skill && !aiExtraRequest.value.trim()) {
+    userText += '用户没有指定特定方向，请根据图片内容自动判断最合适的视频风格和镜头语言。'
+  }
+
+  userContent.push({ type: 'text', text: userText })
+
+  const abortCtrl = new AbortController()
+  abortTimer = setTimeout(() => abortCtrl.abort(), 90000)
+  {
+    console.log('[AI-OPT] sending fetch to /api/runway/ai/optimize, model: gpt-5.4, stream: true')
+    console.time('[AI-OPT] fetch-response')
+    const res = await fetch('/api/runway/ai/optimize', {
+      method: 'POST',
+      signal: abortCtrl.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        ...authHeaders()
+      },
+      body: JSON.stringify({
+        model: 'gpt-5.4',
+        stream: true,
+        max_tokens: 800,
+        messages: followUpText
+          ? [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userContent },
+              ...aiMessages.value.slice(0, -1).map(m => ({ role: m.role, content: m.content })),
+              { role: 'user', content: followUpText }
+            ]
+          : [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userContent }
+            ]
+      })
+    })
+
+    console.timeEnd('[AI-OPT] fetch-response')
+    console.log('[AI-OPT] response status:', res.status, 'content-type:', res.headers.get('content-type'))
+    if (!res.ok) {
+      const errText = await res.text()
+      console.error('[AI-OPT] error response:', errText.slice(0, 200))
+      throw new Error('API错误: ' + res.status + ' ' + errText.slice(0, 100))
+    }
+
+    const reader = res.body?.getReader()
+    if (!reader) throw new Error('无法读取响应流')
+
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    const streamTimeout = 120000 // 120s max wait per chunk
+    console.log('[AI-OPT] starting stream read loop')
+    let chunkCount = 0
+    while (true) {
+      const readPromise = reader.read()
+      const timeoutPromise = new Promise<{done: true; value: undefined}>((resolve) =>
+        setTimeout(() => resolve({ done: true, value: undefined }), streamTimeout)
+      )
+      const { done, value } = await Promise.race([readPromise, timeoutPromise])
+      if (done) {
+        console.log('[AI-OPT] stream done, chunkCount:', chunkCount, 'textLen:', aiStreamText.value.length)
+        if (!aiStreamText.value) throw new Error('AI服务响应超时，请重试')
+        break
+      }
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || ''
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed || !trimmed.startsWith('data: ')) continue
+        const data = trimmed.slice(6)
+        if (data === '[DONE]') continue
+        try {
+          const json = JSON.parse(data)
+          const delta = json.choices?.[0]?.delta?.content
+          if (delta) {
+            if (aiThinking.value) {
+              console.log('[AI-OPT] first delta received, clearing thinking state')
+              aiThinking.value = false
+            }
+            chunkCount++
+            aiStreamText.value += delta
+          }
+        } catch {}
+      }
+    }
+
+    aiResult.value = aiStreamText.value
+    // Save to conversation history
+    aiMessages.value.push({ role: 'assistant', content: aiResult.value })
+    nextTick(() => { aiChatScrollEl.value?.scrollTo({ top: aiChatScrollEl.value.scrollHeight, behavior: 'smooth' }) })
+  } // end fetch block
+  } catch (err: any) {
+    console.error('[AI-OPT] error caught:', err.name, err.message)
+    const msg = err.message || 'AI生成失败'
+    if (err.name === 'AbortError' || msg.includes('504') || msg.includes('timeout') || msg.includes('abort')) {
+      aiError.value = 'AI服务响应超时，请稍后重试'
+    } else if (msg.includes('500')) {
+      aiError.value = 'AI服务暂时不可用，请稍后重试'
+    } else {
+      aiError.value = msg
+    }
+    message.error(aiError.value)
+  } finally {
+    if (abortTimer) clearTimeout(abortTimer)
+    aiGenerating.value = false
+    aiThinking.value = false
+    console.log('[AI-OPT] finally: aiGenerating=false, aiThinking=false')
+  }
+}
+
+
+const applyAiResult = (andSubmit = false) => {
+  // Use the latest AI message from conversation
+  const lastAi = [...aiMessages.value].reverse().find(m => m.role === 'assistant')
+  const text = (lastAi?.content || aiResult.value || aiStreamText.value).trim()
+  if (!text) return
+  prompt.value = text
+  showAiOptimize.value = false
+  message.success('提示词已应用')
+  if (andSubmit) {
+    setTimeout(() => submit(), 100)
+  }
+}
+
 
 const submit = async () => {
   if (!canSubmit.value) return
@@ -292,230 +796,873 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="space-y-2 p-2">
-    <!-- 用户信息 -->
-    <div class="rounded-xl border border-slate-200 bg-white/95 px-3 py-2 shadow-sm dark:border-slate-800 dark:bg-slate-900/95">
-      <div class="mb-1 flex items-center justify-between gap-3">
-        <div class="min-w-0">
-          <p class="truncate text-sm font-semibold text-slate-800 dark:text-slate-100">{{ jwtToken ? jwtUsername : '未登录' }}</p>
-          <p class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">{{ jwtRole === 'admin' ? '管理员账号' : '普通账号' }}</p>
+  <div class="mvp-panel flex flex-col gap-3 p-4 h-full overflow-y-auto">
+
+    <!-- Header -->
+    <div class="flex items-center justify-between">
+      <div class="flex items-center gap-2">
+        <div class="header-icon">
+          <SvgIcon icon="ri:vidicon-line" class="text-base" />
         </div>
-        <div class="flex items-center gap-2">
-          <span :class="['text-xs font-medium', concurrencyClass]">{{ concurrencyLabel }}</span>
+        <div class="flex flex-col">
+          <span class="text-sm font-semibold text-white/90 tracking-wide">视频创作</span>
+          <span class="text-[10px] text-white/35 leading-tight">图生视频 · 单任务模式</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="section-divider" />
+
+    <!-- 用户信息 -->
+    <div class="user-chip">
+      <div class="flex items-center justify-between gap-3">
+        <div class="min-w-0 flex items-center gap-2">
+          <div class="status-dot" :class="{ 'dot-active': jwtToken }"></div>
+          <div class="min-w-0">
+            <p class="truncate text-xs font-semibold text-white/85">{{ jwtToken ? jwtUsername : '未登录' }}</p>
+            <p class="text-[10px] text-white/35">{{ jwtRole === 'admin' ? '管理员账号' : '普通账号' }}</p>
+          </div>
+        </div>
+        <div class="flex flex-col items-end gap-0.5">
+          <span :class="['text-[11px] font-medium', concurrencyClass]">{{ concurrencyLabel }}</span>
+          <span v-if="quotaLabel" class="text-[10px] text-white/35">{{ quotaLabel }}</span>
+        </div>
+      </div>
+
+      <!-- 配额进度条 -->
+      <div v-if="dailyQuota !== null || totalQuota !== null" class="mt-2 flex flex-col gap-1.5">
+        <div v-if="dailyQuota !== null" class="flex items-center gap-2">
+          <span class="text-[10px] text-white/30 w-8 shrink-0">日配</span>
+          <div class="flex-1 h-1.5 rounded-full bg-white/[0.06] overflow-hidden">
+            <div
+              class="h-full rounded-full transition-all duration-500"
+              :class="dailyUsed >= dailyQuota ? 'bg-red-400/80' : dailyUsed >= dailyQuota * 0.8 ? 'bg-amber-400/70' : 'bg-sky-400/60'"
+              :style="{ width: Math.min(100, Math.round(dailyUsed / dailyQuota * 100)) + '%' }"
+            />
+          </div>
+          <span class="text-[10px] tabular-nums" :class="dailyUsed >= dailyQuota ? 'text-red-400/80' : 'text-white/30'">{{ dailyUsed }}/{{ dailyQuota }}</span>
+        </div>
+        <div v-if="totalQuota !== null" class="flex items-center gap-2">
+          <span class="text-[10px] text-white/30 w-8 shrink-0">总配</span>
+          <div class="flex-1 h-1.5 rounded-full bg-white/[0.06] overflow-hidden">
+            <div
+              class="h-full rounded-full transition-all duration-500"
+              :class="totalUsed >= totalQuota ? 'bg-red-400/80' : totalUsed >= totalQuota * 0.8 ? 'bg-amber-400/70' : 'bg-sky-400/60'"
+              :style="{ width: Math.min(100, Math.round(totalUsed / totalQuota * 100)) + '%' }"
+            />
+          </div>
+          <span class="text-[10px] tabular-nums" :class="totalUsed >= totalQuota ? 'text-red-400/80' : 'text-white/30'">{{ totalUsed }}/{{ totalQuota }}</span>
         </div>
       </div>
 
       <template v-if="tokenWarnings.length">
-        <NAlert v-for="(warn, i) in tokenWarnings" :key="i" type="warning" class="mb-2 text-xs">{{ warn }}</NAlert>
+        <NAlert v-for="(warn, i) in tokenWarnings" :key="i" type="warning" class="mt-2 text-xs">{{ warn }}</NAlert>
       </template>
+      <NAlert v-if="quotaExceeded" type="error" class="mt-2 text-xs">{{ quotaExceeded }}</NAlert>
+      <NAlert v-else-if="quotaWarning" type="warning" class="mt-2 text-xs">{{ quotaWarning }}</NAlert>
     </div>
+
+    <div class="section-divider" />
 
     <!-- 提示词 -->
-    <div class="rounded-xl border border-slate-200 bg-white/95 px-3 py-2 shadow-sm dark:border-slate-800 dark:bg-slate-900/95">
-      <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">提示词 *</label>
-      <NInput
-        v-model:value="prompt"
-        type="textarea"
-        placeholder="描述你想要生成的视频内容..."
-        :autosize="{ minRows: 3, maxRows: 6 }"
-        class="rounded-lg"
-      />
+    <div class="flex flex-col gap-1.5">
+      <div class="flex items-center justify-between">
+        <label class="section-label">提示词 *</label>
+        <button
+          class="ai-opt-btn group flex items-center gap-1.5 rounded-lg border border-sky-400/20 bg-gradient-to-r from-sky-500/8 to-blue-500/8 px-2.5 py-1 text-[10px] font-semibold text-sky-300/80 transition-all duration-200 hover:border-sky-400/35 hover:from-sky-500/15 hover:to-blue-500/15 hover:text-sky-200 hover:shadow-md hover:shadow-sky-500/8 active:scale-95"
+          @click="openAiOptimize(false)"
+        >
+          <SvgIcon icon="ri:magic-line" class="text-xs transition-transform duration-200 group-hover:rotate-12" />
+          AI优化
+        </button>
+      </div>
+
+      <div class="textarea-wrapper">
+        <NInput
+          v-model:value="prompt"
+          type="textarea"
+          placeholder="描述你想要生成的视频内容，例如：一只猫在窗台上看雨，镜头缓缓推近..."
+          :autosize="{ minRows: 3, maxRows: 6 }"
+          class="prompt-textarea"
+        />
+        <div class="mt-1 flex items-center justify-between">
+          <p v-if="promptHint" class="text-[10px]" :class="promptLength > 500 ? 'text-amber-400/70' : 'text-white/25'">{{ promptHint }}</p>
+          <span v-else />
+          <span class="text-[10px] font-mono" :class="promptLength > 0 ? 'text-sky-400/50' : 'text-white/15'">{{ promptLength }}</span>
+        </div>
+      </div>
     </div>
 
-    <!-- 参考图片 -->
-    <div class="rounded-xl border border-slate-200 bg-white/95 px-3 py-2 shadow-sm dark:border-slate-800 dark:bg-slate-900/95">
-      <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">参考图片 *（最多 {{ MAX_IMAGES }} 张）</label>
-      <div class="flex flex-wrap gap-2">
-        <div v-for="(img, idx) in images" :key="img.id" class="group relative h-16 w-16 overflow-hidden rounded-lg border border-slate-200 dark:border-slate-700">
-          <img v-if="img.preview" :src="img.preview" class="h-full w-full object-cover" />
-          <div v-if="img.uploading" class="absolute inset-0 flex items-center justify-center bg-black/40">
-            <NSpin size="small" />
+    <div class="section-divider" />
+
+    <!-- 参考图片 - 拖拽上传 -->
+    <div class="flex flex-col gap-1.5">
+      <label class="section-label">参考图片 *（最多 {{ MAX_IMAGES }} 张）</label>
+      <div
+        class="img-drop-zone relative rounded-xl border-2 border-dashed p-3 transition-all duration-300"
+        :class="isDragging ? 'border-sky-400/60 bg-sky-500/[0.08] scale-[1.01]' : 'border-white/[0.08] bg-white/[0.02]'"
+        @dragenter="onDragEnter"
+        @dragleave="onDragLeave"
+        @dragover="onDragOver"
+        @drop="onDrop"
+      >
+        <!-- Drag overlay -->
+        <Transition name="hint-fade">
+          <div v-if="isDragging" class="absolute inset-0 z-10 flex flex-col items-center justify-center rounded-xl bg-sky-500/[0.12] backdrop-blur-sm">
+            <SvgIcon icon="ri:download-2-line" class="mb-1 text-2xl text-sky-400 animate-bounce" />
+            <p class="text-[12px] font-semibold text-sky-300">松手上传图片</p>
           </div>
-          <button
-            v-else
-            class="absolute right-0.5 top-0.5 hidden rounded-full bg-black/60 p-0.5 text-white group-hover:block"
-            @click="removeImage(idx)"
+        </Transition>
+
+        <!-- Image grid -->
+        <div v-if="images.length > 0" class="grid gap-2" :class="images.length === 1 ? 'grid-cols-1' : 'grid-cols-2'">
+          <div
+            v-for="(img, idx) in images"
+            :key="img.id"
+            class="group relative overflow-hidden rounded-lg border transition-all duration-300"
+            :class="[
+              uploadFlash.has(img.id) ? 'border-emerald-400/60 shadow-lg shadow-emerald-500/20' : 'border-white/10 hover:border-white/20',
+              images.length === 1 ? 'h-40' : 'h-24'
+            ]"
           >
-            <SvgIcon icon="ri:close-line" class="text-sm" />
-          </button>
+            <img v-if="img.preview" :src="img.preview" class="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105" />
+            <div v-if="img.uploading" class="absolute inset-0 flex flex-col items-center justify-center gap-1.5 bg-black/50 backdrop-blur-sm">
+              <NSpin size="small" />
+              <span class="text-[10px] text-white/40">上传中...</span>
+            </div>
+            <div v-else class="absolute inset-0 bg-gradient-to-t from-black/40 via-transparent to-transparent opacity-0 transition-opacity group-hover:opacity-100" />
+            <button
+              v-if="!img.uploading"
+              class="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-full bg-black/60 text-white/70 opacity-0 transition-all group-hover:opacity-100 hover:bg-red-500/80 hover:text-white"
+              @click="removeImage(idx)"
+            >
+              <SvgIcon icon="ri:close-line" class="text-xs" />
+            </button>
+            <div v-if="img.url && !img.uploading" class="absolute bottom-1 left-1 flex items-center gap-0.5 rounded-md bg-black/50 px-1 py-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+              <SvgIcon icon="ri:check-line" class="text-[10px] text-emerald-400" />
+              <span class="text-[9px] text-emerald-300/80">已上传</span>
+            </div>
+          </div>
         </div>
+
+        <!-- Upload button / empty state -->
         <label
           v-if="remainingSlots > 0"
-          class="flex h-16 w-16 cursor-pointer items-center justify-center rounded-lg border-2 border-dashed border-slate-300 text-slate-400 transition hover:border-blue-400 hover:text-blue-400 dark:border-slate-600"
+          class="mt-2 flex cursor-pointer items-center justify-center gap-2 rounded-lg border border-dashed border-white/[0.08] bg-white/[0.02] py-2.5 transition-all hover:border-sky-400/30 hover:bg-sky-500/[0.04]"
+          :class="{ 'mt-0': images.length === 0 }"
         >
-          <SvgIcon icon="ri:add-line" class="text-2xl" />
+          <SvgIcon icon="ri:image-add-line" class="text-base text-white/25" />
+          <span class="text-[11px] text-white/30">{{ images.length === 0 ? '点击或拖拽上传参考图片' : `还可上传 ${remainingSlots} 张` }}</span>
           <input type="file" accept="image/*" multiple class="hidden" @change="handleFileSelect" />
         </label>
       </div>
     </div>
 
-    <!-- 生成设置 -->
-    <div class="rounded-xl border border-slate-200 bg-white/95 px-3 py-2 shadow-sm dark:border-slate-800 dark:bg-slate-900/95">
-      <label class="mb-2 block text-xs font-medium text-slate-600 dark:text-slate-300">生成设置</label>
-      <div class="space-y-3">
+    <div class="section-divider" />
 
-        <!-- 画面比例 -->
-        <div>
-          <div class="mb-2 flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
-            <span>画面比例</span>
-          </div>
-          <div class="grid grid-cols-3 gap-2">
-            <button
-              v-for="opt in resolutionOptions"
-              :key="opt.value"
-              class="group flex flex-col items-center gap-2 rounded-xl border px-3 py-3 transition-all duration-200 hover:-translate-y-0.5"
-              :class="resolution === opt.value
-                ? 'border-cyan-500 bg-gradient-to-b from-white to-cyan-50 shadow-md shadow-cyan-500/20 dark:from-slate-800 dark:to-cyan-950/40 dark:shadow-cyan-500/10'
-                : 'border-slate-200 bg-white hover:border-slate-300 hover:shadow-sm dark:border-slate-700 dark:bg-slate-800/60 dark:hover:border-slate-600'"
-              @click="resolution = opt.value"
-            >
+    <!-- 生成设置 -->
+    <div class="flex flex-col gap-3">
+      <label class="section-label">生成设置</label>
+
+      <!-- 画面比例 -->
+      <div>
+        <div class="mb-2 text-[11px] text-white/40 font-medium">画面比例</div>
+        <div class="grid grid-cols-3 gap-2">
+          <button
+            v-for="opt in resolutionOptions"
+            :key="opt.value"
+            class="res-btn group flex flex-col items-center gap-1.5 rounded-xl px-3 py-3 transition-all duration-200"
+            :class="{ active: resolution === opt.value }"
+            @click="resolution = opt.value"
+          >
+            <div class="relative">
               <div
-                class="rounded transition-all duration-200"
-                :class="resolution === opt.value
-                  ? 'border-2 border-cyan-500 bg-gradient-to-br from-cyan-100 to-cyan-200 dark:from-cyan-800/60 dark:to-cyan-700/40'
-                  : 'border-2 border-slate-300 bg-gradient-to-br from-slate-100 to-slate-200 group-hover:border-slate-400 dark:border-slate-600 dark:from-slate-700 dark:to-slate-600'"
+                class="res-icon rounded transition-all duration-200"
+                :class="{ active: resolution === opt.value }"
                 :style="{ width: opt.iconW + 'px', height: opt.iconH + 'px' }"
               />
-              <div class="text-center">
-                <p class="text-xs font-bold" :class="resolution === opt.value ? 'text-cyan-600 dark:text-cyan-400' : 'text-slate-700 dark:text-slate-300'">{{ opt.label }}</p>
-                <p class="text-[10px]" :class="resolution === opt.value ? 'text-cyan-500/80 dark:text-cyan-400/60' : 'text-slate-400 dark:text-slate-500'">{{ opt.desc }}</p>
-              </div>
-            </button>
-          </div>
-        </div>
-
-        <!-- 生成模式 -->
-        <div>
-          <div class="mb-1 flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
-            <span>生成模式</span>
-          </div>
-          <div class="flex gap-2">
-            <button
-              class="rounded-lg border px-3 py-1.5 text-xs font-medium transition"
-              :class="quality === 'std'
-                ? 'border-blue-500 bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400'
-                : 'border-slate-200 text-slate-600 hover:border-slate-300 dark:border-slate-700 dark:text-slate-400'"
-              @click="quality = 'std'"
-            >
-              标准 std
-            </button>
-            <button
-              class="rounded-lg border px-3 py-1.5 text-xs font-medium transition"
-              :class="quality === 'pro'
-                ? 'border-blue-500 bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400'
-                : 'border-slate-200 text-slate-600 hover:border-slate-300 dark:border-slate-700 dark:text-slate-400'"
-              @click="quality = 'pro'"
-            >
-              专业 pro
-            </button>
-          </div>
-          <Transition name="hint-fade">
-            <p v-if="qualityHints[quality]" class="mt-1 text-[11px] text-slate-400 dark:text-slate-500">{{ qualityHints[quality] }}</p>
-          </Transition>
-        </div>
-
-        <!-- 参考视频（仅 pro 模式） -->
-        <Transition name="hint-fade">
-          <div v-if="quality === 'pro'">
-            <div class="mb-1 flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
-              <span>参考视频 *</span>
+              <Transition name="hint-fade">
+                <SvgIcon v-if="resolution === opt.value" icon="ri:check-line" class="absolute -right-1 -top-1 text-[10px] text-sky-400" />
+              </Transition>
             </div>
-            <div class="flex items-center gap-2">
-              <div v-if="refVideo" class="group relative h-16 w-28 overflow-hidden rounded-lg border border-slate-200 dark:border-slate-700">
-                <video v-if="refVideo.preview" :src="refVideo.preview" class="h-full w-full object-cover" muted />
-                <div v-if="refVideo.uploading" class="absolute inset-0 flex items-center justify-center bg-black/40">
-                  <NSpin size="small" />
-                </div>
-                <button
-                  v-else
-                  class="absolute right-0.5 top-0.5 hidden rounded-full bg-black/60 p-0.5 text-white group-hover:block"
-                  @click="removeVideo"
-                >
-                  <SvgIcon icon="ri:close-line" class="text-sm" />
-                </button>
-              </div>
-              <label
-                v-if="!refVideo"
-                class="flex h-16 w-28 cursor-pointer flex-col items-center justify-center gap-1 rounded-lg border-2 border-dashed border-slate-300 text-slate-400 transition hover:border-blue-400 hover:text-blue-400 dark:border-slate-600"
-              >
-                <SvgIcon icon="ri:video-add-line" class="text-xl" />
-                <span class="text-[10px]">上传视频</span>
-                <input type="file" accept="video/*" class="hidden" @change="handleVideoSelect" />
-              </label>
+            <div class="text-center">
+              <p class="text-xs font-bold" :class="resolution === opt.value ? 'text-sky-300' : 'text-white/50'">{{ opt.label }}</p>
+              <p class="text-[10px]" :class="resolution === opt.value ? 'text-sky-400/60' : 'text-white/25'">{{ opt.desc }}</p>
             </div>
-            <p class="mt-1 text-[11px] text-amber-500 dark:text-amber-400">专业模式必须上传参考视频，AI 会 1:1 复刻视频中的动作和运动轨迹，分辨率自动升级至 1080p</p>
-          </div>
-        </Transition>
-
-        <!-- 时长 -->
-        <div>
-          <div class="mb-1 flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
-            <span>时长</span>
-          </div>
-          <div class="flex gap-2">
-            <button
-              v-for="d in [5, 10, 15]"
-              :key="d"
-              class="rounded-lg border px-3 py-1.5 text-xs font-medium transition"
-              :class="duration === d
-                ? 'border-blue-500 bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400'
-                : 'border-slate-200 text-slate-600 hover:border-slate-300 dark:border-slate-700 dark:text-slate-400'"
-              @click="duration = d"
-            >
-              {{ d }}s
-            </button>
-          </div>
-          <Transition name="hint-fade">
-            <p v-if="durationHints[duration]" class="mt-1 text-[11px] text-slate-400 dark:text-slate-500">{{ durationHints[duration] }}</p>
-          </Transition>
+          </button>
         </div>
-
-        <!-- 提示词关联度 cfgScale -->
-        <div>
-          <div class="mb-1 flex items-center justify-between text-xs text-slate-600 dark:text-slate-300">
-            <span>提示词关联度</span>
-            <span class="font-mono text-[11px] text-slate-400">{{ cfgScale.toFixed(2) }}</span>
-          </div>
-          <NSlider v-model:value="cfgScale" :min="0" :max="1" :step="0.05" :tooltip="false" />
-          <Transition name="hint-fade">
-            <p class="mt-1 text-[11px] text-slate-400 dark:text-slate-500">{{ cfgHint }}</p>
-          </Transition>
-        </div>
-
-        <!-- 声音 -->
-        <div class="flex items-center justify-between">
-          <div>
-            <span class="text-xs text-slate-600 dark:text-slate-300">生成声音</span>
-
-          </div>
-          <NSwitch v-model:value="sound" size="small" />
-        </div>
-
       </div>
+
+      <!-- 生成模式 -->
+      <div>
+        <div class="mb-1 text-[11px] text-white/40 font-medium">生成模式</div>
+        <div class="flex gap-2">
+          <button
+            class="pill-btn"
+            :class="{ active: quality === 'std' }"
+            @click="quality = 'std'"
+          >
+            Pro
+          </button>
+          <button
+            class="pill-btn"
+            :class="{ active: quality === 'pro' }"
+            @click="quality = 'pro'"
+          >
+            大师
+          </button>
+        </div>
+        <Transition name="hint-fade">
+          <p v-if="qualityHints[quality]" class="mt-1 text-[11px] text-white/30">{{ qualityHints[quality] }}</p>
+        </Transition>
+      </div>
+
+      <!-- 参考视频（仅 pro 模式） -->
+      <Transition name="hint-fade">
+        <div v-if="quality === 'pro'">
+          <div class="mb-1 text-[11px] text-white/40 font-medium">参考视频 *</div>
+          <div class="flex items-center gap-2">
+            <div v-if="refVideo" class="group relative h-16 w-28 overflow-hidden rounded-lg border border-white/10">
+              <video v-if="refVideo.preview" :src="refVideo.preview" class="h-full w-full object-cover" muted />
+              <div v-if="refVideo.uploading" class="absolute inset-0 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+                <NSpin size="small" />
+              </div>
+              <button
+                v-else
+                class="absolute right-0.5 top-0.5 hidden rounded-full bg-black/70 p-0.5 text-white/80 group-hover:block hover:bg-red-500/80 transition-colors"
+                @click="removeVideo"
+              >
+                <SvgIcon icon="ri:close-line" class="text-sm" />
+              </button>
+            </div>
+            <label
+              v-if="!refVideo"
+              class="upload-area flex h-16 w-28 cursor-pointer flex-col items-center justify-center gap-1 rounded-lg"
+            >
+              <SvgIcon icon="ri:video-add-line" class="text-xl text-white/30" />
+              <span class="text-[10px] text-white/35">上传视频</span>
+              <input type="file" accept="video/*" class="hidden" @change="handleVideoSelect" />
+            </label>
+          </div>
+          <p class="mt-1 text-[11px] text-amber-400/80">大师模式必须上传参考视频，AI 会 1:1 复刻视频中的动作和运动轨迹，分辨率自动升级至 1080p</p>
+        </div>
+      </Transition>
+
+      <!-- 时长 -->
+      <div>
+        <div class="mb-1 text-[11px] text-white/40 font-medium">时长</div>
+        <div class="flex gap-2">
+          <button
+            v-for="d in [5, 10, 15]"
+            :key="d"
+            class="pill-btn"
+            :class="{ active: duration === d }"
+            @click="duration = d"
+          >
+            {{ d }}s
+          </button>
+        </div>
+        <Transition name="hint-fade">
+          <p v-if="durationHints[duration]" class="mt-1 text-[11px] text-white/30">{{ durationHints[duration] }}</p>
+        </Transition>
+      </div>
+
+      <!-- 提示词关联度 cfgScale -->
+      <div class="slider-section">
+        <div class="mb-1 flex items-center justify-between text-[11px] text-white/40 font-medium">
+          <span>提示词关联度</span>
+          <span class="font-mono text-[11px] text-sky-400/70">{{ cfgScale.toFixed(2) }}</span>
+        </div>
+        <NSlider v-model:value="cfgScale" :min="0" :max="1" :step="0.05" :tooltip="false" />
+        <Transition name="hint-fade">
+          <p class="mt-1 text-[11px] text-white/30">{{ cfgHint }}</p>
+        </Transition>
+      </div>
+
+      <!-- 声音 -->
+      <div class="flex items-center justify-between">
+        <span class="text-[11px] text-white/40 font-medium">生成声音</span>
+        <NSwitch v-model:value="sound" size="small" />
+      </div>
+
     </div>
+
+    <div class="section-divider" />
 
     <!-- 备注 -->
-    <div class="rounded-xl border border-slate-200 bg-white/95 px-3 py-2 shadow-sm dark:border-slate-800 dark:bg-slate-900/95">
-      <label class="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">备注（可选）</label>
-      <NInput v-model:value="remark" placeholder="给这个任务加个备注..." class="rounded-lg" />
+    <div class="flex flex-col gap-1.5">
+      <label class="section-label">备注（可选）</label>
+      <NInput v-model:value="remark" placeholder="给这个任务加个备注..." class="prompt-textarea" />
     </div>
 
-    <!-- 提交按钮 -->
-    <NButton
-      type="primary"
-      block
-      :loading="loading"
-      :disabled="!canSubmit"
-      class="rounded-xl"
-      @click="submit"
-    >
-      {{ loading ? '提交中...' : '生成视频' }}
-    </NButton>
-    <p v-if="quality === 'pro' && (!refVideo || !refVideo.url) && uploadedUrls.length > 0 && prompt.trim()" class="text-center text-[11px] text-amber-500">请上传参考视频后再提交（专业模式必需）</p>
+    <div class="section-divider" />
+
+    <!-- AI自动优化开关 + 提交按钮 -->
+    <div class="flex flex-col gap-2">
+      <div class="flex items-center justify-between rounded-xl border border-white/[0.06] bg-white/[0.03] px-3.5 py-2.5 transition-all duration-200" :class="aiAutoOptimize ? 'border-sky-400/20 bg-sky-500/[0.05]' : ''">
+        <div class="flex items-center gap-2">
+          <div class="flex h-5 w-5 items-center justify-center rounded-md" :class="aiAutoOptimize ? 'bg-sky-500/15' : 'bg-white/[0.05]'">
+            <SvgIcon icon="ri:magic-line" class="text-xs" :class="aiAutoOptimize ? 'text-sky-400' : 'text-white/30'" />
+          </div>
+          <span class="text-[11px] font-medium" :class="aiAutoOptimize ? 'text-sky-300/70' : 'text-white/40'">提交时AI优化提示词</span>
+        </div>
+        <NSwitch v-model:value="aiAutoOptimize" size="small" />
+      </div>
+      <button
+        class="submit-btn"
+        :class="{ 'can-submit': canSubmit, 'is-submitting': loading }"
+        :disabled="!canSubmit"
+        @click="handleSubmitWithAi"
+      >
+        <template v-if="loading">
+          <div class="submit-spinner" />
+          提交中...
+        
+</template>
+        <template v-else>
+          <SvgIcon icon="ri:play-circle-line" class="text-base" />
+          生成视频
+        
+</template>
+      </button>
+      <p v-if="quotaExceeded" class="text-center text-[11px] text-red-400/80">{{ quotaExceeded }}</p>
+      <p v-else-if="quality === 'pro' && (!refVideo || !refVideo.url) && uploadedUrls.length > 0 && prompt.trim()" class="text-center text-[11px] text-amber-400/80">请上传参考视频后再提交（大师模式必需）</p>
+      <p v-else-if="!prompt.trim() && uploadedUrls.length > 0" class="text-center text-[10px] text-white/20">请输入提示词</p>
+      <p v-else-if="prompt.trim() && uploadedUrls.length === 0" class="text-center text-[10px] text-white/20">请上传参考图片</p>
+    </div>
   </div>
+
+
+  <!-- AI Prompt Optimization Drawer -->
+  <NDrawer v-model:show="showAiOptimize" placement="right" :width="400" :mask-style="{ backdropFilter: 'blur(8px)', background: 'rgba(0,0,0,0.6)' }">
+    <NDrawerContent closable class="ai-opt-drawer">
+      <template #header>
+        <div class="flex items-center justify-between w-full pr-2">
+          <div class="flex items-center gap-2.5">
+            <div class="ai-drawer-icon flex h-8 w-8 items-center justify-center rounded-lg">
+              <SvgIcon icon="ri:magic-line" class="text-base text-sky-300" />
+            </div>
+            <div class="flex flex-col">
+              <span class="text-[13px] font-bold text-white/90 tracking-wide">AI 提示词优化</span>
+              <span class="text-[10px] text-white/30">智能生成最优提示词</span>
+            </div>
+          </div>
+          <div class="ai-model-badge flex items-center gap-1.5 rounded-lg border border-sky-400/25 bg-sky-500/10 px-2.5 py-1">
+            <SvgIcon icon="ri:robot-2-line" class="text-xs text-sky-400/70" />
+            <span class="text-[11px] font-bold text-sky-300/90 tracking-wide">GPT-5.4</span>
+          </div>
+        </div>
+      </template>
+
+      <div class="ai-drawer-body">
+        <!-- Image preview - compact inline -->
+        <div v-if="images.length > 0" class="mb-4 flex items-center gap-2.5">
+          <div class="flex -space-x-2">
+            <div v-for="img in images" :key="img.id" class="h-10 w-10 overflow-hidden rounded-lg border-2 border-[#0a0e19] shadow-lg">
+              <img v-if="img.preview" :src="img.preview" class="h-full w-full object-cover" />
+            </div>
+          </div>
+          <span class="text-[11px] text-white/30">{{ images.length }} 张参考图片</span>
+        </div>
+        <div v-else class="mb-4 flex items-center gap-2.5 rounded-lg border border-amber-400/10 bg-amber-500/[0.04] px-3 py-2.5">
+          <SvgIcon icon="ri:image-add-line" class="text-sm text-amber-400/50" />
+          <span class="text-[11px] text-amber-300/60">请先上传参考图片</span>
+        </div>
+
+        <!-- Skills - collapsible -->
+        <div class="mb-4">
+          <button
+            class="mb-2 flex w-full items-center gap-1.5 text-left"
+            @click="skillsExpanded = !skillsExpanded"
+          >
+            <SvgIcon icon="ri:apps-2-line" class="text-xs text-sky-400/50" />
+            <p class="text-[11px] font-semibold text-white/40">场景技能</p>
+            <span v-if="selectedSkill && !skillsExpanded" class="ml-1 rounded-md border border-sky-400/25 bg-sky-500/10 px-1.5 py-0.5 text-[10px] text-sky-300">
+              {{ AI_SKILLS.find(s => s.id === selectedSkill)?.label }}
+            </span>
+            <SvgIcon
+              icon="ri:arrow-down-s-line"
+              class="ml-auto text-sm text-white/25 transition-transform duration-200"
+              :class="{ 'rotate-180': skillsExpanded }"
+            />
+          </button>
+
+          <!-- Collapsed: show 动作优化 as main button + expand hint -->
+          <div v-if="!skillsExpanded" class="space-y-2">
+            <button
+              class="flex w-full items-center gap-2.5 rounded-xl border p-2.5 text-left transition-all duration-200 active:scale-[0.97]"
+              :class="selectedSkill === 'action' ? 'border-sky-400/40 bg-sky-500/10' : 'border-sky-400/15 bg-sky-500/[0.04] hover:border-sky-400/25 hover:bg-sky-500/[0.08]'"
+              @click="selectSkill('action')"
+            >
+              <div class="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg" :class="selectedSkill === 'action' ? 'bg-sky-500/20' : 'bg-sky-500/10'">
+                <SvgIcon icon="ri:body-scan-line" class="text-sm text-sky-400" />
+              </div>
+              <div class="min-w-0 flex-1">
+                <p class="text-[12px] font-semibold" :class="selectedSkill === 'action' ? 'text-sky-300' : 'text-white/70'">动作优化</p>
+                <p class="text-[10px]" :class="selectedSkill === 'action' ? 'text-sky-400/50' : 'text-white/30'">优化人物动作，更好展示商品，聚焦商品</p>
+              </div>
+              <SvgIcon v-if="selectedSkill === 'action'" icon="ri:check-line" class="text-sm text-sky-400" />
+            </button>
+            <div class="flex items-center gap-2">
+              <button
+                class="flex-1 rounded-lg border px-2.5 py-1.5 text-[10px] font-medium transition-all active:scale-95"
+                :class="selectedSkill === 'camera' ? 'border-sky-400/40 bg-sky-500/12 text-sky-300' : 'border-white/[0.06] bg-white/[0.02] text-white/35 hover:border-white/12 hover:text-white/50'"
+                @click="selectSkill('camera')"
+              >
+                <SvgIcon icon="ri:camera-lens-line" class="mr-1 inline text-xs" />镜头优化
+              </button>
+              <button
+                class="flex-1 rounded-lg border px-2.5 py-1.5 text-[10px] font-medium transition-all active:scale-95"
+                :class="selectedSkill === 'product' ? 'border-sky-400/40 bg-sky-500/12 text-sky-300' : 'border-white/[0.06] bg-white/[0.02] text-white/35 hover:border-white/12 hover:text-white/50'"
+                @click="selectSkill('product')"
+              >
+                <SvgIcon icon="ri:shopping-bag-3-line" class="mr-1 inline text-xs" />产品特写
+              </button>
+              <button
+                class="rounded-lg border border-white/[0.06] bg-white/[0.02] px-2.5 py-1.5 text-[10px] text-white/25 transition-all hover:border-white/12 hover:text-white/40"
+                @click="skillsExpanded = true"
+              >
+                更多
+              </button>
+            </div>
+          </div>
+
+          <!-- Expanded: grouped skill cards -->
+          <Transition name="hint-fade">
+            <div v-if="skillsExpanded" class="space-y-3">
+              <div v-for="group in ['常用', '动作', '达人', '创意', '场景', '风格']" :key="group">
+                <p class="mb-1.5 text-[10px] font-medium text-white/20">{{ group }}</p>
+                <div class="grid grid-cols-2 gap-1.5">
+                  <button
+                    v-for="skill in AI_SKILLS.filter(s => s.group === group)"
+                    :key="skill.id"
+                    class="ai-skill-card group flex items-start gap-2 rounded-xl border p-2 text-left transition-all duration-200 active:scale-[0.97]"
+                    :class="selectedSkill === skill.id ? 'border-sky-400/40 bg-sky-500/10' : 'border-white/[0.06] bg-white/[0.02] hover:border-white/12 hover:bg-white/[0.04]'"
+                    @click="selectSkill(skill.id)"
+                  >
+                    <div class="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-lg transition-colors duration-200"
+                      :class="selectedSkill === skill.id ? 'bg-sky-500/20' : 'bg-white/[0.04] group-hover:bg-white/[0.08]'"
+                    >
+                      <SvgIcon :icon="skill.icon" class="text-xs" :class="selectedSkill === skill.id ? 'text-sky-400' : 'text-white/30 group-hover:text-white/50'" />
+                    </div>
+                    <div class="min-w-0">
+                      <p class="text-[11px] font-semibold" :class="selectedSkill === skill.id ? 'text-sky-300' : 'text-white/60'">{{ skill.label }}</p>
+                      <p class="text-[10px] leading-snug" :class="selectedSkill === skill.id ? 'text-sky-400/50' : 'text-white/25'">{{ skill.desc }}</p>
+                    </div>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </Transition>
+        </div>
+
+        <!-- Optimization direction input -->
+        <div class="mb-4">
+          <div class="mb-2 flex items-center gap-1.5">
+            <SvgIcon icon="ri:edit-2-line" class="text-xs text-sky-400/50" />
+            <p class="text-[11px] font-semibold text-white/40">优化方向</p>
+            <span class="ml-auto text-[10px] text-white/20">可修改或补充</span>
+          </div>
+          <NInput
+            v-model:value="aiExtraRequest"
+            type="textarea"
+            placeholder="选择上方技能自动填充，或手动输入：&#10;· 镜头聚焦到裤子&#10;· 加入走路动作&#10;· 突出质感"
+            :autosize="{ minRows: 2, maxRows: 4 }"
+            class="prompt-textarea"
+          />
+        </div>
+
+        <!-- Current prompt (collapsed if exists) -->
+        <div v-if="prompt.trim()" class="mb-4 rounded-lg border border-white/[0.05] bg-white/[0.02] px-3 py-2">
+          <p class="text-[10px] text-white/25">当前提示词</p>
+          <p class="mt-0.5 truncate text-[11px] text-white/45">{{ prompt }}</p>
+        </div>
+
+        <!-- Generate button - always visible -->
+        <button
+          class="ai-generate-btn group w-full rounded-xl border border-sky-400/20 px-4 py-3 text-[13px] font-semibold transition-all duration-300 disabled:cursor-not-allowed disabled:opacity-30"
+          :class="aiGenerating ? 'bg-sky-500/10 text-sky-300/80' : 'bg-gradient-to-r from-sky-500/15 via-blue-500/15 to-cyan-500/10 text-sky-300 hover:from-sky-500/25 hover:via-blue-500/25 hover:to-cyan-500/15 hover:border-sky-400/35 hover:shadow-lg hover:shadow-sky-500/10'"
+          :disabled="aiGenerating || images.length === 0"
+          @click="generateAiPrompt"
+        >
+          <template v-if="aiGenerating">
+            <div class="flex items-center justify-center gap-2">
+              <div class="ai-gen-spinner" />
+              <span>AI 正在分析图片并生成提示词...</span>
+            </div>
+          </template>
+          <template v-else>
+            <div class="flex items-center justify-center gap-1.5">
+              <SvgIcon icon="ri:sparkling-2-line" class="text-sm transition-transform duration-300 group-hover:rotate-12 group-hover:scale-110" />
+              <span>{{ aiResult ? '重新生成' : '生成优化提示词' }}</span>
+            </div>
+          </template>
+        </button>
+
+        <!-- Chat area: thinking + messages + streaming -->
+        <div ref="aiChatScrollEl" class="ai-chat-area mt-4 space-y-3 max-h-[320px] overflow-y-auto pr-1">
+          <!-- Previous conversation messages -->
+          <template v-for="(msg, idx) in aiMessages" :key="idx">
+            <!-- User follow-up bubble -->
+            <div v-if="msg.role === 'user'" class="flex justify-end">
+              <div class="ai-chat-user rounded-xl rounded-tr-sm border border-sky-400/15 bg-sky-500/10 px-3 py-2 max-w-[85%]">
+                <p class="text-[12px] leading-relaxed text-sky-200/90">{{ msg.content }}</p>
+              </div>
+            </div>
+            <!-- AI response bubble (only show completed ones, not the last if still streaming) -->
+            <div v-else-if="msg.role === 'assistant' && !(aiGenerating && idx === aiMessages.length - 1)" class="flex justify-start">
+              <div class="ai-chat-bot rounded-xl rounded-tl-sm border border-white/[0.06] bg-white/[0.03] px-3.5 py-2.5 max-w-[90%]">
+                <p class="whitespace-pre-wrap text-[13px] leading-[1.8] text-white/85">{{ msg.content }}</p>
+              </div>
+            </div>
+          </template>
+
+          <!-- Thinking indicator -->
+          <div v-if="aiThinking" class="flex justify-start">
+            <div class="ai-chat-bot rounded-xl rounded-tl-sm border border-white/[0.06] bg-white/[0.03] px-4 py-3">
+              <div class="ai-thinking-dots flex items-center gap-1">
+                <span class="text-[11px] text-white/40 mr-1.5">思考中</span>
+                <span class="ai-dot" /><span class="ai-dot" /><span class="ai-dot" />
+              </div>
+            </div>
+          </div>
+
+          <!-- Current streaming result -->
+          <div v-if="aiStreamText && !aiThinking" class="flex justify-start">
+            <div class="ai-chat-bot rounded-xl rounded-tl-sm border border-sky-400/15 bg-white/[0.03] px-3.5 py-2.5 max-w-[90%]">
+              <p class="whitespace-pre-wrap text-[13px] leading-[1.8] text-white/85">{{ aiStreamText }}<span v-if="aiGenerating" class="ai-cursor ml-0.5 inline-block h-4 w-[2px] rounded-full bg-sky-400" /></p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Action buttons after generation completes -->
+        <div v-if="(aiStreamText || aiResult) && !aiGenerating" class="mt-3 space-y-3">
+          <div class="flex gap-2.5">
+            <button
+              v-if="aiPendingSubmit"
+              class="flex-1 flex items-center justify-center gap-1.5 rounded-xl border border-sky-400/30 bg-gradient-to-r from-sky-500/20 to-blue-500/20 px-4 py-2.5 text-xs font-semibold text-sky-300 transition-all duration-200 hover:from-sky-500/30 hover:to-blue-500/30 hover:shadow-lg hover:shadow-sky-500/10 active:scale-[0.98]"
+              @click="applyAiResult(true)"
+            >
+              <SvgIcon icon="ri:check-line" class="text-sm" />
+              采用并提交
+            </button>
+            <button
+              class="flex-1 flex items-center justify-center gap-1.5 rounded-xl border border-white/10 bg-white/[0.04] px-4 py-2.5 text-xs font-medium text-white/60 transition-all duration-200 hover:border-white/15 hover:bg-white/[0.08] hover:text-white/80 active:scale-[0.98]"
+              @click="applyAiResult(false)"
+            >
+              <SvgIcon icon="ri:arrow-left-line" class="text-sm" />
+              仅采用
+            </button>
+          </div>
+
+          <!-- Follow-up input for multi-turn -->
+          <div class="ai-followup-area rounded-xl border border-white/[0.08] bg-white/[0.02] p-2.5">
+            <p class="mb-2 text-[11px] text-white/30">💬 你还想怎么优化？可以继续对话调整</p>
+            <div class="flex gap-2">
+              <NInput
+                v-model:value="aiFollowUp"
+                type="text"
+                placeholder="如：镜头再推近一点 / 加入转身动作..."
+                size="small"
+                class="prompt-textarea flex-1"
+                @keyup.enter="generateAiFollowUp"
+              />
+              <button
+                class="shrink-0 rounded-lg border border-sky-400/25 bg-sky-500/10 px-3 py-1.5 text-[11px] font-semibold text-sky-300 transition-all hover:bg-sky-500/20 active:scale-95 disabled:opacity-30"
+                :disabled="!aiFollowUp.trim() || aiGenerating"
+                @click="generateAiFollowUp"
+              >
+                <SvgIcon icon="ri:send-plane-2-line" class="text-xs" />
+              </button>
+            </div>
+            <div class="mt-2 flex flex-wrap gap-1.5">
+              <button
+                v-for="hint in ['镜头再近一点', '加入走路动作', '更自然一些', '突出产品质感', '换个风格']"
+                :key="hint"
+                class="rounded-md border border-white/[0.06] bg-white/[0.02] px-2 py-0.5 text-[10px] text-white/30 transition-all hover:border-sky-400/20 hover:bg-sky-500/[0.06] hover:text-sky-300/70"
+                @click="aiFollowUp = hint; generateAiFollowUp()"
+              >
+                {{ hint }}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Error -->
+        <div v-if="aiError" class="mt-4 flex items-center gap-2.5 rounded-xl border border-red-400/15 bg-red-500/[0.06] p-3">
+          <SvgIcon icon="ri:error-warning-line" class="flex-shrink-0 text-base text-red-400/60" />
+          <p class="text-xs leading-relaxed text-red-300/80">{{ aiError }}</p>
+        </div>
+      </div>
+    </NDrawerContent>
+  </NDrawer>
+
 </template>
 
 <style scoped>
+/* ── Glass panel container ── */
+.mvp-panel {
+  position: relative;
+  background:
+    linear-gradient(135deg, rgba(56, 189, 248, 0.04) 0%, rgba(59, 130, 246, 0.03) 50%, rgba(255, 255, 255, 0.02) 100%),
+    rgba(255, 255, 255, 0.04);
+  backdrop-filter: blur(16px);
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+  border-image: linear-gradient(to bottom, rgba(56, 189, 248, 0.15), rgba(255, 255, 255, 0.06)) 1;
+}
+
+/* ── Thin dark scrollbar (4px) ── */
+.mvp-panel::-webkit-scrollbar {
+  width: 4px;
+}
+.mvp-panel::-webkit-scrollbar-track {
+  background: transparent;
+}
+.mvp-panel::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+}
+.mvp-panel::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+/* ── Section dividers ── */
+.section-divider {
+  height: 1px;
+  background: linear-gradient(to right, transparent, rgba(255, 255, 255, 0.06), transparent);
+  margin: 2px 0;
+}
+
+/* ── Section label ── */
+.section-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.50);
+  letter-spacing: 0.02em;
+}
+
+/* ── Header icon with gradient ── */
+.header-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, rgba(56, 189, 248, 0.25), rgba(59, 130, 246, 0.2));
+  color: rgba(255, 255, 255, 0.9);
+}
+
+/* ── User info chip ── */
+.user-chip {
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.2);
+  flex-shrink: 0;
+  transition: all 0.3s;
+}
+.status-dot.dot-active {
+  background: rgba(52, 211, 153, 0.8);
+  box-shadow: 0 0 6px rgba(52, 211, 153, 0.4);
+}
+
+/* ── Textarea ── */
+.textarea-wrapper {
+  position: relative;
+}
+
+.prompt-textarea :deep(.n-input__textarea-el),
+.prompt-textarea :deep(.n-input__input-el) {
+  font-size: 13px;
+  line-height: 1.7;
+  color: rgba(255, 255, 255, 0.85) !important;
+}
+
+.prompt-textarea :deep(.n-input) {
+  --n-border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  --n-border-hover: 1px solid rgba(56, 189, 248, 0.3) !important;
+  --n-border-focus: 1px solid rgba(56, 189, 248, 0.5) !important;
+  --n-color: rgba(255, 255, 255, 0.03) !important;
+  --n-color-focus: rgba(255, 255, 255, 0.05) !important;
+  --n-box-shadow-focus: 0 0 0 2px rgba(56, 189, 248, 0.1) !important;
+}
+
+/* ── Pill buttons ── */
+.pill-btn {
+  flex: 1;
+  padding: 7px 0;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.50);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  cursor: pointer;
+  letter-spacing: 0.02em;
+}
+
+.pill-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.8);
+  border-color: rgba(255, 255, 255, 0.15);
+  transform: translateY(-1px);
+}
+
+.pill-btn.active {
+  background: linear-gradient(135deg, rgba(56, 189, 248, 0.2), rgba(59, 130, 246, 0.18));
+  border-color: rgba(56, 189, 248, 0.4);
+  color: rgba(255, 255, 255, 0.95);
+  box-shadow: 0 0 12px rgba(56, 189, 248, 0.12);
+}
+
+/* ── Resolution buttons ── */
+.res-btn {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  cursor: pointer;
+}
+
+.res-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.15);
+  transform: translateY(-2px);
+}
+
+.res-btn.active {
+  background: linear-gradient(135deg, rgba(56, 189, 248, 0.15), rgba(59, 130, 246, 0.12));
+  border-color: rgba(56, 189, 248, 0.4);
+  box-shadow: 0 0 16px rgba(56, 189, 248, 0.1);
+}
+
+.res-icon {
+  border: 2px solid rgba(255, 255, 255, 0.15);
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02));
+  transition: all 0.2s;
+}
+
+.res-icon.active {
+  border-color: rgba(139, 92, 246, 0.6);
+  background: linear-gradient(135deg, rgba(56, 189, 248, 0.25), rgba(59, 130, 246, 0.2));
+}
+
+/* ── Upload area (images & video) ── */
+.upload-area {
+  border: 1.5px dashed rgba(255, 255, 255, 0.10);
+  background: rgba(255, 255, 255, 0.02);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.upload-area:hover {
+  border-color: rgba(56, 189, 248, 0.35);
+  background: rgba(56, 189, 248, 0.05);
+}
+
+@keyframes border-dance {
+  0% { border-color: rgba(56, 189, 248, 0.35); }
+  50% { border-color: rgba(59, 130, 246, 0.45); }
+  100% { border-color: rgba(56, 189, 248, 0.35); }
+}
+
+/* ── Slider section ── */
+.slider-section :deep(.n-slider) {
+  --n-rail-color: rgba(255, 255, 255, 0.08);
+  --n-rail-color-hover: rgba(255, 255, 255, 0.12);
+  --n-fill-color: rgba(56, 189, 248, 0.5);
+  --n-fill-color-hover: rgba(56, 189, 248, 0.65);
+}
+.slider-section :deep(.n-slider-handle) {
+  --n-handle-color: rgba(56, 189, 248, 0.85) !important;
+  --n-handle-box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.25) !important;
+  --n-handle-box-shadow-hover: 0 0 0 3px rgba(56, 189, 248, 0.35) !important;
+  --n-handle-box-shadow-active: 0 0 0 3px rgba(56, 189, 248, 0.45) !important;
+  --n-handle-box-shadow-focus: 0 0 0 3px rgba(56, 189, 248, 0.35) !important;
+}
+
+/* ── Submit button ── */
+.submit-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 11px 0;
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.4);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  cursor: not-allowed;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  letter-spacing: 0.03em;
+}
+
+.submit-btn.can-submit {
+  cursor: pointer;
+  color: rgba(255, 255, 255, 0.95);
+  background: linear-gradient(135deg, rgba(14, 165, 233, 0.85), rgba(59, 130, 246, 0.85));
+  border-color: rgba(56, 189, 248, 0.4);
+  box-shadow:
+    0 2px 12px rgba(14, 165, 233, 0.25),
+    0 0 0 1px rgba(56, 189, 248, 0.1) inset;
+  animation: subtle-pulse 2.5s ease-in-out infinite;
+}
+
+.submit-btn.can-submit:hover {
+  background: linear-gradient(135deg, rgba(14, 165, 233, 0.95), rgba(59, 130, 246, 0.95));
+  box-shadow:
+    0 4px 20px rgba(14, 165, 233, 0.35),
+    0 0 0 1px rgba(56, 189, 248, 0.2) inset;
+  transform: translateY(-1px);
+}
+
+.submit-btn.can-submit:active {
+  transform: translateY(0);
+  box-shadow: 0 1px 6px rgba(14, 165, 233, 0.2);
+}
+
+.submit-btn.is-submitting {
+  cursor: wait;
+  animation: none;
+}
+
+@keyframes subtle-pulse {
+  0%, 100% {
+    box-shadow:
+      0 2px 12px rgba(14, 165, 233, 0.25),
+      0 0 0 1px rgba(56, 189, 248, 0.1) inset;
+  }
+  50% {
+    box-shadow:
+      0 2px 20px rgba(14, 165, 233, 0.4),
+      0 0 0 1px rgba(56, 189, 248, 0.2) inset;
+  }
+}
+
+/* ── Submit spinner ── */
+.submit-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  border-top-color: rgba(255, 255, 255, 0.9);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ── Hint transitions ── */
 .hint-fade-enter-active,
 .hint-fade-leave-active {
   transition: opacity 0.25s ease, transform 0.25s ease;
@@ -524,5 +1671,150 @@ onUnmounted(() => {
 .hint-fade-leave-to {
   opacity: 0;
   transform: translateY(-4px);
+}
+
+/* Upload success flash */
+@keyframes uploadFlash {
+  0% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.4); }
+  50% { box-shadow: 0 0 12px 2px rgba(52, 211, 153, 0.3); }
+  100% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0); }
+}
+
+/* AI Optimization Drawer */
+.ai-opt-drawer :deep(.n-drawer-body-content-wrapper) {
+  background: linear-gradient(180deg, rgba(8, 10, 18, 0.99) 0%, rgba(10, 14, 25, 0.99) 100%) !important;
+}
+
+.ai-opt-drawer :deep(.n-drawer-header) {
+  background: rgba(255, 255, 255, 0.02) !important;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06) !important;
+  padding: 16px 20px !important;
+}
+
+.ai-opt-drawer :deep(.n-drawer-body) {
+  padding: 0 !important;
+}
+
+.ai-opt-drawer :deep(.n-drawer-body-content-wrapper) {
+  overflow-y: auto !important;
+  height: 100% !important;
+}
+
+.ai-drawer-body {
+  padding: 20px;
+  overflow-y: auto;
+}
+
+.ai-drawer-icon {
+  background: linear-gradient(135deg, rgba(56, 189, 248, 0.2), rgba(59, 130, 246, 0.15));
+  border: 1px solid rgba(56, 189, 248, 0.15);
+}
+
+.ai-opt-btn {
+  backdrop-filter: blur(6px);
+}
+
+.ai-skill-card {
+  cursor: pointer;
+}
+
+.ai-skill-card:hover {
+  transform: translateY(-1px);
+}
+
+.ai-img-thumb {
+  transition: all 0.2s ease;
+}
+
+.ai-img-thumb:hover {
+  border-color: rgba(56, 189, 248, 0.3);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.ai-result-card {
+  background: linear-gradient(135deg, rgba(56, 189, 248, 0.04), rgba(59, 130, 246, 0.03));
+  backdrop-filter: blur(8px);
+  position: relative;
+}
+
+.ai-result-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(to right, transparent, rgba(56, 189, 248, 0.3), transparent);
+}
+
+.ai-generate-btn {
+  position: relative;
+  overflow: hidden;
+}
+
+.ai-generate-btn::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(56, 189, 248, 0.06), transparent);
+  transition: left 0.5s ease;
+}
+
+.ai-generate-btn:not(:disabled):hover::before {
+  left: 100%;
+}
+
+.ai-gen-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(56, 189, 248, 0.2);
+  border-top-color: rgba(56, 189, 248, 0.8);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+.ai-cursor {
+  animation: cursorBlink 0.8s step-end infinite;
+}
+
+/* Thinking dots animation */
+.ai-thinking-dots .ai-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: rgba(56, 189, 248, 0.5);
+  animation: ai-thinking-bounce 1.4s ease-in-out infinite;
+}
+.ai-thinking-dots .ai-dot:nth-child(2) { animation-delay: 0.16s; }
+.ai-thinking-dots .ai-dot:nth-child(3) { animation-delay: 0.32s; }
+.ai-thinking-dots .ai-dot:nth-child(4) { animation-delay: 0.48s; }
+
+@keyframes ai-thinking-bounce {
+  0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
+  40% { opacity: 1; transform: scale(1.1); }
+}
+
+.ai-chat-area::-webkit-scrollbar { width: 3px; }
+.ai-chat-area::-webkit-scrollbar-track { background: transparent; }
+.ai-chat-area::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 3px; }
+
+.ai-chat-user, .ai-chat-bot {
+  animation: ai-chat-in 0.3s ease-out;
+}
+@keyframes ai-chat-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.ai-followup-area {
+  animation: ai-chat-in 0.4s ease-out;
+}
+
+@keyframes cursorBlink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
 }
 </style>

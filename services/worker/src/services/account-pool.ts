@@ -116,6 +116,136 @@ export class AccountPool {
     return null;
   }
 
+
+  /**
+   * Acquire an account excluding a specific accountId.
+   * Used when retrying a job that failed/timed-out on a specific account.
+   */
+  async acquireExcluding(excludeId: string): Promise<AccountEntry | null> {
+    const accounts = await this.getAccounts();
+    const now = Date.now();
+
+    for (const account of accounts) {
+      if (account.id === excludeId) continue;
+      if (account.tokenExpiresAt && account.tokenExpiresAt.getTime() < now) continue;
+
+      const key = `account:concurrency:${account.id}`;
+      const result = await this.redis.eval(
+        this.ACQUIRE_LUA, 1, key,
+        String(account.maxConcurrency), String(CONCURRENCY_TTL)
+      ) as number;
+
+      if (result > 0) {
+        console.log(`[account-pool] acquired (excluding ${excludeId.slice(0,8)}) ${account.label} (${result}/${account.maxConcurrency})`);
+        this.prisma.runwayAccount.update({
+          where: { id: account.id },
+          data: { lastUsedAt: new Date() },
+        }).catch(() => {});
+        return account;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Smart acquire: reconcile Redis with DB first, then acquire.
+   * This prevents ghost concurrency slots from blocking new jobs.
+   */
+  private dbActiveCache: Map<string, { count: number; ts: number }> = new Map();
+  private readonly DB_CACHE_TTL = 5000; // 5 seconds
+
+  private async getDbActive(accountId: string): Promise<number> {
+    const cached = this.dbActiveCache.get(accountId);
+    if (cached && Date.now() - cached.ts < this.DB_CACHE_TTL) return cached.count;
+    const count = await this.prisma.runwayJob.count({
+      where: { accountId, status: { in: ['submitted', 'processing'] } },
+    });
+    this.dbActiveCache.set(accountId, { count, ts: Date.now() });
+    return count;
+  }
+
+  /** Invalidate DB active cache */
+  invalidateDbCache(): void {
+    this.dbActiveCache.clear();
+  }
+
+  async smartAcquire(): Promise<AccountEntry | null> {
+    const accounts = await this.getAccounts();
+    const now = Date.now();
+
+    for (const account of accounts) {
+      if (account.tokenExpiresAt && account.tokenExpiresAt.getTime() < now) continue;
+
+      // Check if account is in rate-limit cooldown
+      const cooldownKey = `account:cooldown:${account.id}`;
+      const inCooldown = await this.redis.get(cooldownKey);
+      if (inCooldown) continue;
+
+      // Use Redis as source of truth for concurrency (DB drift fix only at startup)
+      const key = `account:concurrency:${account.id}`;
+      const result = await this.redis.eval(
+        this.ACQUIRE_LUA, 1, key,
+        String(account.maxConcurrency), String(CONCURRENCY_TTL)
+      ) as number;
+
+      if (result > 0) {
+        console.log(`[account-pool] smart-acquired ${account.label} (redis=${result}/${account.maxConcurrency})`);
+        this.prisma.runwayAccount.update({
+          where: { id: account.id },
+          data: { lastUsedAt: new Date() },
+        }).catch(() => {});
+        return account;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Smart acquireExcluding: reconcile + exclude specific account.
+   */
+  async smartAcquireExcluding(excludeId: string): Promise<AccountEntry | null> {
+    const accounts = await this.getAccounts();
+    const now = Date.now();
+
+    for (const account of accounts) {
+      if (account.id === excludeId) continue;
+      if (account.tokenExpiresAt && account.tokenExpiresAt.getTime() < now) continue;
+
+      // Check cooldown
+      const cooldownKey = `account:cooldown:${account.id}`;
+      const inCooldown = await this.redis.get(cooldownKey);
+      if (inCooldown) continue;
+
+      const dbActive = await this.getDbActive(account.id);
+
+      const key = `account:concurrency:${account.id}`;
+      const result = await this.redis.eval(
+        this.ACQUIRE_LUA, 1, key,
+        String(account.maxConcurrency), String(CONCURRENCY_TTL)
+      ) as number;
+
+      if (result > 0) {
+        console.log(`[account-pool] smart-acquired (excl ${excludeId.slice(0,8)}) ${account.label} (redis=${result}/${account.maxConcurrency})`);
+        this.prisma.runwayAccount.update({
+          where: { id: account.id },
+          data: { lastUsedAt: new Date() },
+        }).catch(() => {});
+        return account;
+      }
+    }
+
+    return null;
+  }
+
+
+  /** Put an account in cooldown (rate-limited) */
+  async setCooldown(accountId: string, seconds: number = 60): Promise<void> {
+    const key = `account:cooldown:${accountId}`;
+    await this.redis.set(key, '1', 'EX', seconds);
+    console.log(`[account-pool] ${accountId.slice(0,8)} in cooldown for ${seconds}s`);
+  }
   /** Release a concurrency slot for an account (idempotent per accountId+jobId) */
   async release(accountId: string, jobId?: string): Promise<void> {
     // Prevent double-release for the same account+job combination
@@ -179,7 +309,7 @@ export class AccountPool {
     const accounts = await this.getAccounts();
     for (const account of accounts) {
       try {
-        // Count our own active jobs for this account
+        // Count jobs that are truly occupying API slots (submitted/processing but NOT throttled-released)
         const dbActive = await this.prisma.runwayJob.count({
           where: {
             accountId: account.id,
@@ -189,8 +319,10 @@ export class AccountPool {
         const redisKey = `account:concurrency:${account.id}`;
         const redisVal = parseInt(await this.redis.get(redisKey) || '0', 10);
 
-        if (redisVal !== dbActive) {
-          console.log(`[account-pool:reconcile] ${account.label}: redis=${redisVal} db=${dbActive}, correcting`);
+        // Only correct if Redis is HIGHER than DB (leaked slots)
+        // Never inflate Redis to match DB — THROTTLED jobs intentionally have redis < db
+        if (redisVal > dbActive) {
+          console.log(`[account-pool:reconcile] ${account.label}: redis=${redisVal} > db=${dbActive}, correcting down`);
           if (dbActive > 0) {
             await this.redis.set(redisKey, String(dbActive), 'EX', CONCURRENCY_TTL);
           } else {
