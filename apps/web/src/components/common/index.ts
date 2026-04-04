@@ -7,5 +7,6 @@ import PromptStore from './PromptStore/index.vue'
 import QuotaBar from './QuotaBar.vue'
 import StatusBadge from './StatusBadge.vue'
 import UserCenter from './UserCenter.vue'
+import TaskFloatingBadge from './TaskFloatingBadge.vue'
 
-export { HoverButton, NaiveProvider, SvgIcon, UserAvatar, Setting, PromptStore, QuotaBar, StatusBadge, UserCenter }
+export { HoverButton, NaiveProvider, SvgIcon, UserAvatar, Setting, PromptStore, QuotaBar, StatusBadge, UserCenter, TaskFloatingBadge }

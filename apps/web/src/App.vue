@@ -3,6 +3,7 @@ import { ref, onMounted } from 'vue'
 import { NConfigProvider } from 'naive-ui'
 import { NaiveProvider } from '@/components/common'
 import UpdateNotification from '@/components/common/UpdateNotification.vue'
+import TaskFloatingBadge from '@/components/common/TaskFloatingBadge.vue'
 import { useTheme } from '@/hooks/useTheme'
 import { useLanguage } from '@/hooks/useLanguage'
 import { startVersionCheck } from '@/utils/versionCheck'
@@ -32,5 +33,6 @@ onMounted(() => {
     </NaiveProvider>
   </NConfigProvider>
   <aiOther/>
+  <TaskFloatingBadge />
   <UpdateNotification ref="updateRef" />
 </template>
