@@ -5,6 +5,7 @@ import UserAvatar from './UserAvatar/index.vue'
 import Setting from './Setting/index.vue'
 import PromptStore from './PromptStore/index.vue'
 import QuotaBar from './QuotaBar.vue'
-
+import StatusBadge from './StatusBadge.vue'
 import UserCenter from './UserCenter.vue'
-export { HoverButton, NaiveProvider, SvgIcon, UserAvatar, Setting, PromptStore, QuotaBar, UserCenter }
+
+export { HoverButton, NaiveProvider, SvgIcon, UserAvatar, Setting, PromptStore, QuotaBar, StatusBadge, UserCenter }
