@@ -980,6 +980,8 @@ const submit = async () => {
     })
     if (!res.ok) throw new Error(`任务提交失败（${res.status}）`)
     message.success('任务已提交，正在排队处理')
+    submitSuccess.value = true
+    setTimeout(() => { submitSuccess.value = false }, 3000)
     prompt.value = ''
     remark.value = ''
     images.value = []
@@ -1015,6 +1017,18 @@ onUnmounted(() => {
 
 <template>
   <div class="mvp-panel flex flex-col gap-3 p-4 h-full overflow-y-auto" :class="{ 'panel-ready': canSubmit }">
+
+    <!-- Submit Success Animation Bar -->
+    <Transition name="success-bar">
+      <div v-if="submitSuccess" class="success-bar">
+        <div class="success-bar-content">
+          <SvgIcon icon="ri:check-line" class="text-sm" />
+          <span>任务已提交，排队生成中...</span>
+        </div>
+        <div class="success-bar-progress" />
+      </div>
+    </Transition>
+
 
     <!-- Header -->
     <div class="flex items-center justify-between">
@@ -2292,4 +2306,50 @@ button:focus-visible,
     scroll-behavior: auto !important;
   }
 }
+
+/* Submit success animation bar */
+.success-bar {
+  position: relative;
+  border-radius: 8px;
+  padding: 10px 14px;
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.25), rgba(52, 211, 153, 0.18));
+  border: 1px solid rgba(52, 211, 153, 0.3);
+  color: rgba(167, 243, 208, 0.95);
+  font-size: 13px;
+  overflow: hidden;
+}
+.success-bar-content {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  position: relative;
+  z-index: 1;
+}
+.success-bar-progress {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 3px;
+  background: linear-gradient(90deg, rgba(52, 211, 153, 0.6), rgba(16, 185, 129, 0.3));
+  animation: success-bar-fill 3s linear forwards;
+}
+@keyframes success-bar-fill {
+  from { width: 0%; }
+  to { width: 100%; }
+}
+.success-bar-enter-active {
+  transition: all 0.4s ease-out;
+}
+.success-bar-leave-active {
+  transition: all 0.5s ease-in;
+}
+.success-bar-enter-from {
+  opacity: 0;
+  transform: translateY(-12px);
+}
+.success-bar-leave-to {
+  opacity: 0;
+  transform: translateY(-8px);
+}
+
 </style>
