@@ -169,7 +169,7 @@ async function trySubmitOne(): Promise<SubmitResult> {
   if (await isAccountBatchResting(account.id)) {
     const restTtl = await connection.ttl(`submit:batch-resting:${account.id}`);
     console.log(`[submit-worker] ${account.label} batch resting (${Math.ceil(restTtl / 60)}min left), trying other`);
-    await accountPool.release(account.id);
+    await accountPool.releaseNoJob(account.id);
     // 尝试排除该账号获取另一个
     const altAccount = await accountPool.smartAcquireExcluding(account.id);
     if (!altAccount) {
@@ -179,7 +179,7 @@ async function trySubmitOne(): Promise<SubmitResult> {
     // 检查替代账号是否也在休息
     if (await isAccountBatchResting(altAccount.id)) {
       console.log(`[submit-worker] ${altAccount.label} also batch resting`);
-      await accountPool.release(altAccount.id);
+      await accountPool.releaseNoJob(altAccount.id);
       return "batch_resting";
     }
     account = altAccount;
@@ -215,7 +215,7 @@ async function trySubmitOne(): Promise<SubmitResult> {
   `) as any[];
 
   if (pendingJobs.length === 0) {
-    await accountPool.release(account.id);
+    await accountPool.releaseNoJob(account.id);
     return "no_pending";
   }
 
@@ -247,7 +247,7 @@ async function trySubmitOne(): Promise<SubmitResult> {
   }
 
   if (!dbJob) {
-    await accountPool.release(account.id);
+    await accountPool.releaseNoJob(account.id);
     return "no_account";
   }
 
@@ -339,6 +339,7 @@ async function trySubmitOne(): Promise<SubmitResult> {
         id: { not: jobId },
       },
     });
+    // Note: 'queued' (THROTTLED) tasks have DB status 'queued' and don't occupy real API slots
     if (acctActiveCount >= account.maxConcurrency) {
       console.log(`[submit-worker] account ${account.label} already has ${acctActiveCount}/${account.maxConcurrency} active tasks (DB), aborting ${jobId.slice(0,8)}`);
       await accountPool.release(account.id);
@@ -469,9 +470,21 @@ new Worker("runway-submit", async (job: Job) => {
       console.log(`[submit-worker] rate limited, waiting for cooldown to expire`);
       return;
 
-    case "batch_resting":
-      // 不自行调度 — 休息到期后由预设的 trigger 触发
+    case "batch_resting": {
+      // 找到最短的休息剩余时间，预约唤醒
+      const accounts = await accountPool.getAccounts();
+      let minTtl = 999999;
+      for (const acct of accounts) {
+        const ttl = await connection.ttl(`submit:batch-resting:${acct.id}`);
+        if (ttl > 0 && ttl < minTtl) minTtl = ttl;
+      }
+      if (minTtl < 999999) {
+        const wakeDelay = (minTtl + 10) * 1000; // wake 10s after shortest rest expires
+        console.log(`[submit-worker] all accounts resting, wake in ${Math.ceil(wakeDelay/60000)}min`);
+        await triggerSubmit(wakeDelay);
+      }
       return;
+    }
 
     case "no_account":
       // 所有账号满了 — 等 poll 释放槽位后触发
@@ -529,6 +542,9 @@ setInterval(async () => {
       const state = await existing.getState();
       if (state === "delayed" || state === "waiting" || state === "active") return;
     }
+    // Also check if there's an active worker processing right now
+    const activeCount = await submitQueue.getActiveCount();
+    if (activeCount > 0) return;
 
     console.log(`[safety-net] ${pendingCount} pending, slot available, no trigger — firing`);
     await triggerSubmit(10000);

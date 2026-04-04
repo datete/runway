@@ -210,6 +210,14 @@ const filteredJobs = computed(() => {
 
 const pageCount = computed(() => Math.max(1, Math.ceil(filteredJobs.value.length / pageSize)))
 
+
+const activeJobCount = computed(() => allJobs.value.filter(j => isActive(j.status)).length)
+const completionRate = computed(() => {
+  const done = allJobs.value.filter(j => j.status === "completed").length
+  const total = allJobs.value.filter(j => ["completed","failed","cancelled"].includes(j.status)).length
+  return total > 0 ? Math.round(done / total * 100) : 0
+})
+
 const paginatedJobs = computed(() => {
   const start = (page.value - 1) * pageSize
   return filteredJobs.value.slice(start, start + pageSize)
@@ -348,17 +356,23 @@ const doDelete = async (ids: string[]) => {
   message.success(`已删除 ${successCount} 条任务`)
 }
 
+const retryingIds = ref(new Set<string>())
+
 const retryJob = async (id: string) => {
+  if (retryingIds.value.has(id)) return
+  retryingIds.value.add(id)
   try {
     const res = await fetch(`/api/runway/jobs/${id}/retry`, {
       method: 'POST',
       headers: authHeaders(),
     })
     if (!res.ok) throw new Error('重试失败')
-    message.success('任务已重新提交')
+    message.success('任务已重新排队')
     fetchJobs()
   } catch (error: any) {
     message.error(error.message || '重试失败')
+  } finally {
+    retryingIds.value.delete(id)
   }
 }
 
@@ -487,6 +501,15 @@ const changePassword = async () => {
   changePwdLoading.value = false
 }
 
+
+const copyTaskId = (id: string) => {
+  navigator.clipboard.writeText(id).then(() => {
+    message.success("任务ID已复制")
+  }).catch(() => {
+    message.warning("复制失败")
+  })
+}
+
 const handleLogout = () => {
   removeToken()
   allJobs.value = []
@@ -599,6 +622,20 @@ onUnmounted(() => stopPolling())
         </button>
       </div>
 
+
+        <!-- Quick stats -->
+        <div class="mt-2.5 flex items-center gap-2 text-[10px]">
+          <span class="rounded-md border border-white/6 bg-white/[0.03] px-2 py-0.5 text-white/30">
+            共 <span class="font-semibold text-white/50">{{ tabCount.all }}</span> 任务
+          </span>
+          <span v-if="activeJobCount > 0" class="rounded-md border border-sky-400/15 bg-sky-500/[0.06] px-2 py-0.5 text-sky-300/60">
+            <span class="processing-dot-sm mr-1 inline-block h-1.5 w-1.5 rounded-full bg-sky-400" />{{ activeJobCount }} 进行中
+          </span>
+          <span v-if="completionRate > 0" class="rounded-md border border-emerald-400/12 bg-emerald-500/[0.05] px-2 py-0.5 text-emerald-300/50">
+            成功率 {{ completionRate }}%
+          </span>
+        </div>
+
       <!-- Bulk select bar -->
       <div class="mb-3 flex items-center justify-between">
         <p class="text-xs text-slate-500">当前共 {{ filteredJobs.length }} 条任务</p>
@@ -666,7 +703,7 @@ onUnmounted(() => stopPolling())
           <div
             v-for="(job, index) in paginatedJobs"
             :key="job.id"
-            class="job-card group relative overflow-hidden rounded-2xl border bg-white/4 backdrop-blur-md transition-all duration-300 hover:-translate-y-[3px]"
+            class="job-card group relative overflow-hidden rounded-2xl border bg-white/4 backdrop-blur-md transition-all duration-300 hover:-translate-y-[2px] hover:scale-[1.005]"
             :class="selected.has(job.id) ? 'border-sky-400/50 shadow-lg shadow-sky-500/15' : 'border-white/8 hover:border-sky-400/20 hover:shadow-lg hover:shadow-sky-500/8'"
             :style="{ animationDelay: `${index * 60}ms` }"
           >
@@ -708,7 +745,7 @@ onUnmounted(() => stopPolling())
               <template v-else>
                 <video preload="metadata" class="aspect-video w-full object-contain pointer-events-none" :src="job.resultUrl" />
                 <div class="absolute inset-0 flex cursor-pointer items-center justify-center bg-black/20 transition-all duration-200 hover:bg-black/10">
-                  <div class="flex h-11 w-11 items-center justify-center rounded-full bg-white/15 backdrop-blur-sm transition-transform hover:scale-110">
+                  <div class="play-breathe flex h-11 w-11 items-center justify-center rounded-full bg-white/15 backdrop-blur-sm transition-transform">
                     <SvgIcon icon="ri:play-fill" class="ml-0.5 text-xl text-white/90" />
                   </div>
                 </div>
@@ -835,11 +872,12 @@ onUnmounted(() => stopPolling())
                   取消优先
                 </button>
                 <button
-                  v-if="job.status === 'failed'"
-                  class="action-btn rounded-lg border border-indigo-400/20 bg-indigo-500/10 px-2.5 py-1 text-xs text-indigo-300 transition-all hover:border-indigo-400/40 hover:bg-indigo-500/20"
+                  v-if="job.status === 'failed' || job.status === 'cancelled'"
+                  class="action-btn rounded-lg border border-indigo-400/20 bg-indigo-500/10 px-2.5 py-1 text-xs text-indigo-300 transition-all hover:border-indigo-400/40 hover:bg-indigo-500/20 disabled:opacity-40 disabled:pointer-events-none"
+                  :disabled="retryingIds.has(job.id)"
                   @click.stop="retryJob(job.id)"
                 >
-                  <SvgIcon icon="ri:refresh-line" class="mr-1 inline text-sm" />重新提交
+                  <SvgIcon :icon="retryingIds.has(job.id) ? 'ri:loader-4-line' : 'ri:refresh-line'" :class="['mr-1 inline text-sm', retryingIds.has(job.id) && 'animate-spin']" />{{ retryingIds.has(job.id) ? '排队中...' : '重新排队' }}
                 </button>
                 <button
                   v-if="!selectMode && isActive(job.status)"
@@ -927,7 +965,7 @@ onUnmounted(() => stopPolling())
         <div class="space-y-2.5 rounded-xl border border-white/8 bg-white/3 p-4">
           <div class="detail-row">
             <span class="detail-label">任务ID</span>
-            <span class="detail-value font-mono text-[11px]">{{ detailJob.id }}</span>
+            <span class="detail-value font-mono text-[11px] cursor-pointer hover:text-sky-400 transition-colors" title="点击复制" @click="copyTaskId(detailJob.id)">{{ detailJob.id }} <SvgIcon icon="ri:file-copy-line" class="ml-1 inline text-[10px] opacity-40" /></span>
           </div>
           <div class="detail-row">
             <span class="detail-label">状态</span>
@@ -1001,8 +1039,8 @@ onUnmounted(() => stopPolling())
           <button v-if="detailJob.resultUrl" class="action-btn flex-1 rounded-lg border border-sky-400/20 bg-sky-500/10 px-3 py-2 text-xs font-medium text-sky-300 transition-all hover:bg-sky-500/20" @click="openDownloadPicker(detailJob)">
             <SvgIcon icon="ri:download-2-line" class="mr-1 inline text-sm" /> 下载视频
           </button>
-          <button v-if="detailJob.status === 'failed'" class="action-btn flex-1 rounded-lg border border-indigo-400/20 bg-indigo-500/10 px-3 py-2 text-xs font-medium text-indigo-300 transition-all hover:bg-indigo-500/20" @click="retryJob(detailJob.id); showDetail = false">
-            <SvgIcon icon="ri:refresh-line" class="mr-1 inline text-sm" /> 重新提交
+          <button v-if="detailJob.status === 'failed' || detailJob.status === 'cancelled'" class="action-btn flex-1 rounded-lg border border-indigo-400/20 bg-indigo-500/10 px-3 py-2 text-xs font-medium text-indigo-300 transition-all hover:bg-indigo-500/20" @click="retryJob(detailJob.id); showDetail = false" :disabled="retryingIds.has(detailJob.id)">
+            <SvgIcon icon="ri:refresh-line" class="mr-1 inline text-sm" /> 重新排队
           </button>
           <button v-if="isActive(detailJob.status)" class="action-btn flex-1 rounded-lg border border-amber-400/20 bg-amber-500/10 px-3 py-2 text-xs font-medium text-amber-300 transition-all hover:bg-amber-500/20" @click="cancelJob(detailJob.id); showDetail = false">
             取消任务
@@ -1023,7 +1061,7 @@ onUnmounted(() => stopPolling())
     <div class="confirm-modal mx-auto w-full max-w-md rounded-2xl border border-white/10 bg-slate-900/95 p-6 shadow-2xl backdrop-blur-xl">
       <div class="mb-4 flex items-center gap-3">
         <div class="flex h-10 w-10 items-center justify-center rounded-full bg-red-500/15">
-          <SvgIcon icon="ri:delete-bin-6-line" class="text-xl text-red-400" />
+          <SvgIcon icon="ri:delete-bin-6-line" class="shake-icon text-xl text-red-400" />
         </div>
         <h3 class="text-base font-semibold text-slate-100">确认删除</h3>
       </div>
@@ -1317,6 +1355,16 @@ onUnmounted(() => stopPolling())
   transition: all 0.2s ease;
   backdrop-filter: blur(8px);
 }
+.action-btn:hover {
+  transform: translateY(-1px) scale(1.02);
+}
+.action-btn:active {
+  transform: scale(0.97);
+}
+.action-btn:focus-visible {
+  outline: 2px solid rgba(56, 189, 248, 0.5);
+  outline-offset: 2px;
+}
 
 /* User avatar subtle glow */
 .user-avatar {
@@ -1462,5 +1510,55 @@ onUnmounted(() => stopPolling())
 .device-drawer :deep(.n-drawer-header) {
   background: transparent !important;
   border-bottom: 1px solid rgba(255, 255, 255, 0.06) !important;
+}
+
+/* Play button breathe */
+.video-thumb:hover .play-breathe {
+  animation: playBreathe 1.5s ease-in-out infinite;
+}
+@keyframes playBreathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.08); }
+}
+
+/* Status-colored glow on card hover */
+.job-card:hover {
+  box-shadow: 0 8px 32px -8px rgba(0,0,0,0.4);
+}
+
+/* Dark scrollbar for the whole list */
+.runway-list-root ::-webkit-scrollbar { width: 5px; }
+.runway-list-root ::-webkit-scrollbar-track { background: transparent; }
+.runway-list-root ::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.08);
+  border-radius: 4px;
+}
+.runway-list-root ::-webkit-scrollbar-thumb:hover {
+  background: rgba(255,255,255,0.15);
+}
+
+/* Detail row alternate bg */
+.detail-row:nth-child(odd) {
+  background: rgba(255,255,255,0.015);
+  margin: 0 -4px;
+  padding-left: 4px;
+  padding-right: 4px;
+  border-radius: 4px;
+}
+
+/* Delete icon shake */
+.shake-icon {
+  animation: shake 0.4s ease-in-out;
+}
+@keyframes shake {
+  0%, 100% { transform: rotate(0deg); }
+  25% { transform: rotate(-8deg); }
+  75% { transform: rotate(8deg); }
+}
+
+/* Glass button focus */
+.glass-btn:focus-visible {
+  outline: 2px solid rgba(56, 189, 248, 0.4);
+  outline-offset: 2px;
 }
 </style>

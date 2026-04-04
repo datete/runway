@@ -24,14 +24,29 @@ const ACTIVE_STATUSES = ["pending", "queued", "submitted", "processing"];
 
 /** Add a single trigger to the submit queue (deduped) */
 async function triggerSubmit(delay = 0): Promise<void> {
+  const effectiveDelay = Math.max(delay, 3000);
   try {
+    const existing = await submitQueue.getJob("submit-next");
+    if (existing) {
+      const state = await existing.getState();
+      if (state === "delayed" || state === "waiting") {
+        const existingFireAt = (existing.timestamp || 0) + (existing.opts?.delay || 0);
+        const newFireAt = Date.now() + effectiveDelay;
+        if (newFireAt >= existingFireAt) return;
+        await existing.remove().catch(() => {});
+      }
+    }
     await submitQueue.add("submit-trigger", {}, {
-      jobId: `trig-${Date.now()}`,
-      delay,
-      removeOnComplete: 10,
-      removeOnFail: 10,
+      jobId: "submit-next",
+      delay: effectiveDelay,
+      removeOnComplete: true,
+      removeOnFail: true,
     });
-  } catch {}
+  } catch (e: any) {
+    if (!e.message?.includes("already exists")) {
+      console.warn("[api:triggerSubmit] error:", e.message);
+    }
+  }
 }
 
 export class RunwayService {
@@ -159,7 +174,7 @@ export class RunwayService {
     if (role !== "admin" && userId && job.userId !== userId) throw new Error("forbidden");
     await prisma.runwayJob.update({
       where: { id },
-      data: { status: "pending", errorMessage: null, retryCount: { increment: 1 } },
+      data: { status: "pending", errorMessage: null, retryCount: { increment: 1 }, accountId: null, remoteTaskId: null, startedAt: null, finishedAt: null },
     });
     // Trigger the submit worker
     await triggerSubmit();

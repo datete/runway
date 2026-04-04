@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { NAlert, NButton, NDrawer, NDrawerContent, NInput, NSpin, NSwitch, NTag, NSlider, NTooltip, useMessage } from 'naive-ui'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { NAlert, NDrawer, NDrawerContent, NInput, NSpin, NSlider, NSwitch, useMessage } from 'naive-ui'
 import { SvgIcon } from '@/components/common'
 import { homeStore } from '@/store'
 import { useRunwayJwt } from '@/composables/useRunwayJwt'
@@ -28,6 +28,7 @@ const message = useMessage()
 const { headers: authHeaders, token: jwtToken, username: jwtUsername, role: jwtRole } = useRunwayJwt()
 
 const loading = ref(false)
+const submitSuccess = ref(false)
 const prompt = ref('')
 const remark = ref('')
 const images = ref<UploadedImage[]>([])
@@ -51,7 +52,7 @@ const proResolutions = [
   { value: '1920x1080', label: '16:9', desc: '横屏 1080p', iconW: 34, iconH: 20 },
   { value: '1440x1440', label: '1:1', desc: '方形 1440p', iconW: 26, iconH: 26 },
 ]
-const resolutionOptions = computed(() => proResolutions)
+const resolutionOptions = computed(() => (quality.value === 'pro' ? proResolutions : stdResolutions))
 
 
 
@@ -110,6 +111,36 @@ const canSubmit = computed(() => {
   return true
 })
 
+const canSubmitReason = computed(() => {
+  if (!jwtToken.value) return '请先登录后再提交任务'
+  if (loading.value) return '正在提交任务，请稍候'
+  if (isUploading.value) return '参考图片上传中，请稍候'
+  if (isVideoUploading.value) return '参考视频上传中，请稍候'
+  if (quotaExceeded.value) return quotaExceeded.value
+  if (!prompt.value.trim()) return '请输入提示词'
+  if (uploadedUrls.value.length === 0) return '请上传参考图片'
+  if (quality.value === 'pro' && (!refVideo.value || !refVideo.value.url)) return '大师模式必须上传参考视频'
+  return ''
+})
+
+const completionItems = computed(() => [
+  { key: 'prompt', label: '提示词', done: Boolean(prompt.value.trim()) },
+  { key: 'images', label: '参考图', done: uploadedUrls.value.length > 0 },
+  { key: 'video', label: '参考视频', done: quality.value !== 'pro' || Boolean(refVideo.value?.url) },
+])
+
+const completionRatio = computed(() => {
+  const total = completionItems.value.length
+  const done = completionItems.value.filter((item) => item.done).length
+  return Math.round((done / total) * 100)
+})
+
+const submitShortcutLabel = computed(() => {
+  if (typeof navigator === 'undefined') return 'Ctrl + Enter'
+  const isMac = /Mac|iPhone|iPad|iPod/.test(navigator.platform)
+  return isMac ? '⌘ + Enter' : 'Ctrl + Enter'
+})
+
 const concurrencyLabel = computed(() => {
   if (tokenList.value.length <= 1) return `并发任务 ${activeTasks.value}/${maxConcurrency.value}`
   return `并发任务 ${activeTasks.value}/${maxConcurrency.value} · 通道 ${tokenList.value.length} 个`
@@ -162,7 +193,7 @@ const updateImage = (id: string, patch: Partial<UploadedImage>) => {
   // Flash green on upload complete
   if (wasUploading && patch.uploading === false && patch.url) {
     uploadFlash.value.add(id)
-    setTimeout(() => { uploadFlash.value.delete(id) }, 800)
+    setTimeout(() => { uploadFlash.value.delete(id) }, 1200)
   }
 }
 
@@ -224,6 +255,11 @@ const handleFileSelect = async (event: Event) => {
 
 const removeImage = (index: number) => {
   images.value.splice(index, 1)
+}
+
+const removeAllImages = () => {
+  images.value = []
+  uploadFlash.value.clear()
 }
 
 // Drag-and-drop support
@@ -336,8 +372,10 @@ const aiPendingSubmit = ref(false)
 const aiError = ref('')
 const aiThinking = ref(false)
 const aiFollowUp = ref('')
+const aiOriginalPrompt = ref('')
 const aiMessages = ref<Array<{role: 'user' | 'assistant'; content: string}>>([])
 const aiChatScrollEl = ref<HTMLElement | null>(null)
+const aiDrawerBodyEl = ref<HTMLElement | null>(null)
 
 const AI_SKILLS = [
   // 常用场景
@@ -394,7 +432,182 @@ const selectSkill = (skillId: string) => {
   }
 }
 
+
+const highlightKeywords = (text: string) => {
+  const keywords = [
+    '镜头', '推近', '拉远', '环绕', '平移', '俯拍', '仰拍', '跟拍', '横移', '升降', '运镜',
+    '动作', '走动', '转身', '拿起', '放下', '展示', '抬手', '挥手', '甩动', '整理', '触摸',
+    '光线', '光影', '侧光', '逆光', '柔光', '高光', '暖光', '冷光',
+    '特写', '微距', '全景', '中景', '近景', '景深', '虚化',
+    '慢动作', '缓慢', '流畅', '自然',
+  ]
+  let result = text.replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  for (const kw of keywords) {
+    result = result.replace(new RegExp(kw, 'g'), `<span style="color:#7dd3fc;font-weight:600">${kw}</span>`)
+  }
+  return result
+}
+
+const pickRandom = (arr: string[], n: number) => {
+  const shuffled = [...arr].sort(() => Math.random() - 0.5)
+  return shuffled.slice(0, n)
+}
+
+// Dimension definitions for gap analysis
+interface HintDimension {
+  name: string        // dimension label shown as tag prefix
+  detect: RegExp      // if matched, this dimension is covered
+  icon: string        // for potential UI use
+  hints: string[]     // suggestions when this dimension is MISSING
+}
+
+const HINT_DIMENSIONS: HintDimension[] = [
+  {
+    name: '动作',
+    detect: /走|跑|转身|回头|站|坐|蹲|拿|举|抬|挥|甩|摸|抚|整理|拉扯|靠|倚|挽|捧|按|点|触|系|脱|穿|戴|涂|擦|揉|撩|甩头|弯腰|伸手|叉腰|踮脚|迈步|跨|踩|蹬|摆手|招手|鼓掌|托|推|拉|搂|吹/,
+    icon: 'ri:body-scan-line',
+    hints: [
+      '加入自然走动', '加个转身动作', '人物拿起产品展示',
+      '加入手部动作', '伸手整理衣服', '微微侧身展示',
+      '边走边展示', '加个甩头动作', '从坐到站起身',
+      '轻轻抬手触摸产品', '往前迈两步', '低头再抬头看镜头',
+    ],
+  },
+  {
+    name: '镜头',
+    detect: /镜头|推近|拉远|环绕|平移|跟拍|俯拍|仰拍|横移|升降|运镜|航拍|固定|手持|摇|移|dollly|pan|tilt|zoom/,
+    icon: 'ri:camera-lens-line',
+    hints: [
+      '加入镜头从远推近', '来个环绕展示一圈', '镜头从上到下扫过',
+      '加入跟随人物的跟拍', '从特写拉远到全景', '镜头慢慢横移',
+      '加个从低往高升起的镜头', '手持跟拍增加临场感',
+    ],
+  },
+  {
+    name: '景别',
+    detect: /特写|微距|全景|远景|中景|近景|半身|全身|大特写|景深|虚化|焦点|对焦/,
+    icon: 'ri:focus-3-line',
+    hints: [
+      '加入特写细节镜头', '从全景推到近景', '浅景深虚化背景',
+      '中景切到面部特写', '微距展示材质纹理', '景深变化突出主体',
+      '从模糊到清晰的对焦', '全身到半身的景别变化',
+    ],
+  },
+  {
+    name: '光影',
+    detect: /光|影|照|亮|暗|阴|逆光|侧光|柔光|暖光|冷光|高光|轮廓光|顶光|底光|自然光|日落|金色|晨光|月光|灯光|霓虹|光晕|光斑|丁达尔/,
+    icon: 'ri:sun-line',
+    hints: [
+      '加入柔和侧光', '逆光勾勒轮廓', '暖黄色夕阳光',
+      '冷白自然光', '加入明暗对比', '光线从窗户洒入',
+      '加点光斑/光晕效果', '灯光缓缓亮起',
+    ],
+  },
+  {
+    name: '节奏',
+    detect: /慢|缓|快|急|停|定格|节奏|速度|加速|减速|慢动作|延时|流畅|连贯/,
+    icon: 'ri:speed-line',
+    hints: [
+      '加入慢动作瞬间', '节奏先慢后快', '关键动作放慢',
+      '快慢交替有节奏感', '结尾定格两秒', '从静止突然启动',
+      '动作之间停顿一下',
+    ],
+  },
+  {
+    name: '氛围',
+    detect: /氛围|情绪|感觉|气氛|基调|格调|质感|电影|大片|高级|复古|科技|梦幻|浪漫|文艺|街头|日系|韩系|ins风/,
+    icon: 'ri:palette-line',
+    hints: [
+      '氛围更电影感', '加入复古胶片质感', '更有高级感',
+      '日系清新风格', '街头潮酷氛围', '梦幻柔焦效果',
+      '更有故事感和情绪', '科技未来风',
+    ],
+  },
+  {
+    name: '场景',
+    detect: /场景|背景|环境|室内|室外|街道|咖啡|海边|森林|都市|天台|楼梯|走廊|窗|门|桌|椅|沙发|草地|公园|店|市场/,
+    icon: 'ri:landscape-line',
+    hints: [
+      '加入背景环境描述', '窗帘轻轻飘动', '背景行人走过',
+      '加入环境声音暗示', '树叶或光影在背景晃动',
+      '场景从室内切到室外', '远处有城市天际线',
+    ],
+  },
+  {
+    name: '表情',
+    detect: /表情|微笑|笑|眼神|嘴角|皱眉|凝视|注视|回望|对视|闭眼|睁|眨|歪头|点头|摇头/,
+    icon: 'ri:emotion-line',
+    hints: [
+      '加入自然微笑', '眼神看向远方', '回头望一眼镜头',
+      '表情从平静到微笑', '嘴角微微上扬', '轻轻闭眼再睁开',
+      '歪头带点俏皮', '眼神有故事感',
+    ],
+  },
+  {
+    name: '产品',
+    detect: /产品|商品|logo|标签|材质|面料|质地|纹理|弹力|垂感|光泽|细节|工艺|缝线|拉链|按钮|口袋|内衬/,
+    icon: 'ri:shopping-bag-3-line',
+    hints: [
+      '突出产品细节和质感', '镜头聚焦到logo', '展示面料材质纹理',
+      '手指触摸展示质感', '拉扯展示弹力', '光线扫过产品表面',
+      '展示产品的特殊工艺', '对比展示产品前后效果',
+    ],
+  },
+  {
+    name: '构图',
+    detect: /构图|三分|居中|对称|留白|前景|框架|引导线|对角|黄金|比例|画面|画幅/,
+    icon: 'ri:layout-grid-line',
+    hints: [
+      '用三分法构图', '加入前景元素增加层次', '大面积留白更高级',
+      '利用门框/窗框做框架构图', '对称构图', '对角线构图增加动感',
+    ],
+  },
+]
+
+const dynamicHints = computed(() => {
+  const fixed = ['动作快一点', '重新更换动作', '内容再详细一点']
+  const lastAi = [...aiMessages.value].reverse().find(m => m.role === 'assistant')
+  const text = lastAi?.content || aiResult.value || ''
+  if (!text) return [...fixed, ...pickRandom(['加入镜头运动', '描述光影', '加入动作', '突出质感', '补充氛围'], 3)]
+
+  // Find missing dimensions
+  const missing: { name: string; hints: string[] }[] = []
+  const covered: { name: string; hints: string[] }[] = []
+
+  for (const dim of HINT_DIMENSIONS) {
+    if (dim.detect.test(text)) {
+      // Covered but can still offer tweaks (lower priority)
+      covered.push({ name: dim.name, hints: dim.hints })
+    } else {
+      // Missing — high priority suggestions
+      missing.push({ name: dim.name, hints: dim.hints })
+    }
+  }
+
+  const result: string[] = []
+
+  // Priority 1: pick 1 hint from each missing dimension (up to 4)
+  const topMissing = missing.slice(0, 4)
+  for (const m of topMissing) {
+    const pick = pickRandom(m.hints, 1)[0]
+    if (pick) result.push(pick)
+  }
+
+  // Priority 2: if still room, pick from covered dimensions as tweaks
+  if (result.length < 5) {
+    const tweakPool: string[] = []
+    for (const c of covered) tweakPool.push(...c.hints)
+    const tweaks = pickRandom(tweakPool, 5 - result.length)
+    result.push(...tweaks)
+  }
+
+  // Deduplicate
+  const unique = [...new Set(result)].slice(0, 5)
+  return [...fixed, ...unique]
+})
+
 const openAiOptimize = () => {
+  aiOriginalPrompt.value = prompt.value.trim()
   aiExtraRequest.value = ''
   aiStyleTags.value = []
   aiGenerating.value = false
@@ -418,7 +631,7 @@ const handleSubmitWithAi = async () => {
     }
     // Auto-trigger AI generation
     await nextTick()
-    generateAiPrompt()
+    await generateAiPrompt()
   } else {
     submit()
   }
@@ -445,7 +658,6 @@ const generateAiPrompt = async () => {
 
 // Compress image for AI vision (max 768px, JPEG 0.7)
 const compressForVision = (base64: string, maxSize = 768): Promise<string> => {
-  console.log('[AI-OPT] compressForVision called, base64 length:', base64.length)
   return new Promise((resolve) => {
     const img = new Image()
     img.onload = () => {
@@ -462,16 +674,20 @@ const compressForVision = (base64: string, maxSize = 768): Promise<string> => {
   })
 }
 
+let aiGenerateLock = false
 const doAiGenerate = async (followUpText: string | null) => {
-  console.log('[AI-OPT] doAiGenerate called, followUpText:', followUpText ? 'yes' : 'no')
+  if (aiGenerateLock) {
+    console.log('[AI-OPT] doAiGenerate already running, skipping')
+    return
+  }
+  aiGenerateLock = true
   const validImages = images.value.filter(img => img.preview)
-  console.log('[AI-OPT] validImages count:', validImages.length)
   aiGenerating.value = true
   aiThinking.value = true
   aiStreamText.value = ''
   aiResult.value = ''
   aiError.value = ''
-  nextTick(() => { aiChatScrollEl.value?.scrollTo({ top: aiChatScrollEl.value.scrollHeight, behavior: 'smooth' }) })
+  nextTick(() => { const el = aiDrawerBodyEl.value || aiChatScrollEl.value; el?.scrollTo({ top: el.scrollHeight, behavior: 'smooth' }) })
 
   let abortTimer: ReturnType<typeof setTimeout> | undefined
   try {
@@ -632,8 +848,8 @@ ${skillSection}
   const abortCtrl = new AbortController()
   abortTimer = setTimeout(() => abortCtrl.abort(), 90000)
   {
-    console.log('[AI-OPT] sending fetch to /api/runway/ai/optimize, model: gpt-5.4, stream: true')
-    console.time('[AI-OPT] fetch-response')
+    const wantDetail = followUpText && /详细|更长|多一点|展开|丰富/.test(followUpText)
+    const tokenLimit = wantDetail ? 2000 : 800
     const res = await fetch('/api/runway/ai/optimize', {
       method: 'POST',
       signal: abortCtrl.signal,
@@ -644,13 +860,13 @@ ${skillSection}
       body: JSON.stringify({
         model: 'gpt-5.4',
         stream: true,
-        max_tokens: 800,
+        max_tokens: tokenLimit,
         messages: followUpText
           ? [
               { role: 'system', content: systemPrompt },
               { role: 'user', content: userContent },
               ...aiMessages.value.slice(0, -1).map(m => ({ role: m.role, content: m.content })),
-              { role: 'user', content: followUpText }
+              { role: "user", content: wantDetail ? followUpText + "\n\n请输出200-1000字的详细版本，覆盖动作、镜头、景别、光影、节奏、氛围、表情、构图等多个维度，尽量丰富。" : followUpText }
             ]
           : [
               { role: 'system', content: systemPrompt },
@@ -659,11 +875,8 @@ ${skillSection}
       })
     })
 
-    console.timeEnd('[AI-OPT] fetch-response')
-    console.log('[AI-OPT] response status:', res.status, 'content-type:', res.headers.get('content-type'))
     if (!res.ok) {
       const errText = await res.text()
-      console.error('[AI-OPT] error response:', errText.slice(0, 200))
       throw new Error('API错误: ' + res.status + ' ' + errText.slice(0, 100))
     }
 
@@ -674,8 +887,6 @@ ${skillSection}
     let buffer = ''
 
     const streamTimeout = 120000 // 120s max wait per chunk
-    console.log('[AI-OPT] starting stream read loop')
-    let chunkCount = 0
     while (true) {
       const readPromise = reader.read()
       const timeoutPromise = new Promise<{done: true; value: undefined}>((resolve) =>
@@ -683,7 +894,6 @@ ${skillSection}
       )
       const { done, value } = await Promise.race([readPromise, timeoutPromise])
       if (done) {
-        console.log('[AI-OPT] stream done, chunkCount:', chunkCount, 'textLen:', aiStreamText.value.length)
         if (!aiStreamText.value) throw new Error('AI服务响应超时，请重试')
         break
       }
@@ -699,11 +909,7 @@ ${skillSection}
           const json = JSON.parse(data)
           const delta = json.choices?.[0]?.delta?.content
           if (delta) {
-            if (aiThinking.value) {
-              console.log('[AI-OPT] first delta received, clearing thinking state')
-              aiThinking.value = false
-            }
-            chunkCount++
+            if (aiThinking.value) aiThinking.value = false
             aiStreamText.value += delta
           }
         } catch {}
@@ -713,10 +919,11 @@ ${skillSection}
     aiResult.value = aiStreamText.value
     // Save to conversation history
     aiMessages.value.push({ role: 'assistant', content: aiResult.value })
-    nextTick(() => { aiChatScrollEl.value?.scrollTo({ top: aiChatScrollEl.value.scrollHeight, behavior: 'smooth' }) })
+    // Scroll to bottom to show compare panel and action buttons
+    setTimeout(() => { const el = aiDrawerBodyEl.value || aiChatScrollEl.value; el?.scrollTo({ top: el.scrollHeight, behavior: 'smooth' }) }, 100)
+    nextTick(() => { const el = aiDrawerBodyEl.value || aiChatScrollEl.value; el?.scrollTo({ top: el.scrollHeight, behavior: 'smooth' }) })
   } // end fetch block
   } catch (err: any) {
-    console.error('[AI-OPT] error caught:', err.name, err.message)
     const msg = err.message || 'AI生成失败'
     if (err.name === 'AbortError' || msg.includes('504') || msg.includes('timeout') || msg.includes('abort')) {
       aiError.value = 'AI服务响应超时，请稍后重试'
@@ -730,7 +937,7 @@ ${skillSection}
     if (abortTimer) clearTimeout(abortTimer)
     aiGenerating.value = false
     aiThinking.value = false
-    console.log('[AI-OPT] finally: aiGenerating=false, aiThinking=false')
+    aiGenerateLock = false
   }
 }
 
@@ -786,17 +993,28 @@ const submit = async () => {
   }
 }
 
+const handleSubmitHotkey = (event: KeyboardEvent) => {
+  const enterPressed = event.key === 'Enter' || event.code === 'Enter'
+  if (event.isComposing) return
+  if (!enterPressed || (!event.ctrlKey && !event.metaKey)) return
+  if (showAiOptimize.value || !canSubmit.value) return
+  event.preventDefault()
+  handleSubmitWithAi()
+}
+
 onMounted(() => {
   fetchTokenStatus()
   tokenTimer = setInterval(fetchTokenStatus, 15000)
+  window.addEventListener('keydown', handleSubmitHotkey)
 })
 onUnmounted(() => {
   if (tokenTimer) clearInterval(tokenTimer)
+  window.removeEventListener('keydown', handleSubmitHotkey)
 })
 </script>
 
 <template>
-  <div class="mvp-panel flex flex-col gap-3 p-4 h-full overflow-y-auto">
+  <div class="mvp-panel flex flex-col gap-3 p-4 h-full overflow-y-auto" :class="{ 'panel-ready': canSubmit }">
 
     <!-- Header -->
     <div class="flex items-center justify-between">
@@ -869,8 +1087,9 @@ onUnmounted(() => {
       <div class="flex items-center justify-between">
         <label class="section-label">提示词 *</label>
         <button
-          class="ai-opt-btn group flex items-center gap-1.5 rounded-lg border border-sky-400/20 bg-gradient-to-r from-sky-500/8 to-blue-500/8 px-2.5 py-1 text-[10px] font-semibold text-sky-300/80 transition-all duration-200 hover:border-sky-400/35 hover:from-sky-500/15 hover:to-blue-500/15 hover:text-sky-200 hover:shadow-md hover:shadow-sky-500/8 active:scale-95"
-          @click="openAiOptimize(false)"
+          type="button"
+          class="ai-opt-btn group flex items-center gap-1.5 rounded-lg border border-sky-400/25 bg-gradient-to-r from-sky-500/10 to-blue-500/10 px-3 py-1.5 text-[11px] font-semibold text-sky-300/85 transition-all duration-300 hover:border-sky-400/40 hover:from-sky-500/20 hover:to-blue-500/20 hover:text-sky-200 hover:shadow-lg hover:shadow-sky-500/12 hover:-translate-y-0.5 active:scale-95"
+          @click="openAiOptimize"
         >
           <SvgIcon icon="ri:magic-line" class="text-xs transition-transform duration-200 group-hover:rotate-12" />
           AI优化
@@ -887,8 +1106,18 @@ onUnmounted(() => {
         />
         <div class="mt-1 flex items-center justify-between">
           <p v-if="promptHint" class="text-[10px]" :class="promptLength > 500 ? 'text-amber-400/70' : 'text-white/25'">{{ promptHint }}</p>
-          <span v-else />
-          <span class="text-[10px] font-mono" :class="promptLength > 0 ? 'text-sky-400/50' : 'text-white/15'">{{ promptLength }}</span>
+          <span v-else class="text-[10px] text-white/20">快捷提交：{{ submitShortcutLabel }}</span>
+          <div class="flex items-center gap-2">
+            <button
+              v-if="promptLength > 0"
+              type="button"
+              class="ghost-action-btn"
+              @click="prompt = ''"
+            >
+              清空
+            </button>
+            <span class="text-[10px] font-mono" :class="promptLength > 0 ? 'text-sky-400/50' : 'text-white/15'">{{ promptLength }}</span>
+          </div>
         </div>
       </div>
     </div>
@@ -898,9 +1127,25 @@ onUnmounted(() => {
     <!-- 参考图片 - 拖拽上传 -->
     <div class="flex flex-col gap-1.5">
       <label class="section-label">参考图片 *（最多 {{ MAX_IMAGES }} 张）</label>
+      <div v-if="images.length > 0" class="mb-0.5 flex items-center justify-between">
+        <p class="text-[10px] text-white/30">
+          已上传 {{ uploadedUrls.length }}/{{ images.length }} 张
+        </p>
+        <button
+          type="button"
+          class="ghost-action-btn"
+          :disabled="isUploading"
+          @click="removeAllImages"
+        >
+          清空图片
+        </button>
+      </div>
       <div
         class="img-drop-zone relative rounded-xl border-2 border-dashed p-3 transition-all duration-300"
-        :class="isDragging ? 'border-sky-400/60 bg-sky-500/[0.08] scale-[1.01]' : 'border-white/[0.08] bg-white/[0.02]'"
+        :class="[
+          isDragging ? 'border-sky-400/60 bg-sky-500/[0.08] scale-[1.01]' : 'border-white/[0.08] bg-white/[0.02]',
+          isUploading ? 'is-uploading' : ''
+        ]"
         @dragenter="onDragEnter"
         @dragleave="onDragLeave"
         @dragover="onDragOver"
@@ -933,6 +1178,7 @@ onUnmounted(() => {
             <div v-else class="absolute inset-0 bg-gradient-to-t from-black/40 via-transparent to-transparent opacity-0 transition-opacity group-hover:opacity-100" />
             <button
               v-if="!img.uploading"
+              type="button"
               class="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-full bg-black/60 text-white/70 opacity-0 transition-all group-hover:opacity-100 hover:bg-red-500/80 hover:text-white"
               @click="removeImage(idx)"
             >
@@ -948,7 +1194,7 @@ onUnmounted(() => {
         <!-- Upload button / empty state -->
         <label
           v-if="remainingSlots > 0"
-          class="mt-2 flex cursor-pointer items-center justify-center gap-2 rounded-lg border border-dashed border-white/[0.08] bg-white/[0.02] py-2.5 transition-all hover:border-sky-400/30 hover:bg-sky-500/[0.04]"
+          class="upload-trigger mt-2 flex cursor-pointer items-center justify-center gap-2 rounded-xl border border-dashed border-white/[0.12] bg-white/[0.03] py-3 transition-all duration-300 hover:border-sky-400/40 hover:bg-sky-500/[0.06] hover:shadow-md hover:shadow-sky-500/5"
           :class="{ 'mt-0': images.length === 0 }"
         >
           <SvgIcon icon="ri:image-add-line" class="text-base text-white/25" />
@@ -971,7 +1217,7 @@ onUnmounted(() => {
           <button
             v-for="opt in resolutionOptions"
             :key="opt.value"
-            class="res-btn group flex flex-col items-center gap-1.5 rounded-xl px-3 py-3 transition-all duration-200"
+            class="res-btn group flex flex-col items-center gap-2 rounded-xl px-3 py-4"
             :class="{ active: resolution === opt.value }"
             @click="resolution = opt.value"
           >
@@ -998,6 +1244,7 @@ onUnmounted(() => {
         <div class="mb-1 text-[11px] text-white/40 font-medium">生成模式</div>
         <div class="flex gap-2">
           <button
+            type="button"
             class="pill-btn"
             :class="{ active: quality === 'std' }"
             @click="quality = 'std'"
@@ -1005,6 +1252,7 @@ onUnmounted(() => {
             Pro
           </button>
           <button
+            type="button"
             class="pill-btn"
             :class="{ active: quality === 'pro' }"
             @click="quality = 'pro'"
@@ -1029,6 +1277,7 @@ onUnmounted(() => {
               </div>
               <button
                 v-else
+                type="button"
                 class="absolute right-0.5 top-0.5 hidden rounded-full bg-black/70 p-0.5 text-white/80 group-hover:block hover:bg-red-500/80 transition-colors"
                 @click="removeVideo"
               >
@@ -1037,7 +1286,7 @@ onUnmounted(() => {
             </div>
             <label
               v-if="!refVideo"
-              class="upload-area flex h-16 w-28 cursor-pointer flex-col items-center justify-center gap-1 rounded-lg"
+              class="upload-area upload-trigger flex h-16 w-28 cursor-pointer flex-col items-center justify-center gap-1 rounded-lg"
             >
               <SvgIcon icon="ri:video-add-line" class="text-xl text-white/30" />
               <span class="text-[10px] text-white/35">上传视频</span>
@@ -1055,6 +1304,7 @@ onUnmounted(() => {
           <button
             v-for="d in [5, 10, 15]"
             :key="d"
+            type="button"
             class="pill-btn"
             :class="{ active: duration === d }"
             @click="duration = d"
@@ -1098,7 +1348,28 @@ onUnmounted(() => {
     <div class="section-divider" />
 
     <!-- AI自动优化开关 + 提交按钮 -->
-    <div class="flex flex-col gap-2">
+    <div class="action-block flex flex-col gap-2">
+      <div class="action-progress">
+        <div class="progress-meta">
+          <span class="text-[10px] text-white/30">提交准备度</span>
+          <span class="text-[10px] font-mono text-white/40">{{ completionRatio }}%</span>
+        </div>
+        <div class="progress-rail">
+          <div class="progress-fill" :style="{ width: completionRatio + '%' }" />
+        </div>
+        <div class="requirement-row">
+          <span
+            v-for="item in completionItems"
+            :key="item.key"
+            class="requirement-chip"
+            :class="{ done: item.done }"
+          >
+            <SvgIcon :icon="item.done ? 'ri:checkbox-circle-line' : 'ri:time-line'" class="text-[10px]" />
+            {{ item.label }}
+          </span>
+        </div>
+      </div>
+
       <div class="flex items-center justify-between rounded-xl border border-white/[0.06] bg-white/[0.03] px-3.5 py-2.5 transition-all duration-200" :class="aiAutoOptimize ? 'border-sky-400/20 bg-sky-500/[0.05]' : ''">
         <div class="flex items-center gap-2">
           <div class="flex h-5 w-5 items-center justify-center rounded-md" :class="aiAutoOptimize ? 'bg-sky-500/15' : 'bg-white/[0.05]'">
@@ -1109,26 +1380,28 @@ onUnmounted(() => {
         <NSwitch v-model:value="aiAutoOptimize" size="small" />
       </div>
       <button
+        type="button"
         class="submit-btn"
         :class="{ 'can-submit': canSubmit, 'is-submitting': loading }"
         :disabled="!canSubmit"
+        :title="canSubmit ? `快捷提交：${submitShortcutLabel}` : canSubmitReason"
         @click="handleSubmitWithAi"
       >
         <template v-if="loading">
           <div class="submit-spinner" />
           提交中...
-        
-</template>
+        </template>
+        <template v-else-if="submitSuccess">
+          <SvgIcon icon="ri:check-line" class="text-base text-emerald-300" />
+          <span class="text-emerald-300">已提交</span>
+        </template>
         <template v-else>
           <SvgIcon icon="ri:play-circle-line" class="text-base" />
           生成视频
-        
-</template>
+        </template>
       </button>
-      <p v-if="quotaExceeded" class="text-center text-[11px] text-red-400/80">{{ quotaExceeded }}</p>
-      <p v-else-if="quality === 'pro' && (!refVideo || !refVideo.url) && uploadedUrls.length > 0 && prompt.trim()" class="text-center text-[11px] text-amber-400/80">请上传参考视频后再提交（大师模式必需）</p>
-      <p v-else-if="!prompt.trim() && uploadedUrls.length > 0" class="text-center text-[10px] text-white/20">请输入提示词</p>
-      <p v-else-if="prompt.trim() && uploadedUrls.length === 0" class="text-center text-[10px] text-white/20">请上传参考图片</p>
+      <p v-if="canSubmit" class="text-center text-[10px] text-sky-300/55">按 {{ submitShortcutLabel }} 可快速提交</p>
+      <p v-else-if="canSubmitReason" class="text-center text-[11px] text-amber-300/75">{{ canSubmitReason }}</p>
     </div>
   </div>
 
@@ -1154,7 +1427,7 @@ onUnmounted(() => {
         </div>
       </template>
 
-      <div class="ai-drawer-body">
+      <div ref="aiDrawerBodyEl" class="ai-drawer-body">
         <!-- Image preview - compact inline -->
         <div v-if="images.length > 0" class="mb-4 flex items-center gap-2.5">
           <div class="flex -space-x-2">
@@ -1194,11 +1467,11 @@ onUnmounted(() => {
               :class="selectedSkill === 'action' ? 'border-sky-400/40 bg-sky-500/10' : 'border-sky-400/15 bg-sky-500/[0.04] hover:border-sky-400/25 hover:bg-sky-500/[0.08]'"
               @click="selectSkill('action')"
             >
-              <div class="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg" :class="selectedSkill === 'action' ? 'bg-sky-500/20' : 'bg-sky-500/10'">
+              <div class="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg" :class="selectedSkill === 'action' ? 'bg-sky-500/30' : 'bg-sky-500/15'">
                 <SvgIcon icon="ri:body-scan-line" class="text-sm text-sky-400" />
               </div>
               <div class="min-w-0 flex-1">
-                <p class="text-[12px] font-semibold" :class="selectedSkill === 'action' ? 'text-sky-300' : 'text-white/70'">动作优化</p>
+                <p class="text-[12px] font-semibold" :class="selectedSkill === 'action' ? 'text-sky-200' : 'text-white/70'">动作优化</p>
                 <p class="text-[10px]" :class="selectedSkill === 'action' ? 'text-sky-400/50' : 'text-white/30'">优化人物动作，更好展示商品，聚焦商品</p>
               </div>
               <SvgIcon v-if="selectedSkill === 'action'" icon="ri:check-line" class="text-sm text-sky-400" />
@@ -1206,14 +1479,14 @@ onUnmounted(() => {
             <div class="flex items-center gap-2">
               <button
                 class="flex-1 rounded-lg border px-2.5 py-1.5 text-[10px] font-medium transition-all active:scale-95"
-                :class="selectedSkill === 'camera' ? 'border-sky-400/40 bg-sky-500/12 text-sky-300' : 'border-white/[0.06] bg-white/[0.02] text-white/35 hover:border-white/12 hover:text-white/50'"
+                :class="selectedSkill === 'camera' ? 'border-sky-400/60 bg-sky-500/25 text-sky-200' : 'border-white/[0.12] bg-white/[0.05] text-white/50 hover:border-white/20 hover:text-white/70'"
                 @click="selectSkill('camera')"
               >
                 <SvgIcon icon="ri:camera-lens-line" class="mr-1 inline text-xs" />镜头优化
               </button>
               <button
                 class="flex-1 rounded-lg border px-2.5 py-1.5 text-[10px] font-medium transition-all active:scale-95"
-                :class="selectedSkill === 'product' ? 'border-sky-400/40 bg-sky-500/12 text-sky-300' : 'border-white/[0.06] bg-white/[0.02] text-white/35 hover:border-white/12 hover:text-white/50'"
+                :class="selectedSkill === 'product' ? 'border-sky-400/60 bg-sky-500/25 text-sky-200' : 'border-white/[0.12] bg-white/[0.05] text-white/50 hover:border-white/20 hover:text-white/70'"
                 @click="selectSkill('product')"
               >
                 <SvgIcon icon="ri:shopping-bag-3-line" class="mr-1 inline text-xs" />产品特写
@@ -1237,17 +1510,17 @@ onUnmounted(() => {
                     v-for="skill in AI_SKILLS.filter(s => s.group === group)"
                     :key="skill.id"
                     class="ai-skill-card group flex items-start gap-2 rounded-xl border p-2 text-left transition-all duration-200 active:scale-[0.97]"
-                    :class="selectedSkill === skill.id ? 'border-sky-400/40 bg-sky-500/10' : 'border-white/[0.06] bg-white/[0.02] hover:border-white/12 hover:bg-white/[0.04]'"
+                    :class="selectedSkill === skill.id ? 'border-sky-400/60 bg-sky-500/20 shadow-sm shadow-sky-500/10' : 'border-white/[0.10] bg-white/[0.04] hover:border-white/20 hover:bg-white/[0.08]'"
                     @click="selectSkill(skill.id)"
                   >
                     <div class="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-lg transition-colors duration-200"
-                      :class="selectedSkill === skill.id ? 'bg-sky-500/20' : 'bg-white/[0.04] group-hover:bg-white/[0.08]'"
+                      :class="selectedSkill === skill.id ? 'bg-sky-500/30' : 'bg-white/[0.06] group-hover:bg-white/[0.12]'"
                     >
-                      <SvgIcon :icon="skill.icon" class="text-xs" :class="selectedSkill === skill.id ? 'text-sky-400' : 'text-white/30 group-hover:text-white/50'" />
+                      <SvgIcon :icon="skill.icon" class="text-xs" :class="selectedSkill === skill.id ? 'text-sky-300' : 'text-white/40 group-hover:text-white/60'" />
                     </div>
                     <div class="min-w-0">
-                      <p class="text-[11px] font-semibold" :class="selectedSkill === skill.id ? 'text-sky-300' : 'text-white/60'">{{ skill.label }}</p>
-                      <p class="text-[10px] leading-snug" :class="selectedSkill === skill.id ? 'text-sky-400/50' : 'text-white/25'">{{ skill.desc }}</p>
+                      <p class="text-[11px] font-semibold" :class="selectedSkill === skill.id ? 'text-sky-200 drop-shadow-sm' : 'text-white/65'">{{ skill.label }}</p>
+                      <p class="text-[10px] leading-snug" :class="selectedSkill === skill.id ? 'text-sky-300/60' : 'text-white/35'">{{ skill.desc }}</p>
                     </div>
                   </button>
                 </div>
@@ -1272,11 +1545,7 @@ onUnmounted(() => {
           />
         </div>
 
-        <!-- Current prompt (collapsed if exists) -->
-        <div v-if="prompt.trim()" class="mb-4 rounded-lg border border-white/[0.05] bg-white/[0.02] px-3 py-2">
-          <p class="text-[10px] text-white/25">当前提示词</p>
-          <p class="mt-0.5 truncate text-[11px] text-white/45">{{ prompt }}</p>
-        </div>
+
 
         <!-- Generate button - always visible -->
         <button
@@ -1300,7 +1569,7 @@ onUnmounted(() => {
         </button>
 
         <!-- Chat area: thinking + messages + streaming -->
-        <div ref="aiChatScrollEl" class="ai-chat-area mt-4 space-y-3 max-h-[320px] overflow-y-auto pr-1">
+        <div ref="aiChatScrollEl" class="ai-chat-area mt-4 space-y-3 pr-1">
           <!-- Previous conversation messages -->
           <template v-for="(msg, idx) in aiMessages" :key="idx">
             <!-- User follow-up bubble -->
@@ -1312,7 +1581,7 @@ onUnmounted(() => {
             <!-- AI response bubble (only show completed ones, not the last if still streaming) -->
             <div v-else-if="msg.role === 'assistant' && !(aiGenerating && idx === aiMessages.length - 1)" class="flex justify-start">
               <div class="ai-chat-bot rounded-xl rounded-tl-sm border border-white/[0.06] bg-white/[0.03] px-3.5 py-2.5 max-w-[90%]">
-                <p class="whitespace-pre-wrap text-[13px] leading-[1.8] text-white/85">{{ msg.content }}</p>
+                <p class="whitespace-pre-wrap text-[13px] leading-[1.8] text-white/85" v-html="highlightKeywords(msg.content)"></p>
               </div>
             </div>
           </template>
@@ -1328,10 +1597,48 @@ onUnmounted(() => {
           </div>
 
           <!-- Current streaming result -->
-          <div v-if="aiStreamText && !aiThinking" class="flex justify-start">
+          <div v-if="aiStreamText && !aiThinking && aiGenerating" class="flex justify-start">
             <div class="ai-chat-bot rounded-xl rounded-tl-sm border border-sky-400/15 bg-white/[0.03] px-3.5 py-2.5 max-w-[90%]">
-              <p class="whitespace-pre-wrap text-[13px] leading-[1.8] text-white/85">{{ aiStreamText }}<span v-if="aiGenerating" class="ai-cursor ml-0.5 inline-block h-4 w-[2px] rounded-full bg-sky-400" /></p>
+              <p class="whitespace-pre-wrap text-[13px] leading-[1.8] text-white/85"><span v-html="highlightKeywords(aiStreamText)"></span><span v-if="aiGenerating" class="ai-cursor ml-0.5 inline-block h-4 w-[2px] rounded-full bg-sky-400" /></p>
             </div>
+          </div>
+        </div>
+
+        <!-- Compare panel: original vs AI optimized -->
+        <div v-if="(aiStreamText || aiResult) && !aiGenerating && aiOriginalPrompt" class="mt-4">
+          <div class="rounded-xl border border-white/[0.08] overflow-hidden">
+            <!-- Original -->
+            <div class="px-3.5 py-2.5 bg-white/[0.02] border-b border-white/[0.06]">
+              <div class="flex items-center gap-1.5 mb-1.5">
+                <div class="h-1.5 w-1.5 rounded-full bg-white/20"></div>
+                <span class="text-[10px] font-semibold text-white/30 tracking-wide uppercase">原始提示词</span>
+              </div>
+              <p class="text-[12px] leading-[1.7] text-white/30 line-through decoration-white/15">{{ aiOriginalPrompt }}</p>
+            </div>
+            <!-- Arrow divider -->
+            <div class="flex items-center justify-center py-1 bg-white/[0.01]">
+              <SvgIcon icon="ri:arrow-down-line" class="text-sm text-sky-400/40" />
+            </div>
+            <!-- AI Optimized -->
+            <div class="px-3.5 py-2.5 bg-sky-500/[0.04] border-t border-sky-400/10">
+              <div class="flex items-center gap-1.5 mb-1.5">
+                <div class="h-1.5 w-1.5 rounded-full bg-sky-400/60"></div>
+                <span class="text-[10px] font-semibold text-sky-300/50 tracking-wide uppercase">AI 优化</span>
+                <SvgIcon icon="ri:sparkling-2-line" class="text-[10px] text-sky-400/40" />
+              </div>
+              <p class="text-[12px] leading-[1.7] text-white/80" v-html="highlightKeywords(aiResult || aiStreamText)"></p>
+            </div>
+          </div>
+        </div>
+
+        <!-- AI result without original (no comparison needed) -->
+        <div v-else-if="(aiStreamText || aiResult) && !aiGenerating && !aiOriginalPrompt" class="mt-4">
+          <div class="rounded-xl border border-sky-400/15 bg-sky-500/[0.04] px-3.5 py-2.5">
+            <div class="flex items-center gap-1.5 mb-1.5">
+              <div class="h-1.5 w-1.5 rounded-full bg-sky-400/60"></div>
+              <span class="text-[10px] font-semibold text-sky-300/50 tracking-wide uppercase">AI 生成</span>
+            </div>
+            <p class="text-[12px] leading-[1.7] text-white/80" v-html="highlightKeywords(aiResult || aiStreamText)"></p>
           </div>
         </div>
 
@@ -1377,7 +1684,7 @@ onUnmounted(() => {
             </div>
             <div class="mt-2 flex flex-wrap gap-1.5">
               <button
-                v-for="hint in ['镜头再近一点', '加入走路动作', '更自然一些', '突出产品质感', '换个风格']"
+                v-for="hint in dynamicHints"
                 :key="hint"
                 class="rounded-md border border-white/[0.06] bg-white/[0.02] px-2 py-0.5 text-[10px] text-white/30 transition-all hover:border-sky-400/20 hover:bg-sky-500/[0.06] hover:text-sky-300/70"
                 @click="aiFollowUp = hint; generateAiFollowUp()"
@@ -1410,6 +1717,32 @@ onUnmounted(() => {
   border-right: 1px solid rgba(255, 255, 255, 0.08);
   border-image: linear-gradient(to bottom, rgba(56, 189, 248, 0.15), rgba(255, 255, 255, 0.06)) 1;
 }
+.mvp-panel::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: block;
+  height: 1px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(56, 189, 248, 0.05), rgba(56, 189, 248, 0.55), rgba(56, 189, 248, 0.05));
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  pointer-events: none;
+}
+.mvp-panel.panel-ready::before {
+  opacity: 1;
+}
+
+/* ── Panel entrance ── */
+.mvp-panel {
+  animation: panelFadeIn 0.35s ease-out;
+}
+@keyframes panelFadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
 
 /* ── Thin dark scrollbar (4px) ── */
 .mvp-panel::-webkit-scrollbar {
@@ -1429,8 +1762,8 @@ onUnmounted(() => {
 /* ── Section dividers ── */
 .section-divider {
   height: 1px;
-  background: linear-gradient(to right, transparent, rgba(255, 255, 255, 0.06), transparent);
-  margin: 2px 0;
+  background: linear-gradient(to right, transparent, rgba(255, 255, 255, 0.08), transparent);
+  margin: 4px 0;
 }
 
 /* ── Section label ── */
@@ -1441,24 +1774,32 @@ onUnmounted(() => {
   letter-spacing: 0.02em;
 }
 
+button:focus-visible,
+.upload-trigger:focus-within {
+  outline: 2px solid rgba(56, 189, 248, 0.65);
+  outline-offset: 2px;
+}
+
 /* ── Header icon with gradient ── */
 .header-icon {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
   background: linear-gradient(135deg, rgba(56, 189, 248, 0.25), rgba(59, 130, 246, 0.2));
   color: rgba(255, 255, 255, 0.9);
 }
 
 /* ── User info chip ── */
 .user-chip {
-  padding: 8px 12px;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.07);
+  padding: 12px 16px;
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.03));
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  transition: all 0.3s ease;
 }
 
 .status-dot {
@@ -1477,6 +1818,29 @@ onUnmounted(() => {
 /* ── Textarea ── */
 .textarea-wrapper {
   position: relative;
+}
+
+.ghost-action-btn {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02));
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 10px;
+  line-height: 1;
+  padding: 5px 10px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+  transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.ghost-action-btn:hover:not(:disabled) {
+  color: rgba(255, 255, 255, 0.85);
+  border-color: rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.08);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+.ghost-action-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .prompt-textarea :deep(.n-input__textarea-el),
@@ -1498,49 +1862,60 @@ onUnmounted(() => {
 /* ── Pill buttons ── */
 .pill-btn {
   flex: 1;
-  padding: 7px 0;
-  border-radius: 8px;
-  font-size: 12px;
+  padding: 12px 0;
+  border-radius: 12px;
+  font-size: 13px;
   font-weight: 600;
-  color: rgba(255, 255, 255, 0.50);
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  color: rgba(255, 255, 255, 0.65);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.04));
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
   cursor: pointer;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.03em;
 }
 
 .pill-btn:hover {
-  background: rgba(255, 255, 255, 0.1);
-  color: rgba(255, 255, 255, 0.8);
-  border-color: rgba(255, 255, 255, 0.15);
-  transform: translateY(-1px);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.07));
+  color: rgba(255, 255, 255, 0.92);
+  border-color: rgba(255, 255, 255, 0.22);
+  transform: translateY(-2px) scale(1.02);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
 
 .pill-btn.active {
-  background: linear-gradient(135deg, rgba(56, 189, 248, 0.2), rgba(59, 130, 246, 0.18));
-  border-color: rgba(56, 189, 248, 0.4);
-  color: rgba(255, 255, 255, 0.95);
-  box-shadow: 0 0 12px rgba(56, 189, 248, 0.12);
+  background: linear-gradient(180deg, rgba(56, 189, 248, 0.35), rgba(59, 130, 246, 0.25));
+  border-color: rgba(56, 189, 248, 0.55);
+  color: #fff;
+  box-shadow: 0 0 20px rgba(56, 189, 248, 0.2), 0 4px 12px rgba(56, 189, 248, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
+.pill-btn:active {
+  transform: scale(0.97);
 }
 
 /* ── Resolution buttons ── */
 .res-btn {
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.03));
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.04);
   cursor: pointer;
+  transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 .res-btn:hover {
-  background: rgba(255, 255, 255, 0.08);
-  border-color: rgba(255, 255, 255, 0.15);
-  transform: translateY(-2px);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.06));
+  border-color: rgba(255, 255, 255, 0.2);
+  transform: translateY(-2px) scale(1.03);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
 
+.res-btn:active {
+  transform: scale(0.96);
+}
 .res-btn.active {
-  background: linear-gradient(135deg, rgba(56, 189, 248, 0.15), rgba(59, 130, 246, 0.12));
-  border-color: rgba(56, 189, 248, 0.4);
-  box-shadow: 0 0 16px rgba(56, 189, 248, 0.1);
+  background: linear-gradient(180deg, rgba(56, 189, 248, 0.3), rgba(59, 130, 246, 0.2));
+  border-color: rgba(56, 189, 248, 0.55);
+  box-shadow: 0 0 24px rgba(56, 189, 248, 0.2), 0 4px 12px rgba(56, 189, 248, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.1);
 }
 
 .res-icon {
@@ -1550,7 +1925,7 @@ onUnmounted(() => {
 }
 
 .res-icon.active {
-  border-color: rgba(139, 92, 246, 0.6);
+  border-color: rgba(56, 189, 248, 0.65);
   background: linear-gradient(135deg, rgba(56, 189, 248, 0.25), rgba(59, 130, 246, 0.2));
 }
 
@@ -1558,12 +1933,17 @@ onUnmounted(() => {
 .upload-area {
   border: 1.5px dashed rgba(255, 255, 255, 0.10);
   background: rgba(255, 255, 255, 0.02);
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: all 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 .upload-area:hover {
-  border-color: rgba(56, 189, 248, 0.35);
-  background: rgba(56, 189, 248, 0.05);
+  border-color: rgba(56, 189, 248, 0.4);
+  background: rgba(56, 189, 248, 0.06);
+  transform: scale(1.01);
+  box-shadow: 0 0 16px rgba(56, 189, 248, 0.08);
+}
+.img-drop-zone.is-uploading {
+  animation: border-dance 1.8s linear infinite;
 }
 
 @keyframes border-dance {
@@ -1594,40 +1974,126 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   gap: 6px;
-  padding: 11px 0;
-  border-radius: 10px;
-  font-size: 13px;
-  font-weight: 600;
+  padding: 15px 0;
+  border-radius: 14px;
+  font-size: 14px;
+  font-weight: 700;
   color: rgba(255, 255, 255, 0.4);
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.03));
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.04);
   cursor: not-allowed;
   transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   letter-spacing: 0.03em;
 }
 
+.action-block {
+  position: sticky;
+  bottom: -10px;
+  z-index: 2;
+  margin: 0 -4px;
+  padding: 8px 4px 2px;
+  background: linear-gradient(180deg, rgba(8, 10, 18, 0), rgba(8, 10, 18, 0.5) 24%, rgba(8, 10, 18, 0.78));
+  backdrop-filter: blur(8px);
+}
+
+.action-progress {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  padding: 10px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.01));
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.progress-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.progress-rail {
+  width: 100%;
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, rgba(56, 189, 248, 0.45), rgba(56, 189, 248, 0.95));
+  transition: width 0.25s ease;
+}
+
+.requirement-row {
+  margin-top: 8px;
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.requirement-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.02));
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+  transition: all 0.2s ease;
+}
+
+.requirement-chip.done {
+  color: rgba(103, 232, 249, 0.95);
+  border-color: rgba(56, 189, 248, 0.4);
+  background: linear-gradient(180deg, rgba(56, 189, 248, 0.2), rgba(56, 189, 248, 0.1));
+  box-shadow: 0 0 8px rgba(56, 189, 248, 0.1);
+}
+
 .submit-btn.can-submit {
   cursor: pointer;
-  color: rgba(255, 255, 255, 0.95);
-  background: linear-gradient(135deg, rgba(14, 165, 233, 0.85), rgba(59, 130, 246, 0.85));
-  border-color: rgba(56, 189, 248, 0.4);
+  color: #fff;
+  background: linear-gradient(180deg, rgba(14, 165, 233, 0.95), rgba(37, 99, 235, 0.9));
+  border-color: rgba(56, 189, 248, 0.5);
   box-shadow:
-    0 2px 12px rgba(14, 165, 233, 0.25),
-    0 0 0 1px rgba(56, 189, 248, 0.1) inset;
+    0 4px 16px rgba(14, 165, 233, 0.35),
+    0 0 0 1px rgba(56, 189, 248, 0.15) inset,
+    inset 0 1px 0 rgba(255, 255, 255, 0.2);
   animation: subtle-pulse 2.5s ease-in-out infinite;
 }
 
 .submit-btn.can-submit:hover {
-  background: linear-gradient(135deg, rgba(14, 165, 233, 0.95), rgba(59, 130, 246, 0.95));
+  background: linear-gradient(180deg, rgba(56, 189, 248, 1), rgba(59, 130, 246, 0.98));
   box-shadow:
-    0 4px 20px rgba(14, 165, 233, 0.35),
-    0 0 0 1px rgba(56, 189, 248, 0.2) inset;
-  transform: translateY(-1px);
+    0 8px 28px rgba(14, 165, 233, 0.45),
+    0 0 0 1px rgba(255, 255, 255, 0.1) inset,
+    inset 0 1px 0 rgba(255, 255, 255, 0.25);
+  transform: translateY(-2px) scale(1.01);
 }
 
 .submit-btn.can-submit:active {
   transform: translateY(0);
   box-shadow: 0 1px 6px rgba(14, 165, 233, 0.2);
+}
+
+.submit-btn.submit-success {
+  cursor: default;
+  color: rgba(110, 231, 183, 0.95);
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.3), rgba(52, 211, 153, 0.25));
+  border-color: rgba(52, 211, 153, 0.4);
+  box-shadow: 0 2px 12px rgba(52, 211, 153, 0.2);
+  animation: submitSuccessFlash 0.6s ease-out;
+}
+
+@keyframes submitSuccessFlash {
+  0% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.5); }
+  50% { box-shadow: 0 0 20px 4px rgba(52, 211, 153, 0.3); }
+  100% { box-shadow: 0 2px 12px rgba(52, 211, 153, 0.2); }
 }
 
 .submit-btn.is-submitting {
@@ -1816,5 +2282,14 @@ onUnmounted(() => {
 @keyframes cursorBlink {
   0%, 100% { opacity: 1; }
   50% { opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 </style>

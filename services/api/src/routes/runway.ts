@@ -48,12 +48,22 @@ if (!fs.existsSync(captureDir)) fs.mkdirSync(captureDir, { recursive: true });
 
 // AI Prompt Optimization Proxy (avoids CORS issues with external API)
 runwayRouter.post("/ai/optimize", authMiddleware, async (req: any, res: any) => {
+  const reqStart = Date.now();
+  console.log("[ai/optimize] request received, model:", req.body?.model, "stream:", req.body?.stream, "messages:", req.body?.messages?.length);
+  // Log image sizes in user content
+  const userMsg = req.body?.messages?.find((m: any) => m.role === "user");
+  if (userMsg?.content && Array.isArray(userMsg.content)) {
+    const imgCount = userMsg.content.filter((c: any) => c.type === "image_url").length;
+    const totalLen = JSON.stringify(userMsg.content).length;
+    console.log("[ai/optimize] user content: images=" + imgCount + ", totalPayloadChars=" + totalLen);
+  }
   try {
     const fetchMod = await import("node-fetch");
     const fetchFn = fetchMod.default;
     const AbortController = globalThis.AbortController;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 90000); // 90s timeout
+    console.log("[ai/optimize] sending to upstream API, bodySize:", JSON.stringify(req.body).length);
     const apiRes = await fetchFn("https://api.iplcz.cn/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -64,6 +74,7 @@ runwayRouter.post("/ai/optimize", authMiddleware, async (req: any, res: any) => 
       signal: controller.signal as any,
     });
     clearTimeout(timeout);
+    console.log("[ai/optimize] upstream responded, status:", apiRes.status, "elapsed:", Date.now() - reqStart, "ms");
     res.writeHead(apiRes.status, {
       "Content-Type": apiRes.headers.get("content-type") || "text/event-stream",
       "Cache-Control": "no-cache",
@@ -85,9 +96,10 @@ runwayRouter.post("/ai/optimize", authMiddleware, async (req: any, res: any) => 
         clearTimeout(bodyTimeout);
         if (!res.writableEnded) { try { res.end(); } catch {} }
       });
+      console.log("[ai/optimize] piping body stream to client");
       apiRes.body.pipe(res);
-      res.on("finish", () => clearTimeout(bodyTimeout));
-      res.on("close", () => clearTimeout(bodyTimeout));
+      res.on("finish", () => { clearTimeout(bodyTimeout); console.log("[ai/optimize] stream finished, total elapsed:", Date.now() - reqStart, "ms"); });
+      res.on("close", () => { clearTimeout(bodyTimeout); console.log("[ai/optimize] connection closed, total elapsed:", Date.now() - reqStart, "ms"); });
     } else {
       const text = await apiRes.text();
       res.end(text);

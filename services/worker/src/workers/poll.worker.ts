@@ -316,8 +316,14 @@ new Worker('runway-poll', async (job: Job) => {
       if (!alreadyReleased) {
         await accountPool.release(accountId, jobId);
         await connection.set(slotKey, '1', 'EX', 7200); // 2h guard
-        console.log(`[poll-worker] job ${jobId.slice(0,8)} THROTTLED, released concurrency slot (still polling)`);
-        // Do NOT call triggerSubmit here -- THROTTLED tasks still count toward global cap in DB
+        // Update DB status to 'queued' so submit worker's DB check knows the slot is free
+        await prisma.runwayJob.update({
+          where: { id: jobId },
+          data: { status: 'queued' } as any,
+        }).catch(() => {});
+        console.log(`[poll-worker] job ${jobId.slice(0,8)} THROTTLED, released slot + DB->queued (still polling)`);
+        // Trigger submit since a real slot opened up
+        await triggerSubmit(humanSubmitDelay());
       }
     }
 

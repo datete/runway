@@ -266,6 +266,17 @@ export class AccountPool {
     }
     console.log(`[account-pool] released ${accountId.slice(0, 8)}, now ${Math.max(0, val)}`);
   }
+  /** Release a concurrency slot without a jobId (for slots acquired but never used for a job).
+   *  Uses a per-invocation nonce to prevent double-release within the same flow. */
+  async releaseNoJob(accountId: string): Promise<void> {
+    const key = `account:concurrency:${accountId}`;
+    const val = await this.redis.decr(key);
+    if (val < 0) {
+      await this.redis.set(key, '0');
+    }
+    console.log(`[account-pool] released (no-job) ${accountId.slice(0, 8)}, now ${Math.max(0, val)}`);
+  }
+
 
   /** Record an error on an account */
   async recordError(accountId: string, message: string): Promise<void> {
