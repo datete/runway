@@ -7,4 +7,4 @@ import PromptStore from './PromptStore/index.vue'
 import QuotaBar from './QuotaBar.vue'
 
 import UserCenter from './UserCenter.vue'
-export { HoverButton, NaiveProvider, SvgIcon, UserAvatar, Setting, PromptStore, QuotaBar , UserCenter }
+export { HoverButton, NaiveProvider, SvgIcon, UserAvatar, Setting, PromptStore, QuotaBar, UserCenter }
