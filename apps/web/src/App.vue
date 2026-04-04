@@ -1,11 +1,23 @@
 <script setup lang="ts">
+import { ref, onMounted } from 'vue'
 import { NConfigProvider } from 'naive-ui'
 import { NaiveProvider } from '@/components/common'
+import UpdateNotification from '@/components/common/UpdateNotification.vue'
 import { useTheme } from '@/hooks/useTheme'
 import { useLanguage } from '@/hooks/useLanguage'
-import aiOther from "@/views/mj/aiOther.vue" 
+import { startVersionCheck } from '@/utils/versionCheck'
+import type { VersionInfo } from '@/utils/versionCheck'
+import aiOther from "@/views/mj/aiOther.vue"
+
 const { theme, themeOverrides } = useTheme()
 const { language } = useLanguage()
+const updateRef = ref<InstanceType<typeof UpdateNotification> | null>(null)
+
+onMounted(() => {
+  startVersionCheck((info: VersionInfo) => {
+    updateRef.value?.open(info)
+  })
+})
 </script>
 
 <template>
@@ -19,6 +31,6 @@ const { language } = useLanguage()
       <RouterView />
     </NaiveProvider>
   </NConfigProvider>
-  <!-- 处理一下chat 与draw 共有的事情 -->
   <aiOther/>
+  <UpdateNotification ref="updateRef" />
 </template>
