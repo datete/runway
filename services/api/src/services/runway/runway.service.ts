@@ -2,6 +2,7 @@ import { prisma } from "../prisma";
 import { submitQueue, pollQueue, redisConnection } from "../../queues/runway.queue";
 import { v4 as uuidv4 } from "uuid";
 import fetch from "node-fetch";
+import { createHash } from "crypto";
 
 interface CreateJobInput {
   prompt: string;
@@ -21,6 +22,24 @@ interface CreateJobInput {
 }
 
 const ACTIVE_STATUSES = ["pending", "queued", "submitted", "processing"];
+
+/** Global prompt dedup: same content max N times per day across all users */
+const PROMPT_DAILY_LIMIT = 15;
+const PROMPT_TTL = 86400; // 24h
+
+function promptHash(prompt: string): string {
+  const normalized = prompt.trim().replace(/\s+/g, ' ').toLowerCase();
+  return createHash('sha256').update(normalized).digest('hex').slice(0, 16);
+}
+
+async function checkPromptLimit(prompt: string): Promise<{ allowed: boolean; count: number }> {
+  const hash = promptHash(prompt);
+  const key = `prompt:global:${hash}`;
+  const count = await redisConnection.incr(key);
+  if (count === 1) await redisConnection.expire(key, PROMPT_TTL);
+  return { allowed: count <= PROMPT_DAILY_LIMIT, count };
+}
+
 
 /** Add a single trigger to the submit queue (deduped) */
 async function triggerSubmit(delay = 0): Promise<void> {
@@ -53,6 +72,12 @@ export class RunwayService {
   async createJob(input: CreateJobInput) {
     // Quota check + job creation in a serializable transaction to prevent races
     const job = await prisma.$transaction(async (tx) => {
+      // ── Global prompt frequency check ──
+      const { allowed, count } = await checkPromptLimit(input.prompt);
+      if (!allowed) {
+        throw new Error(`该内容今日已被提交 ${count - 1} 次，结果趋于同质化，请修改描述后重试（每日上限 ${PROMPT_DAILY_LIMIT} 次）`);
+      }
+
       if (input.userId) {
         const user = await tx.user.findUnique({
           where: { id: input.userId },
