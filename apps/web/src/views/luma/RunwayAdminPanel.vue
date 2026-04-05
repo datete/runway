@@ -37,7 +37,8 @@ interface DashboardOverview {
 interface AccountInfo {
   id: string; label: string; tokenShort: string; teamId: string; proxyUrl: string | null
   maxConcurrency: number; currentConcurrency: number; isActive: boolean; priority: number
-  inCooldown: boolean; totalGenerated: number; lastUsedAt: string | null
+  inCooldown: boolean; batchResting: boolean; batchRestTtl: number; batchCount: number; batchLimit: number
+  totalGenerated: number; lastUsedAt: string | null
   lastErrorAt: string | null; lastErrorMessage: string | null
   tokenExpiresAt: string | null; createdAt: string ; activeTasks?: ActiveTask[]
 }
@@ -441,6 +442,24 @@ const deleteAccount = async (id: string) => {
     if (!res.ok) throw new Error('操作失败')
     message.success('已停用')
     fetchAccounts(); fetchDashboard()
+  } catch (e: any) { message.error(e.message) }
+}
+
+const resetCooldown = async (id: string) => {
+  try {
+    const res = await fetch(`/api/runway/admin/accounts/${id}/reset-cooldown`, { method: 'POST', headers: headers() })
+    if (!res.ok) throw new Error('操作失败')
+    message.success('冷却已重置')
+    fetchAccounts()
+  } catch (e: any) { message.error(e.message) }
+}
+
+const resetBatch = async (id: string) => {
+  try {
+    const res = await fetch(`/api/runway/admin/accounts/${id}/reset-batch`, { method: 'POST', headers: headers() })
+    if (!res.ok) throw new Error('操作失败')
+    message.success('批次休息已重置')
+    fetchAccounts()
   } catch (e: any) { message.error(e.message) }
 }
 
@@ -888,6 +907,8 @@ onUnmounted(() => { if (autoRefreshTimer) clearInterval(autoRefreshTimer) })
                         <span class="truncate text-sm font-semibold text-white/90">{{ acc.label }}</span>
                         <NTag :type="acc.isActive ? 'success' : 'error'" size="tiny" round :bordered="false">{{ acc.isActive ? '活跃' : '停用' }}</NTag>
                         <NTag v-if="acc.inCooldown" type="warning" size="tiny" round :bordered="false">冷却中</NTag>
+                        <NTag v-if="acc.batchResting" type="info" size="tiny" round :bordered="false">批次休息 {{ Math.ceil(acc.batchRestTtl / 60) }}分钟</NTag>
+                        <NTag v-else-if="acc.batchLimit > 0" size="tiny" round :bordered="false">{{ acc.batchCount }}/{{ acc.batchLimit }}</NTag>
                         <NTag v-if="acc.priority > 0" type="info" size="tiny" round :bordered="false">优先级 {{ acc.priority }}</NTag>
                       </div>
                       <div class="mt-2.5 grid grid-cols-2 gap-x-3 gap-y-1.5 text-xs text-white/35">
@@ -914,6 +935,8 @@ onUnmounted(() => { if (autoRefreshTimer) clearInterval(autoRefreshTimer) })
                     </div>
                     <div class="flex flex-col gap-1">
                       <NButton size="tiny" tertiary :loading="accountTesting === acc.id" @click="testAccount(acc.id)">测试</NButton>
+                      <NButton v-if="acc.inCooldown" size="tiny" tertiary type="warning" @click="resetCooldown(acc.id)">解除冷却</NButton>
+                      <NButton v-if="acc.batchResting" size="tiny" tertiary type="info" @click="resetBatch(acc.id)">解除休息</NButton>
                       <NButton size="tiny" tertiary @click="openEditAccount(acc)">编辑</NButton>
                       <NButton size="tiny" tertiary :type="acc.isActive ? 'warning' : 'success'" @click="toggleAccountActive(acc)">{{ acc.isActive ? '停用' : '启用' }}</NButton>
                       <NButton size="tiny" tertiary type="error" @click="deleteAccount(acc.id)">移除</NButton>

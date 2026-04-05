@@ -277,10 +277,10 @@ export class RunwayDirectClient implements RunwayProvider {
     }
 
     // Use resolution from frontend directly; fallback to defaults if missing
-    const defaultRes = "1080x1920";
-    const resolutionMap: Record<string, string> = { "1076x1920": "1080x1920", "720x1280": "1080x1920", "1280x720": "1920x1080", "960x960": "1440x1440" };
+    const defaultRes = "1076x1920";
+    const stdToProRes: Record<string, string> = { "720x1280": "1076x1920", "1280x720": "1920x1080", "960x960": "1440x1440" };
     const effectiveResolution = input.resolution
-      ? (resolutionMap[input.resolution] || input.resolution)
+      ? (isPro && stdToProRes[input.resolution] ? stdToProRes[input.resolution] : input.resolution)
       : defaultRes;
 
     const body: any = {

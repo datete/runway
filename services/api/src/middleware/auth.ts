@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import { prisma } from "../services/prisma";
+import { redisConnection as authRedis } from "../queues/runway.queue";
 
 export interface AuthUser {
   id: string;
@@ -16,7 +17,36 @@ declare global {
   }
 }
 
-const JWT_SECRET = process.env.RUNWAY_JWT_SECRET || "runway-secret-change-me";
+// #9: Require JWT secret from env — no weak defaults
+if (!process.env.RUNWAY_JWT_SECRET) {
+  console.error("[FATAL] RUNWAY_JWT_SECRET is not set. Exiting.");
+  process.exit(1);
+}
+const JWT_SECRET = process.env.RUNWAY_JWT_SECRET;
+
+// Redis: reuse shared connection from runway.queue
+
+const AUTH_CACHE_TTL = 30; // seconds
+
+async function checkUserActive(userId: string): Promise<boolean | null> {
+  try {
+    const cacheKey = `auth:active:${userId}`;
+    const cached = await authRedis.get(cacheKey);
+    if (cached !== null) return cached === "1";
+
+    const user = await prisma.user.findUnique({ where: { id: userId }, select: { isActive: true } });
+    if (!user) return null;
+    await authRedis.setex(cacheKey, AUTH_CACHE_TTL, user.isActive ? "1" : "0").catch(() => {});
+    return user.isActive;
+  } catch {
+    return undefined as any; // DB/Redis error — fall through
+  }
+}
+
+/** Call when disabling/enabling a user to bust cache immediately */
+export async function invalidateUserCache(userId: string) {
+  await authRedis.del(`auth:active:${userId}`).catch(() => {});
+}
 
 export function authMiddleware(req: Request, res: Response, next: NextFunction) {
   const authHeader = req.headers["authorization"] as string;
@@ -35,24 +65,22 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
 
   try {
     const payload = jwt.verify(token, JWT_SECRET) as AuthUser;
-    // Validate id is a UUID before querying DB
     const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    if (typeof payload.id === 'string' && uuidRe.test(payload.id)) {
-      // Check isActive from DB for immediate effect when user is disabled
-      prisma.user.findUnique({ where: { id: payload.id }, select: { isActive: true } })
-        .then(u => {
-          if (!u || !u.isActive) return res.status(403).json({ error: "账号已被禁用" });
+    if (typeof payload.id === "string" && uuidRe.test(payload.id)) {
+      checkUserActive(payload.id)
+        .then((isActive) => {
+          if (isActive === null) return res.status(403).json({ error: "账号不存在" });
+          if (isActive === false) return res.status(403).json({ error: "账号已被禁用" });
+          // isActive === true OR undefined (error fallback) — allow through
           req.user = payload;
           next();
         })
-        .catch((err) => {
-          console.error('[auth] DB check failed:', err.message);
-          // DB error — still let request through with verified JWT
+        .catch(() => {
+          // Redis + DB both failed — trust JWT
           req.user = payload;
           next();
         });
     } else {
-      // Legacy token with non-UUID id — trust JWT signature, skip DB check
       req.user = payload;
       next();
     }

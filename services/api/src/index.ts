@@ -15,6 +15,18 @@ const WEB_BASE = 'http://127.0.0.1:3002';
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
+// #12: Response time logger — log slow requests (>1s)
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    if (duration > 1000) {
+      console.log(`[slow] ${req.method} ${req.url} ${res.statusCode} ${duration}ms`);
+    }
+  });
+  next();
+});
+
 // Request logger
 app.use((req, _res, next) => {
   if (!req.url.startsWith('/assets') && !req.url.startsWith('/favicon'))
@@ -48,9 +60,14 @@ async function proxyTo3002(targetPath: string, req: express.Request, res: expres
       body,
     });
 
-    const data = await upstream.text();
+    // #4: Stream response instead of buffering entire body
     const ct = upstream.headers.get('content-type') || 'application/json';
-    res.status(upstream.status).set('content-type', ct).send(data);
+    res.status(upstream.status).set('content-type', ct);
+    if (upstream.body) {
+      (upstream.body as any).pipe(res);
+    } else {
+      res.end();
+    }
   } catch (err: any) {
     console.error('[proxy] error:', err.message);
     res.status(502).json({ error: 'web service unavailable' });

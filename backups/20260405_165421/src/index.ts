@@ -240,38 +240,6 @@ function startUploadCleanup() {
   setInterval(cleanup, 3600000);
 }
 
-// #6: Captures directory cleanup — delete JSON files older than 7 days
-const CAPTURES_DIR = "/root/runway/captures";
-const CAPTURES_MAX_AGE_DAYS = 7;
-
-function startCapturesCleanup() {
-  const cleanup = () => {
-    try {
-      if (!fs.existsSync(CAPTURES_DIR)) return;
-      const files = fs.readdirSync(CAPTURES_DIR).filter(f => f.endsWith(".json"));
-      const cutoff = Date.now() - CAPTURES_MAX_AGE_DAYS * 86400000;
-      let deleted = 0;
-      for (const file of files) {
-        try {
-          const filePath = path.join(CAPTURES_DIR, file);
-          const stat = fs.statSync(filePath);
-          if (stat.mtimeMs < cutoff) {
-            fs.unlinkSync(filePath);
-            deleted++;
-          }
-        } catch (e: any) { console.warn("[captures-cleanup] file error:", e.message); }
-      }
-      if (deleted > 0) {
-        console.log(`[captures-cleanup] deleted ${deleted} capture(s) older than ${CAPTURES_MAX_AGE_DAYS}d`);
-      }
-    } catch (e: any) {
-      console.error("[captures-cleanup] error:", e.message);
-    }
-  };
-  setTimeout(cleanup, 35000);
-  setInterval(cleanup, 3600000);
-}
-
 // Graceful shutdown
 async function shutdown() {
   console.log('[worker] shutting down gracefully...');
@@ -296,4 +264,3 @@ setTimeout(recoverStuckJobs, 3000);
 setTimeout(startReconciliation, 5000);
 setTimeout(startCacheCleanup, 8000);
 setTimeout(startUploadCleanup, 10000);
-setTimeout(startCapturesCleanup, 12000);

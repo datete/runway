@@ -112,7 +112,9 @@ const openDevicePanel = () => {
 
 const allJobs = ref<RunwayJob[]>([])
 const page = ref(1)
-const pageSize = 10
+const pageSize = ref(20)
+const totalJobs = ref(0)
+const tabCounts = ref({ all: 0, queued: 0, processing: 0, completed: 0, failed: 0 })
 const activeTab = ref<TabKey>('all')
 
 const selectMode = ref(false)
@@ -192,36 +194,21 @@ const isQueued = (status: string) => ['pending', 'queued'].includes(status)
 const isProcessing = (status: string) => ['submitted', 'processing'].includes(status)
 const isActive = (status: string) => isQueued(status) || isProcessing(status)
 
-const tabCount = computed(() => ({
-  all: allJobs.value.length,
-  queued: allJobs.value.filter((item) => isQueued(item.status)).length,
-  processing: allJobs.value.filter((item) => isProcessing(item.status)).length,
-  completed: allJobs.value.filter((item) => item.status === 'completed').length,
-  failed: allJobs.value.filter((item) => item.status === 'failed').length,
-}))
+const tabCount = computed(() => tabCounts.value)
 
-const filteredJobs = computed(() => {
-  if (activeTab.value === 'queued') return allJobs.value.filter((item) => isQueued(item.status))
-  if (activeTab.value === 'processing') return allJobs.value.filter((item) => isProcessing(item.status))
-  if (activeTab.value === 'completed') return allJobs.value.filter((item) => item.status === 'completed')
-  if (activeTab.value === 'failed') return allJobs.value.filter((item) => item.status === 'failed')
-  return allJobs.value
-})
+const filteredJobs = computed(() => allJobs.value)
 
-const pageCount = computed(() => Math.max(1, Math.ceil(filteredJobs.value.length / pageSize)))
+const pageCount = computed(() => Math.max(1, Math.ceil(totalJobs.value / pageSize.value)))
 
 
-const activeJobCount = computed(() => allJobs.value.filter(j => isActive(j.status)).length)
+const activeJobCount = computed(() => tabCounts.value.queued + tabCounts.value.processing)
 const completionRate = computed(() => {
-  const done = allJobs.value.filter(j => j.status === "completed").length
-  const total = allJobs.value.filter(j => ["completed","failed","cancelled"].includes(j.status)).length
+  const done = tabCounts.value.completed
+  const total = tabCounts.value.completed + tabCounts.value.failed
   return total > 0 ? Math.round(done / total * 100) : 0
 })
 
-const paginatedJobs = computed(() => {
-  const start = (page.value - 1) * pageSize
-  return filteredJobs.value.slice(start, start + pageSize)
-})
+const paginatedJobs = computed(() => allJobs.value)
 
 const selectedJobs = computed(() => allJobs.value.filter((job) => selected.value.has(job.id)))
 
@@ -268,13 +255,19 @@ const fetchJobs = async (silent = false) => {
   fetchError.value = ''
 
   try {
-    const res = await fetch('/api/runway/jobs', { headers: authHeaders() })
+    const statusMap: Record<string, string> = { queued: 'queued', processing: 'processing', completed: 'completed', failed: 'failed' }
+    const params = new URLSearchParams({ page: String(page.value), pageSize: String(pageSize.value) })
+    if (activeTab.value !== 'all') params.set('status', statusMap[activeTab.value] || '')
+    const res = await fetch('/api/runway/jobs?' + params.toString(), { headers: authHeaders() })
     if (!res.ok) {
       if (res.status === 401) { showLoginModal.value = true; return }
       throw new Error('任务列表加载失败')
     }
 
-    allJobs.value = await res.json()
+    const data = await res.json()
+    allJobs.value = data.jobs || data
+    totalJobs.value = data.total ?? allJobs.value.length
+    if (data.counts) tabCounts.value = data.counts
 
     // Update detail drawer if open
     if (showDetail.value && detailJob.value) {
@@ -282,7 +275,7 @@ const fetchJobs = async (silent = false) => {
       if (updated) detailJob.value = updated
     }
 
-    const hasActive = allJobs.value.some((item) => isActive(item.status))
+    const hasActive = activeJobCount.value > 0
     if (hasActive && !pollTimer) pollTimer = setInterval(() => fetchJobs(true), 5000)
     if (!hasActive) stopPolling()
   } catch (e: any) {
@@ -294,12 +287,15 @@ const fetchJobs = async (silent = false) => {
 
 const switchTab = (tab: TabKey) => {
   activeTab.value = tab
+  const wasPage1 = page.value === 1
   page.value = 1
   selected.value = new Set()
+  if (wasPage1) fetchJobs(true)
 }
 
-// Auto-clamp page when filter reduces results
-watch(pageCount, (pc) => { if (page.value > pc) page.value = pc })
+// Refetch when page changes (also covers tab switch when page wasn't 1)
+watch(page, () => { fetchJobs(true) })
+watch(pageCount, (pc) => { if (page.value > pc) page.value = Math.max(1, pc) })
 
 const toggleSelect = (id: string) => {
   const next = new Set(selected.value)
@@ -397,6 +393,16 @@ const openDownloadPicker = (job: RunwayJob) => {
   downloadJob.value = job
   showDownloadPicker.value = true
 }
+
+// Resolve the direct (original Runway) download URL
+// Priority: videoUrl if present, otherwise resultUrl if it's a remote URL
+const directUrl = computed(() => {
+  const job = downloadJob.value
+  if (!job) return ''
+  if (job.videoUrl) return job.videoUrl
+  if (job.resultUrl && job.resultUrl.startsWith('http')) return job.resultUrl
+  return ''
+})
 
 const prioritizeJob = async (jobId: string) => {
   try {
@@ -899,7 +905,7 @@ onUnmounted(() => stopPolling())
         </div>
 
         <!-- 9. Pagination -->
-        <div v-if="filteredJobs.length > pageSize" class="pagination-bar mt-6 flex justify-center rounded-xl border border-white/8 bg-white/4 px-4 py-2.5 backdrop-blur-md">
+        <div v-if="pageCount > 1" class="pagination-bar mt-6 flex justify-center rounded-xl border border-white/8 bg-white/4 px-4 py-2.5 backdrop-blur-md">
           <NPagination v-model:page="page" :page-count="pageCount" size="small" />
         </div>
       </div>
@@ -1197,6 +1203,7 @@ onUnmounted(() => stopPolling())
   <NModal v-model:show="showDownloadPicker" preset="card" :title="'下载视频'" style="width: 340px; background: rgba(15,15,25,0.98); border: 1px solid rgba(255,255,255,0.06); border-radius: 16px;" :segmented="{ content: true }">
     <div v-if="downloadJob" class="space-y-3 py-1">
       <button
+        v-if="downloadJob.resultUrl && downloadJob.resultUrl.startsWith('/img/')"
         class="flex w-full items-center gap-3 rounded-xl border border-sky-400/15 bg-sky-500/[0.06] px-4 py-3 text-left transition-all hover:border-sky-400/30 hover:bg-sky-500/12 active:scale-[0.98]"
         @click="doDownload(downloadJob.resultUrl!, `video-${downloadJob.id.slice(0,8)}.mp4`)"
       >
@@ -1209,9 +1216,9 @@ onUnmounted(() => stopPolling())
         </div>
       </button>
       <button
-        v-if="downloadJob.videoUrl && downloadJob.videoUrl !== downloadJob.resultUrl"
+        v-if="directUrl"
         class="flex w-full items-center gap-3 rounded-xl border border-emerald-400/15 bg-emerald-500/[0.06] px-4 py-3 text-left transition-all hover:border-emerald-400/30 hover:bg-emerald-500/12 active:scale-[0.98]"
-        @click="doDownload(downloadJob.videoUrl!, `video-${downloadJob.id.slice(0,8)}-hd.mp4`)"
+        @click="doDownload(directUrl, `video-${downloadJob.id.slice(0,8)}-hd.mp4`)"
       >
         <div class="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-500/15">
           <SvgIcon icon="ri:cloud-line" class="text-base text-emerald-400" />
@@ -1221,7 +1228,7 @@ onUnmounted(() => stopPolling())
           <p class="text-[11px] text-white/30">从源站直接下载，可能较慢</p>
         </div>
       </button>
-      <p v-if="!downloadJob.videoUrl || downloadJob.videoUrl === downloadJob.resultUrl" class="text-center text-[10px] text-white/20">暂无直连地址</p>
+      <p v-if="!directUrl" class="text-center text-[10px] text-white/20">暂无直连地址</p>
     </div>
   </NModal>
 

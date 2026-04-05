@@ -1,40 +1,40 @@
 import { Router, Request, Response } from "express";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
-import IORedis from "ioredis";
 import { prisma } from "../services/prisma";
 import { authMiddleware, JWT_SECRET } from "../middleware/auth";
 import { DeviceService } from "../services/device.service";
 
-const router = Router();
+// Simple rate limiter for login
+const loginAttempts = new Map<string, { count: number; resetAt: number }>();
+const LOGIN_RATE_LIMIT = 5; // max attempts
+const LOGIN_RATE_WINDOW = 60000; // 1 minute
 
-// #8: Redis-based rate limiter for login (replaces in-memory Map)
-const rateLimitRedis = new IORedis(process.env.REDIS_URL || "redis://localhost:6379", {
-  maxRetriesPerRequest: null,
-  lazyConnect: true,
-});
-rateLimitRedis.connect().catch(() => {});
-
-const LOGIN_RATE_LIMIT = 5;
-const LOGIN_RATE_WINDOW = 60; // seconds
-
-async function checkLoginRateLimit(ip: string): Promise<boolean> {
-  try {
-    const key = `ratelimit:login:${ip}`;
-    const count = await rateLimitRedis.incr(key);
-    if (count === 1) {
-      await rateLimitRedis.expire(key, LOGIN_RATE_WINDOW);
-    }
-    return count <= LOGIN_RATE_LIMIT;
-  } catch {
-    return true; // Redis error — allow through
+function checkLoginRateLimit(ip: string): boolean {
+  const now = Date.now();
+  const entry = loginAttempts.get(ip);
+  if (!entry || now > entry.resetAt) {
+    loginAttempts.set(ip, { count: 1, resetAt: now + LOGIN_RATE_WINDOW });
+    return true;
   }
+  entry.count++;
+  return entry.count <= LOGIN_RATE_LIMIT;
 }
+
+// Clean up old entries every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, entry] of loginAttempts) {
+    if (now > entry.resetAt) loginAttempts.delete(ip);
+  }
+}, 300000);
+
+const router = Router();
 
 // POST /api/runway/auth/login
 router.post("/login", async (req: Request, res: Response) => {
   const clientIp = req.ip || req.connection.remoteAddress || 'unknown';
-  if (!(await checkLoginRateLimit(clientIp))) {
+  if (!checkLoginRateLimit(clientIp)) {
     return res.status(429).json({ error: '登录尝试过于频繁，请稍后再试' });
   }
 
@@ -78,6 +78,7 @@ router.post("/login", async (req: Request, res: Response) => {
       { expiresIn: "24h" }
     );
 
+    // 记录登录日志
     await prisma.userLog.create({
       data: {
         userId: user.id,
@@ -103,7 +104,7 @@ router.get("/me", authMiddleware, async (req: Request, res: Response) => {
   res.json(req.user);
 });
 
-// GET /api/runway/auth/devices
+// GET /api/runway/auth/devices — list my devices
 router.get("/devices", authMiddleware, async (req: Request, res: Response) => {
   try {
     const devices = await DeviceService.getUserDevices(req.user!.id);
@@ -113,7 +114,7 @@ router.get("/devices", authMiddleware, async (req: Request, res: Response) => {
   }
 });
 
-// GET /api/runway/auth/sessions
+// GET /api/runway/auth/sessions — list my login sessions
 router.get("/sessions", authMiddleware, async (req: Request, res: Response) => {
   try {
     const sessions = await DeviceService.getUserSessions(req.user!.id);
@@ -122,6 +123,8 @@ router.get("/sessions", authMiddleware, async (req: Request, res: Response) => {
     res.status(500).json({ error: e.message });
   }
 });
+
+
 
 // POST /api/runway/auth/change-password
 router.post("/change-password", authMiddleware, async (req: Request, res: Response) => {
@@ -152,7 +155,7 @@ router.post("/change-password", authMiddleware, async (req: Request, res: Respon
   }
 });
 
-// DELETE /api/runway/auth/devices/:id
+// DELETE /api/runway/auth/devices/:id — admin-only device unbind
 router.delete("/devices/:id", authMiddleware, async (req: Request, res: Response) => {
   try {
     if (req.user!.role !== 'admin') {

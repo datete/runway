@@ -68,7 +68,7 @@ runwayRouter.post("/ai/optimize", authMiddleware, async (req: any, res: any) => 
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${process.env.AI_OPTIMIZE_API_KEY}`,
+        "Authorization": "Bearer sk-f9187e54389586de83e738defaa509dfbcb3ccb1314c4799833a325282e0864e",
       },
       body: JSON.stringify(req.body),
       signal: controller.signal as any,

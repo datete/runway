@@ -131,10 +131,6 @@ router.get("/accounts", async (_req: Request, res: Response) => {
     const enriched = await Promise.all(accounts.map(async a => {
       const current = await redis.get(`account:concurrency:${a.id}`);
       const cooled = await redis.get(`account:cooldown:${a.id}`);
-      const batchResting = await redis.get(`submit:batch-resting:${a.id}`);
-      const batchRestTtl = batchResting ? await redis.ttl(`submit:batch-resting:${a.id}`) : 0;
-      const batchCount = await redis.get(`submit:batch-count:${a.id}`);
-      const batchLimit = await redis.get(`submit:batch-limit:${a.id}`);
       const tasks = accountTasksMap[a.id] || [];
       return {
         id: a.id,
@@ -147,10 +143,6 @@ router.get("/accounts", async (_req: Request, res: Response) => {
         isActive: a.isActive,
         priority: a.priority,
         inCooldown: Boolean(cooled),
-        batchResting: Boolean(batchResting),
-        batchRestTtl,
-        batchCount: batchCount ? parseInt(batchCount, 10) : 0,
-        batchLimit: batchLimit ? parseInt(batchLimit, 10) : 0,
         totalGenerated: a.totalGenerated,
         lastUsedAt: a.lastUsedAt,
         lastErrorAt: a.lastErrorAt,
@@ -210,36 +202,6 @@ router.delete("/accounts/:id", async (req: Request, res: Response) => {
     // Clear concurrency counter
     await redis.del(`account:concurrency:${req.params.id}`);
     await redis.del(`account:cooldown:${req.params.id}`);
-    res.json({ ok: true });
-  } catch (e: any) { res.status(500).json({ error: e.message }); }
-});
-
-// POST /api/runway/admin/accounts/:id/reset-cooldown - Reset account cooldown
-router.post("/accounts/:id/reset-cooldown", async (req: Request, res: Response) => {
-  try {
-    const accountId = req.params.id;
-    const account = await prisma.runwayAccount.findUnique({ where: { id: accountId } });
-    if (!account) return res.status(404).json({ error: "账号不存在" });
-    await redis.del(`account:cooldown:${accountId}`);
-    await prisma.runwayAccount.update({
-      where: { id: accountId },
-      data: { lastErrorAt: null, lastErrorMessage: null },
-    });
-    console.log(`[admin] reset cooldown for ${account.label} by ${(req as any).user?.username}`);
-    res.json({ ok: true });
-  } catch (e: any) { res.status(500).json({ error: e.message }); }
-});
-
-// POST /api/runway/admin/accounts/:id/reset-batch — Reset batch rest
-router.post("/accounts/:id/reset-batch", async (req: Request, res: Response) => {
-  try {
-    const accountId = req.params.id;
-    const account = await prisma.runwayAccount.findUnique({ where: { id: accountId } });
-    if (!account) return res.status(404).json({ error: "账号不存在" });
-    await redis.del(`submit:batch-resting:${accountId}`);
-    await redis.del(`submit:batch-count:${accountId}`);
-    await redis.del(`submit:batch-limit:${accountId}`);
-    console.log(`[admin] reset batch for ${account.label} by ${(req as any).user?.username}`);
     res.json({ ok: true });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });

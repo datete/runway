@@ -347,21 +347,6 @@ async function trySubmitOne(): Promise<SubmitResult> {
       return "no_account";
     }
 
-    // 检查4: Runway 平台实际并发数（远程 API 权威数据）
-    try {
-      const realActive = await client.getActiveConcurrency();
-      if (realActive >= account.maxConcurrency) {
-        console.log(`[submit-worker] Runway reports ${realActive} active for ${account.label} (max ${account.maxConcurrency}), aborting ${jobId.slice(0,8)}`);
-        await accountPool.release(account.id);
-        await prisma.runwayJob.update({ where: { id: jobId }, data: { status: "pending", accountId: null, startedAt: null } as any });
-        return "no_account";
-      }
-      console.log(`[submit-worker] Runway real concurrency: ${realActive}/${account.maxConcurrency} for ${account.label}`);
-    } catch (e: any) {
-      // API 查询失败不阻塞提交，退回本地检查
-      console.warn(`[submit-worker] getActiveConcurrency failed for ${account.label}: ${e.message}, proceeding with local check`);
-    }
-
     // ══════════════════════════════════════════════════════════
     // 调用 Runway API
     // ══════════════════════════════════════════════════════════

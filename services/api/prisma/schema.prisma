@@ -70,6 +70,7 @@ model RunwayJob {
   sound           Boolean?
   videoUrl        String?          @map("video_url")
   progress        Float?           @default(0)
+  priority        Int              @default(0)
   events          RunwayJobEvent[]
   account         RunwayAccount?   @relation(fields: [accountId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   user            User?            @relation(fields: [userId], references: [id])

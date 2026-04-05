@@ -16,7 +16,6 @@ export class RunwayController {
     try {
       const { prompt, mode, imageUrl, imageUrls, duration, exploreMode, model, remark, resolution, quality, cfgScale, sound, videoUrl } = req.body;
       if (!prompt || !mode) return res.status(400).json({ error: "prompt and mode required" });
-      if (typeof prompt === "string" && prompt.length > 2000) return res.status(400).json({ error: `提示词超出2000字上限（当前${prompt.length}字），请精简后再提交` });
       const userId = req.user?.id;
       const job = await svc.createJob({ prompt, mode, imageUrl, imageUrls, duration, exploreMode, model, remark, userId, resolution, quality, cfgScale, sound, videoUrl });
       logAction(userId, "create_job", `jobId=${job.id} mode=${mode}`, req.socket.remoteAddress);
@@ -36,37 +35,29 @@ export class RunwayController {
     }
   }
 
-  // #2: Single query with ROW_NUMBER for queue positions instead of double query
   async listJobs(req: Request, res: Response) {
     try {
-      const page = parseInt(req.query.page as string) || 1;
-      const pageSize = parseInt(req.query.pageSize as string) || 20;
-      const status = req.query.status as string | undefined;
+      const jobs = await svc.listJobs(req.user?.id, req.user?.role);
 
-      const result = await svc.listJobs(req.user?.id, req.user?.role, { page, pageSize, status });
-
-      const queueData = await prisma.$queryRawUnsafe(`
-        SELECT id,
-               ROW_NUMBER() OVER (ORDER BY COALESCE(priority, 0) DESC, created_at ASC) AS position,
-               COUNT(*) OVER () AS total
-        FROM runway_jobs
-        WHERE status IN ('pending', 'queued', 'submitted', 'processing')
-      `) as any[];
+      // Calculate global queue positions for active jobs
+      const globalQueue = await prisma.runwayJob.findMany({
+        where: { status: { in: ACTIVE_STATUSES } },
+        orderBy: { createdAt: "asc" },
+        select: { id: true, status: true, createdAt: true },
+      });
 
       const positionMap = new Map<string, number>();
-      let queueTotal = 0;
-      for (const row of queueData) {
-        positionMap.set(row.id, Number(row.position));
-        queueTotal = Number(row.total);
-      }
+      globalQueue.forEach((qj, idx) => {
+        positionMap.set(qj.id, idx + 1);
+      });
 
-      const enriched = result.jobs.map((job: any) => ({
+      const enriched = jobs.map((job: any) => ({
         ...job,
         queuePosition: ACTIVE_STATUSES.includes(job.status) ? (positionMap.get(job.id) || null) : null,
-        queueTotal,
+        queueTotal: globalQueue.length,
       }));
 
-      res.json({ jobs: enriched, total: result.total, page: result.page, pageSize: result.pageSize, counts: result.counts });
+      res.json(enriched);
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
@@ -105,7 +96,6 @@ export class RunwayController {
     }
   }
 
-  // #5: Parallel batch creation with Promise.allSettled
   async batchCreateJobs(req: Request, res: Response) {
     try {
       const { prompts, mode, imageUrl, duration, resolution, quality, cfgScale, sound, videoUrl } = req.body;
@@ -121,31 +111,23 @@ export class RunwayController {
       }
 
       const userId = req.user?.id;
-      const validPrompts: string[] = [];
+      const created: { jobId: string; prompt: string }[] = [];
       const errors: { prompt: string; error: string }[] = [];
 
-      for (const p of prompts) {
-        if (!p || typeof p !== "string") {
-          errors.push({ prompt: String(p), error: "invalid or empty prompt" });
-        } else {
-          validPrompts.push(p);
+      for (const prompt of prompts) {
+        if (!prompt || typeof prompt !== "string") {
+          errors.push({ prompt: String(prompt), error: "invalid or empty prompt" });
+          continue;
+        }
+        try {
+          const job = await svc.createJob({
+            prompt, mode, imageUrl, duration, resolution, quality, cfgScale, sound, videoUrl, userId,
+          });
+          created.push({ jobId: job.id, prompt });
+        } catch (e: any) {
+          errors.push({ prompt, error: e.message ?? "unknown error" });
         }
       }
-
-      const results = await Promise.allSettled(
-        validPrompts.map((prompt) =>
-          svc.createJob({ prompt, mode, imageUrl, duration, resolution, quality, cfgScale, sound, videoUrl, userId })
-        )
-      );
-
-      const created: { jobId: string; prompt: string }[] = [];
-      results.forEach((result, idx) => {
-        if (result.status === "fulfilled") {
-          created.push({ jobId: result.value.id, prompt: validPrompts[idx] });
-        } else {
-          errors.push({ prompt: validPrompts[idx], error: result.reason?.message ?? "unknown error" });
-        }
-      });
 
       logAction(userId, "batch_create_jobs",
         `total=${prompts.length} created=${created.length} errors=${errors.length} mode=${mode}`,

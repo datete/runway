@@ -44,13 +44,9 @@ const refVideo = ref<{ preview: string; url: string; uploading: boolean } | null
 
 const stdResolutions = [
   { value: '1076x1920', label: '9:16', desc: '竖屏 1080p', iconW: 20, iconH: 34 },
-  { value: '1920x1080', label: '16:9', desc: '横屏 1080p', iconW: 34, iconH: 20 },
-  { value: '1440x1440', label: '1:1', desc: '方形 1440p', iconW: 26, iconH: 26 },
 ]
 const proResolutions = [
   { value: '1076x1920', label: '9:16', desc: '竖屏 1080p', iconW: 20, iconH: 34 },
-  { value: '1920x1080', label: '16:9', desc: '横屏 1080p', iconW: 34, iconH: 20 },
-  { value: '1440x1440', label: '1:1', desc: '方形 1440p', iconW: 26, iconH: 26 },
 ]
 const resolutionOptions = computed(() => (quality.value === 'pro' ? proResolutions : stdResolutions))
 
@@ -94,10 +90,12 @@ const remainingSlots = computed(() => Math.max(0, MAX_IMAGES - images.value.leng
 const isVideoUploading = computed(() => refVideo.value?.uploading === true)
 
 const promptLength = computed(() => prompt.value.length)
+const PROMPT_MAX_LENGTH = 2000
 const promptHint = computed(() => {
   if (promptLength.value === 0) return ''
   if (promptLength.value < 10) return '建议更详细地描述'
-  if (promptLength.value > 500) return '提示词过长可能影响效果'
+  if (promptLength.value > PROMPT_MAX_LENGTH) return `提示词超出上限（${promptLength.value}/${PROMPT_MAX_LENGTH}），请精简后再提交`
+  if (promptLength.value > 500) return '提示词较长，可能影响效果'
   return ''
 })
 
@@ -108,6 +106,7 @@ const canSubmit = computed(() => {
   if (quality.value === 'pro' && (!refVideo.value || !refVideo.value.url)) return false
   if (loading.value || isUploading.value || isVideoUploading.value) return false
   if (quotaExceeded.value) return false
+  if (promptLength.value > PROMPT_MAX_LENGTH) return false
   return true
 })
 
@@ -117,6 +116,7 @@ const canSubmitReason = computed(() => {
   if (isUploading.value) return '参考图片上传中，请稍候'
   if (isVideoUploading.value) return '参考视频上传中，请稍候'
   if (quotaExceeded.value) return quotaExceeded.value
+  if (promptLength.value > PROMPT_MAX_LENGTH) return `提示词超出${PROMPT_MAX_LENGTH}字上限（当前${promptLength.value}字），请精简后再提交`
   if (!prompt.value.trim()) return '请输入提示词'
   if (uploadedUrls.value.length === 0) return '请上传参考图片'
   if (quality.value === 'pro' && (!refVideo.value || !refVideo.value.url)) return '大师模式必须上传参考视频'

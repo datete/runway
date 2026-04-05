@@ -292,37 +292,19 @@ new Worker('runway-poll', async (job: Job) => {
       const slotReleasedKey = `poll:slot-released:${jobId}`;
       const wasReleased = await connection.get(slotReleasedKey);
       if (wasReleased) {
-        // Job transitioned from THROTTLED -> RUNNING, re-acquire concurrency slot atomically
-        const account = await prisma.runwayAccount.findUnique({ where: { id: accountId }, select: { maxConcurrency: true } });
-        const maxConc = account?.maxConcurrency ?? 3;
+        // Job transitioned from THROTTLED -> RUNNING, re-acquire concurrency slot
         const concKey = `account:concurrency:${accountId}`;
-        // Lua: INCR only if below max — prevents exceeding maxConcurrency
-        const REACQUIRE_LUA = `
-          local key = KEYS[1]
-          local max = tonumber(ARGV[1])
-          local cur = redis.call('INCR', key)
-          if cur <= max then
-            redis.call('EXPIRE', key, 900)
-            return cur
-          else
-            redis.call('DECR', key)
-            return -1
-          end
-        `;
-        const result2 = await connection.eval(REACQUIRE_LUA, 1, concKey, String(maxConc)) as number;
-        if (result2 > 0) {
-          await connection.del(slotReleasedKey);
-          // Clear the release guard so the slot can be properly released on completion
-          await connection.del(`account:released:${accountId}:${jobId}`);
-          await prisma.runwayJob.update({
-            where: { id: jobId },
-            data: { status: 'processing', errorMessage: null } as any,
-          }).catch(() => {});
-          console.log(`[poll-worker] job ${jobId.slice(0,8)} RUNNING again, re-acquired slot (${result2}/${maxConc})`);
-        } else {
-          // Could not re-acquire — account is full. Leave slot released, keep polling.
-          console.log(`[poll-worker] job ${jobId.slice(0,8)} RUNNING but account full (${maxConc}/${maxConc}), skipping re-acquire`);
-        }
+        await connection.incr(concKey);
+        await connection.expire(concKey, 900);
+        await connection.del(slotReleasedKey);
+        // Clear the release guard so the slot can be properly released on completion
+        await connection.del(`account:released:${accountId}:${jobId}`);
+        // Also update DB status back to processing
+        await prisma.runwayJob.update({
+          where: { id: jobId },
+          data: { status: 'processing', errorMessage: null } as any,
+        }).catch(() => {});
+        console.log(`[poll-worker] job ${jobId.slice(0,8)} RUNNING again, re-acquired slot`);
       }
     }
 

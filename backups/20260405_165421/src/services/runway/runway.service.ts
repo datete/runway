@@ -149,61 +149,12 @@ export class RunwayService {
     return job;
   }
 
-  async listJobs(userId?: string, role?: string, options?: { page?: number; pageSize?: number; status?: string }) {
-    const page = Math.max(1, options?.page || 1);
-    const pageSize = Math.min(100, Math.max(1, options?.pageSize || 20));
-
-    // Base filter: exclude deleted
-    const baseWhere: any = role === "admin"
+  async listJobs(userId?: string, role?: string) {
+    const where = role === "admin"
       ? { status: { not: "deleted" } }
       : { userId: userId ?? null, status: { not: "deleted" } };
-
-    // Status filter from tab
-    const statusFilter = options?.status;
-    const where: any = { ...baseWhere };
-    if (statusFilter === "queued") {
-      where.status = { in: ["pending", "queued", "submitted"] };
-    } else if (statusFilter === "processing") {
-      where.status = "processing";
-    } else if (statusFilter === "completed") {
-      where.status = "completed";
-    } else if (statusFilter === "failed") {
-      where.status = { in: ["failed", "cancelled"] };
-    }
-
     const include = role === "admin" ? { user: { select: { username: true } } } : undefined;
-
-    // Get counts via single raw SQL, plus paginated jobs
-    const isAdmin = role === "admin";
-    const userFilter = isAdmin ? "" : ` AND "userId" = '${userId}'`;
-    const countsQuery = (prisma as any).$queryRawUnsafe(`
-      SELECT
-        COUNT(*) FILTER (WHERE status NOT IN ('deleted')) AS all,
-        COUNT(*) FILTER (WHERE status IN ('pending','queued','submitted')) AS queued,
-        COUNT(*) FILTER (WHERE status = 'processing') AS processing,
-        COUNT(*) FILTER (WHERE status = 'completed') AS completed,
-        COUNT(*) FILTER (WHERE status IN ('failed','cancelled')) AS failed
-      FROM runway_jobs WHERE 1=1${userFilter}
-    `);
-
-    const [jobs, countRows] = await Promise.all([
-      prisma.runwayJob.findMany({ where, orderBy: { createdAt: "desc" }, skip: (page - 1) * pageSize, take: pageSize, include }),
-      countsQuery,
-    ]);
-    const cr = countRows[0] || {};
-    const counts = {
-      all: Number(cr.all || 0),
-      queued: Number(cr.queued || 0),
-      processing: Number(cr.processing || 0),
-      completed: Number(cr.completed || 0),
-      failed: Number(cr.failed || 0),
-    };
-    // Derive total from counts based on status filter
-    let total = counts.all;
-    if (statusFilter === "queued") total = counts.queued;
-    else if (statusFilter === "processing") total = counts.processing;
-    else if (statusFilter === "completed") total = counts.completed;
-    else if (statusFilter === "failed") total = counts.failed;
+    const jobs = await prisma.runwayJob.findMany({ where, orderBy: { createdAt: "desc" }, take: 100, include });
 
     // Fetch priority values (not in Prisma schema, added via raw SQL)
     const jobIds = jobs.map((j: any) => j.id);
@@ -237,10 +188,9 @@ export class RunwayService {
       queueTotal: ['pending', 'queued'].includes(j.status) ? queueTotal : null,
     }));
     if (role === "admin") {
-      const data = enriched.map((j: any) => ({ ...j, username: j.user?.username || null, user: undefined }));
-      return { jobs: data, total, page, pageSize, counts };
+      return enriched.map((j: any) => ({ ...j, username: j.user?.username || null, user: undefined }));
     }
-    return { jobs: enriched, total, page, pageSize, counts };
+    return enriched;
   }
 
   async retryJob(id: string, userId?: string, role?: string) {
