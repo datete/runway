@@ -375,55 +375,6 @@ const aiFollowUp = ref('')
 const aiOriginalPrompt = ref('')
 const aiMessages = ref<Array<{role: 'user' | 'assistant'; content: string}>>([])
 const aiChatScrollEl = ref<HTMLElement | null>(null)
-
-// ── Session Memory: persist AI conversation within browser tab ──
-const AI_SESSION_KEY = 'runway_ai_opt_session'
-
-const saveAiSession = () => {
-  try {
-    const session = {
-      messages: aiMessages.value,
-      skill: selectedSkill.value,
-      extraRequest: aiExtraRequest.value,
-      lastResult: aiResult.value,
-      originalPrompt: aiOriginalPrompt.value,
-      ts: Date.now(),
-    }
-    sessionStorage.setItem(AI_SESSION_KEY, JSON.stringify(session))
-  } catch {}
-}
-
-const restoreAiSession = (): boolean => {
-  try {
-    const raw = sessionStorage.getItem(AI_SESSION_KEY)
-    if (!raw) return false
-    const session = JSON.parse(raw)
-    // Expire after 30 minutes
-    if (Date.now() - session.ts > 30 * 60 * 1000) {
-      sessionStorage.removeItem(AI_SESSION_KEY)
-      return false
-    }
-    if (session.messages?.length > 0) {
-      aiMessages.value = session.messages
-      selectedSkill.value = session.skill || null
-      aiExtraRequest.value = session.extraRequest || ''
-      aiResult.value = session.lastResult || ''
-      aiStreamText.value = session.lastResult || ''
-      aiOriginalPrompt.value = session.originalPrompt || ''
-      return true
-    }
-  } catch {}
-  return false
-}
-
-const clearAiSession = () => {
-  sessionStorage.removeItem(AI_SESSION_KEY)
-  aiMessages.value = []
-  aiResult.value = ''
-  aiStreamText.value = ''
-  aiFollowUp.value = ''
-  aiError.value = ''
-}
 const aiDrawerBodyEl = ref<HTMLElement | null>(null)
 
 const AI_SKILLS = [
@@ -657,23 +608,16 @@ const dynamicHints = computed(() => {
 
 const openAiOptimize = () => {
   aiOriginalPrompt.value = prompt.value.trim()
+  aiExtraRequest.value = ''
+  aiStyleTags.value = []
   aiGenerating.value = false
+  aiResult.value = ''
+  aiStreamText.value = ''
   aiError.value = ''
   aiPendingSubmit.value = false
   aiThinking.value = false
   aiFollowUp.value = ''
-
-  // Try to restore previous session (same browser tab)
-  const restored = restoreAiSession()
-  if (!restored) {
-    // Fresh start
-    aiExtraRequest.value = ''
-    aiStyleTags.value = []
-    aiResult.value = ''
-    aiStreamText.value = ''
-    aiMessages.value = []
-    selectedSkill.value = null
-  }
+  aiMessages.value = []
   showAiOptimize.value = true
 }
 
@@ -707,14 +651,9 @@ const generateAiPrompt = async () => {
     message.warning('请先上传参考图片')
     return
   }
-  // Keep previous messages as context for regeneration (don't wipe)
-  if (aiMessages.value.length === 0) {
-    await doAiGenerate(null)
-  } else {
-    // Regenerate = treat as follow-up preserving all prior optimization context
-    aiMessages.value.push({ role: 'user', content: '请基于之前的讨论重新生成一版，保留之前提出的所有优化方向，生成一个更好的版本。' })
-    await doAiGenerate('请基于之前的讨论重新生成一版，保留之前提出的所有优化方向，生成一个更好的版本。')
-  }
+  // Reset for new generation
+  aiMessages.value = []
+  await doAiGenerate(null)
 }
 
 // Compress image for AI vision (max 768px, JPEG 0.7)
@@ -856,21 +795,6 @@ const doAiGenerate = async (followUpText: string | null) => {
 
   const skillSection = skill ? '\n' + (SKILL_PROMPTS[skill.id] || '') : ''
 
-  // Dynamic length control: detect user intent for longer/shorter prompts from ALL sources
-  const prevUserMessages = aiMessages.value.filter(m => m.role === 'user').map(m => m.content).join(' ')
-  const allUserText = (aiExtraRequest.value + ' ' + (followUpText || '') + ' ' + prompt.value + ' ' + prevUserMessages).toLowerCase()
-  const wantsLonger = /长一[点些]|详细[一点些]|丰富[一点些]|多写[一点些]|写长|更长|更详细|字数多|内容多|多一[点些]描述/.test(allUserText)
-  const wantsShorter = /短一[点些]|简洁|精简|简短|少写|写短/.test(allUserText)
-  let lengthGuide = '120-200字'
-  let lengthNote = ''
-  if (wantsLonger) {
-    lengthGuide = '200-350字'
-    lengthNote = '\n⚠️ 用户明确要求更长更详细的提示词，你必须输出至少200字，尽可能丰富地描述画面的每个元素：主体细节、多段动作序列、镜头运动轨迹变化、光影层次、环境氛围细节。不要偷懒缩短。'
-  } else if (wantsShorter) {
-    lengthGuide = '50-80字'
-    lengthNote = '\n用户希望简洁精炼的提示词，保留核心元素即可。'
-  }
-
   const systemPrompt = `你是专业的AI视频生成提示词专家，专精于可灵（Kling）等国产AI视频生成平台。分析参考图片，结合用户需求，生成最优的视频提示词。
 
 ## 可灵视频提示词关键要素（按重要性排序）
@@ -884,11 +808,11 @@ ${skillSection}
 ## 输出要求
 
 - 直接输出提示词，不要标题、序号、解释、前缀
-- 中文输出，${lengthGuide}
+- 中文输出，80-200字
 - 具体有画面感 — 读完脑中能看到这个视频
 - 动作要具体可执行（"轻轻拿起杯子啜饮"✓  "展示产品"✗）
 - 镜头用动态词（"缓慢推近""环绕平移"✓  "近景""特写"✗）
-- 描述要连贯如一个完整的视频片段，有起承转合${lengthNote}`
+- 描述要连贯如一个完整的视频片段，有起承转合`
 
   // Build user message with all images
   const userContent: Array<{type: string; image_url?: {url: string}; text?: string}> = []
@@ -1510,20 +1434,9 @@ onUnmounted(() => {
               <span class="text-[10px] text-white/30">智能生成最优提示词</span>
             </div>
           </div>
-          <div class="flex items-center gap-2">
-            <button
-              v-if="aiMessages.length > 0"
-              class="flex items-center gap-1 rounded-lg border border-white/8 bg-white/3 px-2 py-1 text-[10px] text-white/30 transition-all hover:border-red-400/20 hover:bg-red-500/8 hover:text-red-300/70 active:scale-95"
-              title="清空对话记忆，重新开始"
-              @click="clearAiSession"
-            >
-              <SvgIcon icon="ri:delete-bin-line" class="text-xs" />
-              清空
-            </button>
-            <div class="ai-model-badge flex items-center gap-1.5 rounded-lg border border-sky-400/25 bg-sky-500/10 px-2.5 py-1">
-              <SvgIcon icon="ri:robot-2-line" class="text-xs text-sky-400/70" />
-              <span class="text-[11px] font-bold text-sky-300/90 tracking-wide">GPT-5.4</span>
-            </div>
+          <div class="ai-model-badge flex items-center gap-1.5 rounded-lg border border-sky-400/25 bg-sky-500/10 px-2.5 py-1">
+            <SvgIcon icon="ri:robot-2-line" class="text-xs text-sky-400/70" />
+            <span class="text-[11px] font-bold text-sky-300/90 tracking-wide">GPT-5.4</span>
           </div>
         </div>
       </template>

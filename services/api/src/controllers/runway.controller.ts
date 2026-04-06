@@ -22,7 +22,9 @@ export class RunwayController {
       logAction(userId, "create_job", `jobId=${job.id} mode=${mode}`, req.socket.remoteAddress);
       res.status(201).json(job);
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      const msg = e.message || "";
+      const isValidation = msg.includes("同质化") || msg.includes("配额") || msg.includes("上限");
+      res.status(isValidation ? 400 : 500).json({ error: msg });
     }
   }
 
@@ -113,8 +115,8 @@ export class RunwayController {
       if (!Array.isArray(prompts) || prompts.length === 0) {
         return res.status(400).json({ error: "prompts must be a non-empty array" });
       }
-      if (prompts.length > 20) {
-        return res.status(400).json({ error: "prompts array exceeds maximum of 20 items" });
+      if (prompts.length > 15) {
+        return res.status(400).json({ error: "提示词同质化严重，请修改提示词" });
       }
       if (!mode) {
         return res.status(400).json({ error: "mode is required" });

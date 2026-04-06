@@ -347,12 +347,28 @@ router.post("/accounts/login", async (req: Request, res: Response) => {
 
     if (!teamId) return res.status(500).json({ error: "无法获取TeamID" });
 
+    // Auto-update existing account if teamId matches
+    const tokenShort = token.slice(-12);
+    const existing = await prisma.runwayAccount.findFirst({ where: { teamId } });
+    let autoUpdated = false;
+    if (existing) {
+      await prisma.runwayAccount.update({
+        where: { id: existing.id },
+        data: { token, tokenShort, isActive: true, lastErrorAt: null, lastErrorMessage: null },
+      });
+      autoUpdated = true;
+      console.log(`[admin:login] auto-updated token for ${existing.label} (teamId=${teamId})`);
+    }
+
     res.json({
       token,
       teamId,
       username,
       email: user.email || email,
-      tokenShort: token.slice(-12),
+      tokenShort,
+      autoUpdated,
+      accountId: existing?.id || null,
+      accountLabel: existing?.label || null,
     });
   } catch (e: any) {
     res.status(500).json({ error: `登录异常: ${e.message}` });

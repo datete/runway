@@ -24,7 +24,7 @@ interface CreateJobInput {
 const ACTIVE_STATUSES = ["pending", "queued", "submitted", "processing"];
 
 /** Global prompt dedup: same content max N times per day across all users */
-const PROMPT_DAILY_LIMIT = 15;
+const PROMPT_DAILY_LIMIT = 10;
 const PROMPT_TTL = 86400; // 24h
 
 function promptHash(prompt: string): string {
@@ -75,7 +75,7 @@ export class RunwayService {
       // ── Global prompt frequency check ──
       const { allowed, count } = await checkPromptLimit(input.prompt);
       if (!allowed) {
-        throw new Error(`该内容今日已被提交 ${count - 1} 次，结果趋于同质化，请修改描述后重试（每日上限 ${PROMPT_DAILY_LIMIT} 次）`);
+        throw new Error("该提示词今日已达上限，请修改后重试");
       }
 
       if (input.userId) {

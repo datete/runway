@@ -7,6 +7,7 @@ import KlingList from "../kling/kgList.vue"
 import RunmlList from "./runmlList.vue"
 import PixList from "./pixList.vue"
 import VideoList from "../video/list.vue"
+import SeedreamList from "../seedream/sdList.vue"
 import RunwayQueue from "./RunwayQueue.vue"
 import RunwayLoginModal from "./RunwayLoginModal.vue"
 import { UserCenter, QuotaBar } from "@/components/common"
@@ -97,6 +98,7 @@ const displayName = computed(() => username.value || "用户")
         <PixList v-else-if="gptServerStore.myData.TAB_VIDEO === 'pixverse'" />
         <VideoList v-else-if="gptServerStore.myData.TAB_VIDEO === 'all'" />
         <RunwayQueue v-else-if="gptServerStore.myData.TAB_VIDEO === 'batch'" />
+        <SeedreamList v-else-if="gptServerStore.myData.TAB_VIDEO === 'seedream'" />
         <VoList v-else />
       </div>
     </div>
