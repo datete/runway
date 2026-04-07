@@ -1,181 +1,192 @@
 <script setup lang="ts">
-import { LazyImg, Waterfall } from 'vue-waterfall-plugin-next'
+import { Waterfall } from 'vue-waterfall-plugin-next'
 import 'vue-waterfall-plugin-next/dist/style.css'
 import { SeedreamTask, seedreamStore } from '@/api/seedreamStore'
-import { nextTick, ref, watch } from 'vue'
-import { NEmpty, NButton, NImage, NPopconfirm, useMessage } from 'naive-ui'
+import { seedreamFetchList, seedreamRefreshOne } from '@/api/seedream'
+import { ref, watch } from 'vue'
+import { NImage, NImageGroup, NPopconfirm, useMessage } from 'naive-ui'
 import { ViewCard } from 'vue-waterfall-plugin-next/dist/types/types/waterfall'
 import { useBasicLayout } from '@/hooks/useBasicLayout'
 import { homeStore } from '@/store'
 import { mlog } from '@/api'
 import { SvgIcon } from '@/components/common'
-import KgImage from '../kling/kgImage.vue'
 
-interface SdViewCard extends ViewCard {
-  url: string
+interface SdImg { url: string; index: number }
+interface SdTaskCard extends ViewCard {
+  id: string
   task: SeedreamTask
-  imgIndex: number
+  images: SdImg[]
+  status: 'pending' | 'succeed' | 'failed'
+  src: string
 }
 
 const list = ref<SeedreamTask[]>([])
-const list2 = ref<SdViewCard[]>([])
-const st = ref({ show: true, showImg: '', pIndex: -1 })
+const list2 = ref<SdTaskCard[]>([])
 const csuno = new seedreamStore()
 const ms = useMessage()
+const { isMobile } = useBasicLayout()
 
-const initLoad = () => {
+const initLoad = async () => {
   const arr = csuno.getObjs()
-  list.value = arr.reverse()
+  list.value = arr.slice().reverse()
   toList2()
+  try {
+    const remote = await seedreamFetchList()
+    list.value = remote
+    toList2()
+    remote.filter(t => t.data.task_status === 'pending').forEach(t => pollOne(t.data.task_id))
+  } catch (e) { mlog('seedream list err', e) }
+}
+
+const pollOne = async (id: string) => {
+  for (let i = 0; i < 40; i++) {
+    await new Promise(r => setTimeout(r, 4000))
+    const t = await seedreamRefreshOne(id)
+    if (!t) return
+    if (t.data.task_status !== 'pending') { initLoad(); return }
+  }
 }
 
 const toList2 = () => {
-  const cards: SdViewCard[] = []
-  list.value.forEach((task, tIdx) => {
-    const images = task.data.task_result?.images || []
-    if (images.length === 0) {
-      // Processing or failed task — show placeholder card
-      cards.push({
-        url: '',
-        id: task.request_id,
-        index: cards.length,
-        src: '',
-        isLoad: 0,
-        task,
-        imgIndex: 0
-      })
-    } else {
-      // One card per image
-      images.forEach((img, iIdx) => {
-        cards.push({
-          url: img.url,
-          id: task.request_id + '_' + iIdx,
-          index: cards.length,
-          src: img.url,
-          isLoad: 0,
-          task,
-          imgIndex: iIdx
-        })
-      })
-    }
+  list2.value = list.value.map((task, idx): SdTaskCard => {
+    const imgs = (task.data.task_result?.images || []).map((im: any, i: number) => ({
+      url: im.url || im,
+      index: i,
+    }))
+    const status = task.data.task_status as any
+    return {
+      id: task.request_id || String(idx),
+      task,
+      images: imgs,
+      status,
+      src: imgs[0]?.url || '',
+      index: idx,
+      isLoad: 0,
+    } as any
   })
-  list2.value = cards
 }
 
 const breakpoints = {
-  2000: { rowPerView: 6 },
-  1600: { rowPerView: 5 },
-  1200: { rowPerView: 4 },
-  800: { rowPerView: 3 },
-  500: { rowPerView: 2 },
+  2000: { rowPerView: 4 },
+  1600: { rowPerView: 3 },
+  1200: { rowPerView: 3 },
+  800:  { rowPerView: 2 },
+  500:  { rowPerView: 1 },
 }
 
-const { isMobile } = useBasicLayout()
-const showImg = ref<typeof NImage>()
-
-const goShow2 = (item: any) => {
-  if (isMobile.value) return
-  st.value.show = true
-  st.value.showImg = (item.base64 ? item.base64 : item.src) as string
-  nextTick(() => showImg.value?.click())
-}
-
-initLoad()
-
-watch(() => homeStore.myData.act, (n) => {
-  if (n === 'SeedreamFeed') {
-    initLoad()
-  }
-})
-
-const deleteGo = (item: any) => {
-  mlog('deleteGo', item)
-  if (csuno.delete(item.task.request_id)) {
-    ms.success('已删除')
-    initLoad()
-  }
+const gridClass = (n: number) => {
+  if (n <= 1) return 'sd-grid-1'
+  if (n === 2) return 'sd-grid-2'
+  if (n === 3) return 'sd-grid-3'
+  return 'sd-grid-4'
 }
 
 const downloadImg = (url: string) => {
   if (!url) return
   const a = document.createElement('a')
-  a.href = url
-  a.target = '_blank'
-  a.rel = 'noreferrer'
-  a.download = ''
+  a.href = url; a.target = '_blank'; a.rel = 'noreferrer'; a.download = ''
   a.click()
 }
+
+const downloadAll = (card: SdTaskCard) => {
+  card.images.forEach((im, i) => setTimeout(() => downloadImg(im.url), i * 250))
+}
+
+const deleteGo = (card: SdTaskCard) => {
+  if (csuno.delete(card.task.request_id)) { ms.success('已删除'); initLoad() }
+}
+
+const typeLabel = (task: SeedreamTask) => {
+  const hasRef = Array.isArray((task as any).referenceImages) && (task as any).referenceImages.length > 0
+  return hasRef ? '图生图' : '文生图'
+}
+
+initLoad()
+watch(() => homeStore.myData.act, (n) => { if (n === 'SeedreamFeed') initLoad() })
 </script>
 
 <template>
-  <!-- Waterfall list -->
   <div v-if="list2.length > 0" class="sd-list-wrap px-3 py-4">
     <Waterfall
       :list="list2"
       :breakpoints="breakpoints"
-      :gutter="12"
+      :gutter="14"
       background="transparent"
     >
       <template #item="{ item, index }">
         <div
           class="sd-card group rounded-2xl overflow-hidden bg-white/5 backdrop-blur-sm border border-white/10 relative"
           :class="{
-            'sd-card--processing': !item.url && item.task.data.task_status !== 'failed' && item.task.data.task_status !== 'succeed',
-            'sd-card--completed': item.url || item.task.data.task_status === 'succeed',
-            'sd-card--failed': item.task.data.task_status === 'failed',
+            'sd-card--processing': item.status === 'pending',
+            'sd-card--completed': item.status === 'succeed',
+            'sd-card--failed': item.status === 'failed',
           }"
           :style="{ animationDelay: `${index * 45}ms` }"
-          @mouseenter="st.pIndex = index"
-          @mouseleave="st.pIndex = -1"
         >
-          <!-- Status accent strip (left border) -->
           <div class="sd-status-strip" />
 
-          <!-- Status badge (top-left) -->
-          <div
-            class="absolute top-2 left-2 z-20 flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium backdrop-blur-md border"
-            :class="{
-              'bg-violet-500/20 text-violet-300 border-violet-400/30 sd-badge-pulse': !item.url && item.task.data.task_status !== 'failed' && item.task.data.task_status !== 'succeed',
-              'bg-emerald-500/20 text-emerald-300 border-emerald-400/30': item.url || item.task.data.task_status === 'succeed',
-              'bg-red-500/20 text-red-300 border-red-400/30': item.task.data.task_status === 'failed',
-            }"
-          >
-            <span
-              class="w-1.5 h-1.5 rounded-full"
+          <div class="flex items-center justify-between px-3 pt-2.5 pb-2 gap-2">
+            <div
+              class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium backdrop-blur-md border"
               :class="{
-                'bg-violet-400 sd-dot-pulse': !item.url && item.task.data.task_status !== 'failed' && item.task.data.task_status !== 'succeed',
-                'bg-emerald-400': item.url || item.task.data.task_status === 'succeed',
-                'bg-red-400': item.task.data.task_status === 'failed',
+                'bg-violet-500/20 text-violet-300 border-violet-400/30 sd-badge-pulse': item.status === 'pending',
+                'bg-emerald-500/20 text-emerald-300 border-emerald-400/30': item.status === 'succeed',
+                'bg-red-500/20 text-red-300 border-red-400/30': item.status === 'failed',
               }"
-            />
-            <span v-if="item.task.data.task_status === 'failed'">失败</span>
-            <span v-else-if="item.url || item.task.data.task_status === 'succeed'">已完成</span>
-            <span v-else>处理中</span>
+            >
+              <span
+                class="w-1.5 h-1.5 rounded-full"
+                :class="{
+                  'bg-violet-400 sd-dot-pulse': item.status === 'pending',
+                  'bg-emerald-400': item.status === 'succeed',
+                  'bg-red-400': item.status === 'failed',
+                }"
+              />
+              <span v-if="item.status === 'pending'">处理中</span>
+              <span v-else-if="item.status === 'failed'">失败</span>
+              <span v-else>已完成</span>
+            </div>
+
+            <div class="flex items-center gap-1.5 text-[10px] text-white/40">
+              <span class="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-white/5 border border-white/10">
+                <SvgIcon icon="ri:image-line" class="text-[11px]" />
+                {{ typeLabel(item.task) }}
+              </span>
+              <span v-if="item.images.length > 1" class="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-white/5 border border-white/10">
+                ×{{ item.images.length }}
+              </span>
+              <span v-if="item.task.size" class="px-1.5 py-0.5 rounded bg-white/5 border border-white/10">
+                {{ item.task.size }}
+              </span>
+            </div>
           </div>
 
-          <!-- Image card -->
-          <template v-if="item.url">
-            <div class="relative overflow-hidden sd-img-wrap">
-              <KgImage
-                :item="item"
-                class="sd-img-inner"
-                @click="goShow2(item)"
-              />
-            </div>
-          </template>
+          <div class="sd-media relative px-3">
+            <NImageGroup v-if="item.status === 'succeed' && item.images.length > 0" show-toolbar-tooltip>
+              <div class="sd-grid" :class="gridClass(item.images.length)">
+                <div
+                  v-for="img in item.images"
+                  :key="img.index"
+                  class="sd-tile relative overflow-hidden rounded-xl bg-black/20 border border-white/5"
+                >
+                  <NImage
+                    :src="img.url"
+                    object-fit="cover"
+                    :img-props="{ style: 'width:100%;height:100%;object-fit:cover;display:block;' }"
+                  />
+                  <button
+                    class="sd-tile-dl absolute bottom-1.5 right-1.5 w-6 h-6 rounded-full bg-black/60 backdrop-blur text-white/80 flex items-center justify-center opacity-0 hover:bg-black/80 hover:text-white transition"
+                    title="下载"
+                    @click.stop="downloadImg(img.url)"
+                  >
+                    <SvgIcon icon="mdi:download" class="text-xs" />
+                  </button>
+                </div>
+              </div>
+            </NImageGroup>
 
-          <!-- Failed state -->
-          <template v-else-if="item.task.data.task_status === 'failed'">
-            <div class="flex flex-col items-center justify-center gap-2 p-6" style="min-height: 140px;">
-              <SvgIcon icon="mdi:alert-circle-outline" class="text-3xl text-red-400 sd-error-pulse" />
-              <p class="text-xs text-white/40 truncate max-w-full">{{ item.task.data.task_status_msg || '生成失败' }}</p>
-            </div>
-          </template>
-
-          <!-- Processing state -->
-          <template v-else>
-            <div class="flex flex-col items-center justify-center gap-3 p-6 relative" style="min-height: 160px;">
-              <div class="shimmer-skeleton absolute inset-0 rounded-2xl" />
+            <div v-else-if="item.status === 'pending'" class="sd-placeholder flex flex-col items-center justify-center gap-3 rounded-xl relative overflow-hidden" style="min-height:180px;">
+              <div class="shimmer-skeleton absolute inset-0" />
               <div class="sd-progress-ring relative z-10">
                 <svg class="sd-ring-svg" width="52" height="52" viewBox="0 0 52 52">
                   <circle cx="26" cy="26" r="22" fill="none" stroke="rgba(255,255,255,0.08)" stroke-width="3" />
@@ -193,48 +204,42 @@ const downloadImg = (url: string) => {
               </div>
               <span class="relative z-10 text-xs text-white/60 breathe">生成中...</span>
             </div>
-          </template>
 
-          <!-- Task info bar -->
-          <div class="flex items-center gap-2 px-3 py-1.5 bg-white/[0.03] border-t border-white/[0.06]">
-            <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-violet-500/15 text-violet-300/90 border border-violet-400/15">
-              <SvgIcon icon="ri:image-line" class="text-[11px]" />
-              <span v-if="item.task.cat === 'image' && !item.task.image">文生图</span>
-              <span v-else>图生图</span>
-            </span>
-            <span class="text-[10px] text-white/30 truncate">{{ item.task.model || 'Seedream' }}</span>
-            <span v-if="item.task.size" class="text-[10px] text-white/30 ml-auto flex-shrink-0">{{ item.task.size }}</span>
+            <div v-else class="flex flex-col items-center justify-center gap-2 p-6 rounded-xl bg-red-500/5 border border-red-500/15" style="min-height:140px;">
+              <SvgIcon icon="mdi:alert-circle-outline" class="text-3xl text-red-400 sd-error-pulse" />
+              <p class="text-[11px] text-red-300/70 text-center line-clamp-2">{{ item.task.data.task_status_msg || '生成失败' }}</p>
+            </div>
           </div>
 
-          <!-- Prompt overlay (bottom, group-hover) -->
-          <div class="prompt-overlay absolute inset-x-0 bottom-0 px-3 py-2 flex items-end gap-2 bg-gradient-to-t from-black/75 via-black/40 to-transparent backdrop-blur-[2px]">
-            <div class="flex-1 min-w-0">
-              <p class="text-[13px] text-white/90 line-clamp-2 leading-snug">
-                {{ item.task.prompt || item.task.data?.task_id }}
-              </p>
-              <p v-if="item.task.negative_prompt" class="text-[10px] text-red-300/50 mt-0.5 truncate">
-                ✕ {{ item.task.negative_prompt }}
-              </p>
-            </div>
-            <div class="flex items-center gap-1.5 flex-shrink-0">
+          <div class="px-3 pt-2 pb-2.5">
+            <p class="text-[12px] leading-snug text-white/75 line-clamp-2 mb-1.5" :title="item.task.prompt">
+              {{ item.task.prompt || item.task.data?.task_id }}
+            </p>
+            <div class="flex items-center gap-1.5 text-[10px] text-white/30">
+              <span class="truncate flex-1">{{ item.task.model || 'seedream-5.0' }}</span>
               <button
-                v-if="item.url"
-                class="action-btn w-7 h-7 rounded-full bg-black/50 backdrop-blur-sm border border-white/15 flex items-center justify-center text-white/70 hover:text-white hover:bg-black/70 transition-all duration-150"
-                title="下载"
-                @click.stop="downloadImg(item.url)"
+                v-if="item.status === 'succeed' && item.images.length > 1"
+                class="sd-act-btn"
+                title="全部下载"
+                @click.stop="downloadAll(item)"
               >
-                <SvgIcon icon="mdi:download" class="text-sm" />
+                <SvgIcon icon="mdi:download-multiple" />
+              </button>
+              <button
+                v-else-if="item.status === 'succeed'"
+                class="sd-act-btn"
+                title="下载"
+                @click.stop="downloadImg(item.images[0]?.url || '')"
+              >
+                <SvgIcon icon="mdi:download" />
               </button>
               <NPopconfirm @positive-click="() => deleteGo(item)" placement="top">
                 <template #trigger>
-                  <button
-                    class="action-btn w-7 h-7 rounded-full bg-black/50 backdrop-blur-sm border border-white/15 flex items-center justify-center text-white/70 hover:text-red-400 hover:bg-black/70 transition-all duration-150"
-                    title="删除"
-                  >
-                    <SvgIcon icon="mdi:delete" class="text-sm" />
+                  <button class="sd-act-btn sd-act-btn--danger" title="删除">
+                    <SvgIcon icon="mdi:delete" />
                   </button>
                 </template>
-                确定删除？
+                确定删除该任务？
               </NPopconfirm>
             </div>
           </div>
@@ -243,7 +248,6 @@ const downloadImg = (url: string) => {
     </Waterfall>
   </div>
 
-  <!-- Empty state -->
   <div v-else class="w-full h-full flex flex-col items-center justify-center gap-5 py-20">
     <div class="empty-icon-wrap w-20 h-20 rounded-2xl bg-gradient-to-br from-violet-600/20 to-indigo-600/10 border border-violet-500/20 flex items-center justify-center">
       <SvgIcon icon="ri:image-add-line" class="text-4xl text-violet-400/70" />
@@ -253,26 +257,17 @@ const downloadImg = (url: string) => {
       <div class="text-xs text-white/25 mt-1">使用 Seedream 生成的图片将展示在这里</div>
     </div>
   </div>
-
-  <!-- Hidden NImage for fullscreen preview -->
-  <NImage
-    ref="showImg"
-    :src="st.showImg"
-    class="hidden"
-    preview-disabled
-    :show-toolbar="false"
-  />
 </template>
 
 <style scoped>
 .sd-card {
   animation: sdCardFadeIn 0.35s ease both;
-  transition: transform 0.3s ease, box-shadow 0.3s ease, border-color 0.3s ease;
+  transition: transform 0.25s ease, box-shadow 0.3s ease, border-color 0.3s ease;
 }
 .sd-card:hover {
-  transform: scale(1.03);
-  box-shadow: 0 8px 32px rgba(0,0,0,0.5), 0 0 0 1px rgba(139,92,246,0.3), 0 0 20px rgba(139,92,246,0.15);
-  border-color: rgba(139,92,246,0.35);
+  transform: translateY(-2px);
+  box-shadow: 0 10px 32px rgba(0,0,0,0.45), 0 0 0 1px rgba(139,92,246,0.25);
+  border-color: rgba(139,92,246,0.32);
 }
 @keyframes sdCardFadeIn {
   from { opacity: 0; transform: translateY(12px) scale(0.97); }
@@ -280,68 +275,76 @@ const downloadImg = (url: string) => {
 }
 
 .sd-status-strip {
-  position: absolute; top: 0; left: 0; bottom: 0; width: 4px; z-index: 15;
-  border-radius: 8px 0 0 8px; transition: opacity 0.3s ease, box-shadow 0.3s ease;
+  position: absolute; top: 0; left: 0; bottom: 0; width: 3px; z-index: 15;
+  border-radius: 8px 0 0 8px;
 }
 .sd-card--processing .sd-status-strip {
-  background: linear-gradient(180deg, rgba(139,92,246,0.8), rgba(99,102,241,0.6));
+  background: linear-gradient(180deg, rgba(139,92,246,0.85), rgba(99,102,241,0.55));
   box-shadow: 0 0 8px rgba(139,92,246,0.4);
   animation: sdStripPulse 2s ease-in-out infinite;
 }
 .sd-card--completed .sd-status-strip {
-  background: linear-gradient(180deg, rgba(52,211,153,0.7), rgba(16,185,129,0.4));
-  box-shadow: 0 0 6px rgba(52,211,153,0.2);
+  background: linear-gradient(180deg, rgba(52,211,153,0.75), rgba(16,185,129,0.4));
 }
 .sd-card--failed .sd-status-strip {
-  background: linear-gradient(180deg, rgba(248,113,113,0.8), rgba(220,38,38,0.5));
-  box-shadow: 0 0 6px rgba(248,113,113,0.3);
+  background: linear-gradient(180deg, rgba(248,113,113,0.85), rgba(220,38,38,0.5));
 }
-@keyframes sdStripPulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
-}
+@keyframes sdStripPulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
 
 .sd-badge-pulse { animation: sdBadgePulse 2.4s ease-in-out infinite; }
 @keyframes sdBadgePulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(139,92,246,0); }
-  50% { box-shadow: 0 0 8px 2px rgba(139,92,246,0.25); }
+  0%,100% { box-shadow: 0 0 0 0 rgba(139,92,246,0); }
+  50%     { box-shadow: 0 0 8px 2px rgba(139,92,246,0.25); }
 }
 .sd-dot-pulse { animation: sdDotPulse 1.4s ease-in-out infinite; }
-@keyframes sdDotPulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.4; transform: scale(0.7); }
+@keyframes sdDotPulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.4;transform:scale(0.7)} }
+
+.sd-grid { display: grid; gap: 6px; width: 100%; }
+.sd-grid-1 { grid-template-columns: 1fr; }
+.sd-grid-2 { grid-template-columns: 1fr 1fr; }
+.sd-grid-2 .sd-tile { aspect-ratio: 1/1; }
+.sd-grid-3 {
+  grid-template-columns: 2fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  aspect-ratio: 3/2;
 }
-
-.sd-img-wrap { cursor: pointer; }
-.sd-img-inner { transition: transform 0.3s ease; }
-.sd-card:hover .sd-img-inner { transform: scale(1.05); }
-
-.prompt-overlay {
-  opacity: 0; transform: translateY(4px);
-  transition: opacity 0.25s ease, transform 0.25s ease;
-  pointer-events: none;
+.sd-grid-3 .sd-tile:nth-child(1) { grid-row: span 2; }
+.sd-grid-4 {
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
 }
-.sd-card:hover .prompt-overlay { opacity: 1; transform: translateY(0); pointer-events: auto; }
+.sd-grid-4 .sd-tile { aspect-ratio: 1/1; }
 
-.action-btn { outline: none; cursor: pointer; text-decoration: none; }
+.sd-tile { cursor: zoom-in; transition: transform 0.25s ease; }
+.sd-tile :deep(.n-image) { width: 100%; height: 100%; display: block; }
+.sd-tile :deep(img) { width: 100%; height: 100%; object-fit: cover; display: block; transition: transform 0.35s ease; }
+.sd-tile:hover :deep(img) { transform: scale(1.04); }
+.sd-tile:hover .sd-tile-dl { opacity: 1; }
+
+.sd-act-btn {
+  width: 22px; height: 22px; border-radius: 6px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08);
+  color: rgba(255,255,255,0.55); cursor: pointer; transition: all 0.15s ease;
+}
+.sd-act-btn:hover { background: rgba(139,92,246,0.2); color: #fff; border-color: rgba(139,92,246,0.4); }
+.sd-act-btn--danger:hover { background: rgba(248,113,113,0.2); border-color: rgba(248,113,113,0.4); color: #fca5a5; }
 
 .shimmer-skeleton {
   background: linear-gradient(90deg, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0.10) 40%, rgba(255,255,255,0.04) 80%);
-  background-size: 200% 100%; animation: sdShimmer 1.6s linear infinite;
+  background-size: 200% 100%; animation: sdShimmer 1.6s linear infinite; border-radius: 12px;
 }
-@keyframes sdShimmer { from { background-position: 200% center; } to { background-position: -200% center; } }
-
+@keyframes sdShimmer { from{background-position:200% center} to{background-position:-200% center} }
 .breathe { animation: sdBreathe 2s ease-in-out infinite; }
-@keyframes sdBreathe { 0%, 100% { opacity: 0.6; } 50% { opacity: 1; } }
-
+@keyframes sdBreathe { 0%,100%{opacity:0.6} 50%{opacity:1} }
 .sd-error-pulse { animation: sdErrorPulse 1.8s ease-in-out infinite; }
-@keyframes sdErrorPulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.5; transform: scale(0.88); } }
+@keyframes sdErrorPulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.5;transform:scale(0.88)} }
 
 .empty-icon-wrap { animation: sdFloat 3.2s ease-in-out infinite; }
-@keyframes sdFloat { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-7px); } }
+@keyframes sdFloat { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-7px)} }
 
 .sd-progress-ring { position: relative; width: 52px; height: 52px; }
 .sd-ring-svg { animation: sdRingRotate 2.4s linear infinite; }
-@keyframes sdRingRotate { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+@keyframes sdRingRotate { from{transform:rotate(0)} to{transform:rotate(360deg)} }
 .sd-ring-progress { filter: drop-shadow(0 0 4px rgba(139,92,246,0.5)); }
 </style>

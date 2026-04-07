@@ -81,6 +81,36 @@ const createImg = async () => {
   st.value.isLoading = false
 }
 
+const showAdvanced = ref(false)
+const dragOver = ref({ a: false, b: false })
+
+const cameraIcon = (v) => {
+  const m = {
+    '': 'ri:close-line',
+    down_back: 'ri:arrow-down-line',
+    forward_up: 'ri:arrow-up-line',
+    right_turn_forward: 'ri:arrow-right-line',
+    left_turn_forward: 'ri:arrow-left-line',
+  }
+  return m[v] || 'ri:camera-lens-line'
+}
+const modelTag = (v) => {
+  if (v === 'kling-v2-master') return 'v2'
+  if (v === 'kling-v1-6') return 'v1.6'
+  if (v === 'kling-v1-5') return 'v1.5'
+  return 'v1'
+}
+function onDrop(e, which) {
+  e.preventDefault()
+  dragOver.value[which] = false
+  const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]
+  if (!file) return
+  upImg(file).then((d) => {
+    if (which === 'a') f.value.image = d
+    else f.value.image_tail = d
+  }).catch((er) => ms.error(er))
+}
+
 onMounted(() => {
   homeStore.setMyData({ ms: ms })
 })
@@ -93,153 +123,213 @@ onMounted(() => {
       <div class="header-icon">
         <SvgIcon icon="ri:film-line" class="text-lg" />
       </div>
-      <div>
+      <div class="flex-1 min-w-0">
         <h3 class="header-title">可灵视频</h3>
         <p class="header-sub">Kling AI Video Generation</p>
       </div>
     </div>
 
-    <!-- Gradient divider -->
-    <div class="section-divider" />
+    <div class="space-y-3">
+      <!-- CANVAS CARD -->
+      <div class="kcard">
+        <p class="ksection-label">画面 · CANVAS</p>
 
-    <!-- Aspect ratio -->
-    <div class="section-block">
-      <p class="section-label">
-        <SvgIcon icon="ri:aspect-ratio-line" class="mr-1.5 inline-block text-sm opacity-60" />
-        画面比例
-      </p>
-      <div class="flex gap-2">
-        <button
-          v-for="(item, index) in vf"
-          :key="item.value"
-          class="pill-btn"
-          :class="{ active: index === st.bili }"
-          @click="st.bili = index"
-        >
-          <div class="flex h-4 w-4 items-center justify-center">
-            <div class="ratio-icon" :style="item.s" :class="{ active: index === st.bili }" />
+        <div class="flex gap-2 mb-3">
+          <button
+            v-for="(item, index) in vf"
+            :key="item.value"
+            class="ratio-btn"
+            :class="{ active: index === st.bili }"
+            @click="st.bili = index"
+          >
+            <div class="ratio-visual-wrap">
+              <div
+                class="ratio-visual"
+                :class="{ active: index === st.bili }"
+                :style="item.value === '1:1' ? 'width:22px;height:22px' : item.value === '16:9' ? 'width:28px;height:16px' : 'width:14px;height:24px'"
+              />
+            </div>
+            <span class="ratio-label">{{ item.label }}</span>
+          </button>
+        </div>
+
+        <div class="flex items-center gap-2">
+          <div class="upload-wrapper flex-1">
+            <input type="file" ref="fsRef" class="hidden" accept="image/jpeg,image/jpg,image/png,image/gif" @change="selectFile" />
+            <div
+              class="upload-box"
+              :class="{ 'has-image': f.image, 'drag-over': dragOver.a }"
+              @click="fsRef.click()"
+              @dragover.prevent="dragOver.a = true"
+              @dragleave.prevent="dragOver.a = false"
+              @drop="onDrop($event, 'a')"
+            >
+              <template v-if="f.image">
+                <img :src="f.image" class="h-full w-full object-cover" />
+                <div class="upload-remove" @click.stop="f.image = ''">
+                  <SvgIcon icon="ri:close-circle-fill" class="text-base" />
+                </div>
+                <div class="upload-tag">起始帧</div>
+              </template>
+              <div v-else class="upload-placeholder">
+                <SvgIcon icon="ri:image-add-line" class="text-2xl" />
+                <span>起始帧</span>
+                <span class="upload-hint">点击或拖拽</span>
+              </div>
+            </div>
           </div>
-          <span>{{ item.label }}</span>
+
+          <SvgIcon
+            v-if="f.image && f.image_tail"
+            icon="ri:arrow-right-line"
+            class="text-violet-300 text-lg shrink-0"
+          />
+
+          <div class="upload-wrapper flex-1">
+            <input type="file" ref="fsRef2" class="hidden" accept="image/jpeg,image/jpg,image/png,image/gif" @change="selectFile2" />
+            <div
+              class="upload-box"
+              :class="{ 'has-image': f.image_tail, 'drag-over': dragOver.b }"
+              @click="fsRef2.click()"
+              @dragover.prevent="dragOver.b = true"
+              @dragleave.prevent="dragOver.b = false"
+              @drop="onDrop($event, 'b')"
+            >
+              <template v-if="f.image_tail">
+                <img :src="f.image_tail" class="h-full w-full object-cover" />
+                <div class="upload-remove" @click.stop="f.image_tail = ''">
+                  <SvgIcon icon="ri:close-circle-fill" class="text-base" />
+                </div>
+                <div class="upload-tag">尾帧</div>
+              </template>
+              <div v-else class="upload-placeholder">
+                <SvgIcon icon="ri:image-add-line" class="text-2xl" />
+                <span>尾帧</span>
+                <span class="upload-hint">可选</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- PROMPT CARD -->
+      <div class="kcard">
+        <p class="ksection-label">
+          <SvgIcon icon="ri:sparkling-2-line" class="mr-1 inline-block" />
+          提示词 · PROMPT
+        </p>
+        <div class="prompt-wrap">
+          <n-input
+            v-model:value="f.prompt"
+            placeholder="描述你想生成的画面，例如：一只白猫在樱花树下奔跑，阳光穿过花瓣..."
+            type="textarea"
+            size="small"
+            class="prompt-textarea"
+            :autosize="{ minRows: 3, maxRows: 8 }"
+          />
+          <div class="prompt-counter">{{ (f.prompt || '').length }}/500</div>
+        </div>
+
+        <button class="advanced-toggle" @click="showAdvanced = !showAdvanced">
+          <SvgIcon :icon="showAdvanced ? 'ri:arrow-up-s-line' : 'ri:arrow-down-s-line'" class="text-sm" />
+          高级 · Advanced
+        </button>
+        <div v-if="showAdvanced" class="mt-2">
+          <NInput
+            v-model:value="f.negative_prompt"
+            size="small"
+            clearable
+            placeholder="负面提示词（不希望出现的内容）"
+          />
+        </div>
+      </div>
+
+      <!-- CAMERA CARD (text2video only) -->
+      <div v-if="!f.image" class="kcard">
+        <p class="ksection-label">
+          <SvgIcon icon="ri:camera-lens-line" class="mr-1 inline-block" />
+          镜头 · CAMERA
+        </p>
+        <div class="camera-row">
+          <button
+            v-for="opt in cameraOption"
+            :key="opt.value"
+            class="camera-chip"
+            :class="{ active: st.camera_type === opt.value }"
+            @click="st.camera_type = opt.value"
+          >
+            <SvgIcon :icon="cameraIcon(opt.value)" class="text-sm" />
+            <span>{{ opt.label }}</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- SETTINGS CARD -->
+      <div class="kcard">
+        <p class="ksection-label">
+          <SvgIcon icon="ri:settings-3-line" class="mr-1 inline-block" />
+          参数 · SETTINGS
+        </p>
+
+        <div class="setting-row">
+          <span class="setting-label">{{ $t('mjset.model') }}</span>
+          <div class="setting-ctrl flex items-center gap-2">
+            <n-select v-model:value="f.model" size="small" :options="mvOption" class="flex-1" />
+            <span class="model-tag">{{ modelTag(f.model) }}</span>
+          </div>
+        </div>
+
+        <div v-if="f.model !== 'kling-v2-master'" class="setting-row">
+          <span class="setting-label">{{ $t('mj.mode') }}</span>
+          <div class="seg-group">
+            <button
+              v-for="opt in modeOptions"
+              :key="opt.value"
+              class="seg-btn"
+              :class="{ active: f.mode === opt.value }"
+              @click="f.mode = opt.value"
+            >{{ opt.label }}</button>
+          </div>
+        </div>
+
+        <div class="setting-row">
+          <span class="setting-label">{{ $t('mj.duration') }}</span>
+          <div class="seg-group">
+            <button
+              v-for="opt in durationOptions"
+              :key="opt.value"
+              class="seg-btn"
+              :class="{ active: f.duration === opt.value }"
+              @click="f.duration = opt.value"
+            >{{ opt.label }}</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- CTA -->
+      <div class="relative">
+        <button
+          class="submit-btn"
+          :class="{ disabled: !f.prompt && !f.image, loading: st.isLoading, enabled: (f.prompt || f.image) && !st.isLoading }"
+          :disabled="(!f.prompt && !f.image) || st.isLoading"
+          :title="(!f.prompt && !f.image) ? '请填写提示词或上传参考图片' : ''"
+          @click="createImg()"
+        >
+          <span v-if="st.isLoading" class="btn-spinner" />
+          <SvgIcon v-else icon="ri:magic-line" class="mr-2 text-lg" />
+          <span>{{ st.isLoading ? '生成中...' : $t('video.generate') }}</span>
+        </button>
+        <div v-if="st.isLoading" class="progress-bar"><span /></div>
+
+        <button
+          v-if="f.image || f.prompt || f.image_tail"
+          class="clear-btn"
+          @click="clearInput"
+        >
+          <SvgIcon icon="ri:delete-bin-6-line" class="mr-1 text-xs" />
+          {{ $t('video.clear') }}
         </button>
       </div>
-    </div>
-
-    <div class="section-divider" />
-
-    <!-- Settings -->
-    <div class="section-block space-y-3">
-      <p class="section-label">
-        <SvgIcon icon="ri:settings-3-line" class="mr-1.5 inline-block text-sm opacity-60" />
-        {{ $t('mjset.model') }}
-      </p>
-      <div class="setting-row">
-        <span class="setting-label">{{ $t('mjset.model') }}</span>
-        <n-select v-model:value="f.model" size="small" :options="mvOption" class="setting-input" />
-      </div>
-      <div class="setting-row">
-        <span class="setting-label">{{ $t('mj.mode') }}</span>
-        <n-select v-model:value="f.mode" size="small" :options="modeOptions" class="setting-input" />
-      </div>
-      <div class="setting-row">
-        <span class="setting-label">{{ $t('mj.duration') }}</span>
-        <n-select v-model:value="f.duration" size="small" :options="durationOptions" class="setting-input" />
-      </div>
-      <div class="setting-row">
-        <span class="setting-label">{{ $t('mj.camera_type') }}</span>
-        <n-select v-model:value="st.camera_type" size="small" :options="cameraOption" class="setting-input" />
-      </div>
-      <div class="setting-row">
-        <span class="setting-label">{{ $t('mj.nohead') }}</span>
-        <NInput v-model:value="f.negative_prompt" size="small" class="setting-input" clearable :placeholder="$t('mj.negative_prompt')" />
-      </div>
-    </div>
-
-    <div class="section-divider" />
-
-    <!-- Prompt -->
-    <div class="section-block">
-      <p class="section-label">
-        <SvgIcon icon="ri:quill-pen-line" class="mr-1.5 inline-block text-sm opacity-60" />
-        {{ $t('video.descpls') }}
-      </p>
-      <n-input
-        v-model:value="f.prompt"
-        :placeholder="$t('video.descpls')"
-        type="textarea"
-        size="small"
-        class="prompt-textarea"
-        :autosize="{ minRows: 3, maxRows: 10 }"
-      />
-    </div>
-
-    <div class="section-divider" />
-
-    <!-- Image upload -->
-    <div class="section-block">
-      <p class="section-label">
-        <SvgIcon icon="ri:image-2-line" class="mr-1.5 inline-block text-sm opacity-60" />
-        参考图片
-      </p>
-      <div class="flex gap-3">
-        <!-- Start frame -->
-        <div class="upload-wrapper">
-          <input type="file" ref="fsRef" class="hidden" accept="image/jpeg,image/jpg,image/png,image/gif" @change="selectFile" />
-          <div class="upload-box" @click="fsRef.click()">
-            <template v-if="f.image">
-              <img :src="f.image" class="h-full w-full object-cover" />
-              <div class="upload-remove" @click.stop="f.image = ''">
-                <SvgIcon icon="ri:close-line" class="text-xs" />
-              </div>
-            </template>
-            <div v-else class="upload-placeholder">
-              <SvgIcon icon="ri:image-add-line" class="text-xl" />
-              <span>{{ $t('video.selectimg') }}</span>
-            </div>
-          </div>
-        </div>
-        <!-- End frame -->
-        <div class="upload-wrapper">
-          <input type="file" ref="fsRef2" class="hidden" accept="image/jpeg,image/jpg,image/png,image/gif" @change="selectFile2" />
-          <div class="upload-box" @click="fsRef2.click()">
-            <template v-if="f.image_tail">
-              <img :src="f.image_tail" class="h-full w-full object-cover" />
-              <div class="upload-remove" @click.stop="f.image_tail = ''">
-                <SvgIcon icon="ri:close-line" class="text-xs" />
-              </div>
-            </template>
-            <div v-else class="upload-placeholder">
-              <SvgIcon icon="ri:image-add-line" class="text-xl" />
-              <span>{{ $t('video.endImg') }}</span>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div class="section-divider" />
-
-    <!-- Generate button -->
-    <div class="section-block">
-      <button
-        class="submit-btn"
-        :class="{ disabled: !f.prompt, loading: st.isLoading, enabled: f.prompt && !st.isLoading }"
-        :disabled="!f.prompt || st.isLoading"
-        @click="createImg()"
-      >
-        <span v-if="st.isLoading" class="btn-spinner" />
-        <SvgIcon v-else icon="ri:play-circle-line" class="mr-2 text-lg" />
-        <span>{{ st.isLoading ? '生成中...' : $t('video.generate') }}</span>
-      </button>
-
-      <!-- Clear button -->
-      <button
-        v-if="f.image || f.prompt || f.image_tail"
-        class="clear-btn"
-        @click="clearInput"
-      >
-        <SvgIcon icon="ri:delete-bin-6-line" class="mr-1 text-xs" />
-        {{ $t('video.clear') }}
-      </button>
     </div>
 
     <ul class="info-list" v-html="$t('mj.klingInfo')" />
@@ -572,4 +662,256 @@ onMounted(() => {
   --n-text-color: rgba(255, 255, 255, 0.85) !important;
   --n-placeholder-color: rgba(255, 255, 255, 0.25) !important;
 }
+
+/* --- Polished additions --- */
+.kcard {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  padding: 12px;
+}
+.ksection-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: rgba(255, 255, 255, 0.4);
+  font-weight: 600;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+}
+.ratio-btn {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 6px;
+  border-radius: 10px;
+  border: 1.5px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+  color: rgba(255, 255, 255, 0.55);
+  cursor: pointer;
+  transition: all 0.25s ease;
+}
+.ratio-btn:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.85);
+}
+.ratio-btn.active {
+  border-color: rgba(167, 139, 250, 0.6);
+  background: rgba(139, 92, 246, 0.15);
+  color: rgba(237, 233, 254, 1);
+  box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.15), 0 0 20px rgba(139, 92, 246, 0.25);
+}
+.ratio-visual-wrap {
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.ratio-visual {
+  border: 1.5px solid rgba(255, 255, 255, 0.35);
+  border-radius: 3px;
+  transition: all 0.25s ease;
+}
+.ratio-visual.active {
+  border-color: rgba(196, 181, 253, 0.95);
+  background: rgba(139, 92, 246, 0.25);
+}
+.ratio-label {
+  font-size: 11px;
+  font-weight: 600;
+}
+.upload-box {
+  width: 100%;
+  height: 96px;
+  border-radius: 12px;
+  border: 2px dashed rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.02);
+  cursor: pointer;
+  overflow: hidden;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.25s ease;
+}
+.upload-box:hover {
+  border-color: rgba(167, 139, 250, 0.55);
+  background: rgba(139, 92, 246, 0.06);
+}
+.upload-box.has-image {
+  border-style: solid;
+  border-color: rgba(139, 92, 246, 0.4);
+}
+.upload-box.drag-over {
+  border-color: rgba(217, 70, 239, 0.8);
+  background: rgba(217, 70, 239, 0.1);
+  box-shadow: 0 0 0 3px rgba(217, 70, 239, 0.15);
+}
+.upload-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  color: rgba(255, 255, 255, 0.35);
+  font-size: 11px;
+}
+.upload-hint {
+  font-size: 9px;
+  color: rgba(255, 255, 255, 0.25);
+}
+.upload-remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  color: rgba(255, 255, 255, 0.95);
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: 50%;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.upload-remove:hover { color: rgb(248, 113, 113); transform: scale(1.1); }
+.upload-tag {
+  position: absolute;
+  bottom: 4px;
+  left: 4px;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.55);
+  color: rgba(255, 255, 255, 0.9);
+}
+.prompt-wrap { position: relative; }
+.prompt-counter {
+  position: absolute;
+  right: 8px;
+  bottom: 6px;
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.35);
+  pointer-events: none;
+}
+.advanced-toggle {
+  margin-top: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.5);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+.advanced-toggle:hover { color: rgba(196, 181, 253, 0.9); }
+.camera-row {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+  scrollbar-width: none;
+}
+.camera-row::-webkit-scrollbar { display: none; }
+.camera-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all 0.2s;
+}
+.camera-chip:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.85);
+}
+.camera-chip.active {
+  background: rgba(139, 92, 246, 0.2);
+  border-color: rgba(167, 139, 250, 0.5);
+  color: rgba(237, 233, 254, 1);
+}
+.kcard .setting-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.kcard .setting-row:last-child { margin-bottom: 0; }
+.kcard .setting-label {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.55);
+  width: 56px;
+  flex-shrink: 0;
+}
+.kcard .setting-ctrl { flex: 1; }
+.model-tag {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: rgba(139, 92, 246, 0.2);
+  border: 1px solid rgba(167, 139, 250, 0.35);
+  color: rgba(221, 214, 254, 0.95);
+  font-weight: 600;
+}
+.seg-group {
+  display: inline-flex;
+  flex: 1;
+  padding: 3px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+}
+.seg-btn {
+  flex: 1;
+  padding: 5px 10px;
+  font-size: 12px;
+  border-radius: 7px;
+  background: transparent;
+  border: none;
+  color: rgba(255, 255, 255, 0.5);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.seg-btn:hover { color: rgba(255, 255, 255, 0.8); }
+.seg-btn.active {
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.9), rgba(217, 70, 239, 0.85));
+  color: white;
+  box-shadow: 0 2px 8px rgba(139, 92, 246, 0.35);
+}
+.progress-bar {
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  bottom: 4px;
+  height: 2px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+}
+.progress-bar span {
+  display: block;
+  height: 100%;
+  width: 35%;
+  background: linear-gradient(90deg, rgba(139, 92, 246, 1), rgba(217, 70, 239, 1));
+  border-radius: 2px;
+  animation: progressSlide 1.4s ease-in-out infinite;
+}
+@keyframes progressSlide {
+  0% { transform: translateX(-100%); width: 30%; }
+  50% { width: 55%; }
+  100% { transform: translateX(320%); width: 30%; }
+}
+
 </style>

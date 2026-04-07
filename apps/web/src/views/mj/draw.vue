@@ -5,6 +5,8 @@ import aiSiderInput from './aiSiderInput.vue';
 import { useBasicLayout } from '@/hooks/useBasicLayout'
 import { mlog } from '@/api';
 import chatIndex from '@/views/chat/index.vue';
+import SeedreamList from '../seedream/sdList.vue';
+import { gptServerStore } from '@/store';
 
 const { isMobile } = useBasicLayout()
 // const appStore = useAppStore()
@@ -32,7 +34,8 @@ const mjClose=()=>{
     </div>
      
     <main class="flex-1 overflow-hidden h-full">
-        <chatIndex></chatIndex>
+        <SeedreamList v-if="gptServerStore.myData.DRAW_TYPE === 'seedream'" />
+        <chatIndex v-else></chatIndex>
     </main>
 </div>
 </template>

@@ -3,7 +3,7 @@ import { LumaMedia, lumaStore } from '@/api/lumaStore';
 import { computed, ref, watch } from 'vue';
 import {NEmpty ,NButton,NPopover, NTag,NButtonGroup,useMessage,NPopconfirm } from 'naive-ui'
 import {FeedLumaTask, lumaFetch, mlog} from '@/api';
-import { homeStore, useAuthStore } from '@/store';
+import { homeStore } from '@/store';
 import {SvgIcon} from '@/components/common'
 import { myTestTranscode } from '@/api/mp4img';
 import { t } from '@/locales';
@@ -41,45 +41,6 @@ const FeedLumaTaskDown=async (item:LumaMedia)=>{
     link.click();
     document.body.removeChild(link);
     
-}
-
-
-
-// ===== Download picker (server cache vs direct) =====
-const _ptoken = () => (useAuthStore().token || '')
-const _resolveLumaUrl = async (item: LumaMedia): Promise<string> => {
-  try {
-    const d: any = await lumaFetch('/generations/' + item.id + '/download_video_url')
-    return d.url ?? item.video?.url ?? ''
-  } catch {
-    return item.video?.url ?? ''
-  }
-}
-const _triggerDownload = (url: string, name: string) => {
-  const a = document.createElement('a')
-  a.href = url; a.download = name; a.target = '_blank'
-  document.body.appendChild(a); a.click(); document.body.removeChild(a)
-}
-const lumaDirectDown = async (item: LumaMedia) => {
-  const url = await _resolveLumaUrl(item)
-  if (!url) { ms.warning('无下载地址'); return }
-  _triggerDownload(url, item.id + '.mp4')
-}
-const lumaServerDown = async (item: LumaMedia) => {
-  const url = await _resolveLumaUrl(item)
-  if (!url) { ms.warning('无下载地址'); return }
-  ms.info('服务器缓存中...')
-  try {
-    const r = await fetch('/api/cache-video', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-ptoken': _ptoken() },
-      body: JSON.stringify({ url, key: item.id }),
-    })
-    const d = await r.json()
-    if (!r.ok || !d.localUrl) throw new Error(d.error || '缓存失败')
-    _triggerDownload(d.localUrl, item.id + '.mp4')
-    ms.success(d.cached ? '已使用缓存' : '缓存完成')
-  } catch (e: any) { ms.error(e.message || '失败') }
 }
 
 //getLastFrameBase64
@@ -139,15 +100,7 @@ initLoad();
 
                     
                       <n-button-group size="tiny">
-                        <n-popover trigger="click" placement="bottom">
-                          <template #trigger>
-                            <n-button size="tiny" round ghost><SvgIcon icon="mdi:download" /> {{ $t('video.download') }}</n-button>
-                          </template>
-                          <div class="flex flex-col gap-2 p-1 min-w-[140px]">
-                            <n-button size="small" type="primary" @click="lumaServerDown(item)">服务器下载</n-button>
-                            <n-button size="small" @click="lumaDirectDown(item)">直链下载</n-button>
-                          </div>
-                        </n-popover>
+                        <n-button  size="tiny" round ghost   @click="FeedLumaTaskDown( item )"  ><SvgIcon icon="mdi:download" /> {{ $t('video.download') }}</n-button>
                         <n-button   size="tiny"  round ghost    > 
                             <n-popconfirm @positive-click="()=>deleteGo(item)" placement="bottom">
                                 <template #trigger> <SvgIcon icon="mdi:delete"  /></template>

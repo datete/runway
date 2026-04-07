@@ -11,6 +11,7 @@ export interface AccountEntry {
   maxConcurrency: number;
   priority: number;
   tokenExpiresAt: Date | null;
+  lastUsedAt: Date | null;
 }
 
 const CACHE_TTL = 30; // seconds to cache account list
@@ -51,7 +52,7 @@ export class AccountPool {
 
     const rows = await this.prisma.runwayAccount.findMany({
       where: { isActive: true },
-      orderBy: [{ priority: 'desc' }, { lastUsedAt: 'asc' }],
+      orderBy: [{ priority: 'desc' }, { lastUsedAt: { sort: 'asc', nulls: 'first' } }],
     });
 
     this.cachedAccounts = rows.map(r => ({
@@ -64,6 +65,7 @@ export class AccountPool {
       maxConcurrency: r.maxConcurrency,
       priority: r.priority,
       tokenExpiresAt: r.tokenExpiresAt,
+      lastUsedAt: r.lastUsedAt,
     }));
     this.cacheExpiry = now + CACHE_TTL * 1000;
 
@@ -170,19 +172,67 @@ export class AccountPool {
     this.dbActiveCache.clear();
   }
 
+  /** Build load-balanced candidate list: filter unavailable, sort by least-loaded (free slots desc, then concurrency ratio asc, then lastUsedAt asc) */
+  private async buildCandidates(accounts: AccountEntry[], excludeId?: string): Promise<AccountEntry[]> {
+    const now = Date.now();
+    const eligible: Array<{ acct: AccountEntry; cur: number; free: number; ratio: number }> = [];
+    for (const account of accounts) {
+      if (excludeId && account.id === excludeId) continue;
+      if (account.tokenExpiresAt && account.tokenExpiresAt.getTime() < now) continue;
+      const inCooldown = await this.redis.get(`account:cooldown:${account.id}`);
+      if (inCooldown) continue;
+      const curStr = await this.redis.get(`account:concurrency:${account.id}`);
+      const cur = curStr ? parseInt(curStr, 10) : 0;
+      if (cur >= account.maxConcurrency) continue; // already full, skip
+      const free = account.maxConcurrency - cur;
+      const ratio = cur / account.maxConcurrency;
+      eligible.push({ acct: account, cur, free, ratio });
+    }
+    // least-loaded first: more free slots wins; tiebreak by lower ratio, then older lastUsedAt
+    eligible.sort((a, b) => {
+      if (b.free !== a.free) return b.free - a.free;
+      if (a.ratio !== b.ratio) return a.ratio - b.ratio;
+      const aT = a.acct.lastUsedAt ? a.acct.lastUsedAt.getTime() : 0;
+      const bT = b.acct.lastUsedAt ? b.acct.lastUsedAt.getTime() : 0;
+      return aT - bT;
+    });
+    return eligible.map(e => e.acct);
+  }
+
+  /**
+   * Acquire a slot on a SPECIFIC account (for per-account submit loops).
+   * Does NOT check cooldown — caller is responsible for that so it can wait properly.
+   */
+  async acquireSpecific(accountId: string): Promise<AccountEntry | null> {
+    const accounts = await this.getAccounts();
+    const account = accounts.find(a => a.id === accountId);
+    if (!account) return null;
+    const now = Date.now();
+    if (account.tokenExpiresAt && account.tokenExpiresAt.getTime() < now) return null;
+    const key = `account:concurrency:${account.id}`;
+    const result = await this.redis.eval(
+      this.ACQUIRE_LUA, 1, key,
+      String(account.maxConcurrency), String(CONCURRENCY_TTL)
+    ) as number;
+    if (result > 0) {
+      console.log(`[account-pool] acquireSpecific ${account.label} (redis=${result}/${account.maxConcurrency})`);
+      this.prisma.runwayAccount.update({
+        where: { id: account.id },
+        data: { lastUsedAt: new Date() },
+      }).catch(() => {});
+      const cached = this.cachedAccounts.find(a => a.id === account.id);
+      if (cached) cached.lastUsedAt = new Date();
+      return account;
+    }
+    return null;
+  }
+
   async smartAcquire(): Promise<AccountEntry | null> {
     const accounts = await this.getAccounts();
-    const now = Date.now();
+    const candidates = await this.buildCandidates(accounts);
 
-    for (const account of accounts) {
-      if (account.tokenExpiresAt && account.tokenExpiresAt.getTime() < now) continue;
-
-      // Check if account is in rate-limit cooldown
-      const cooldownKey = `account:cooldown:${account.id}`;
-      const inCooldown = await this.redis.get(cooldownKey);
-      if (inCooldown) continue;
-
-      // Use Redis as source of truth for concurrency (DB drift fix only at startup)
+    for (const account of candidates) {
+      // Atomic INCR-if-below-max (Lua) — still required to prevent race with concurrent workers
       const key = `account:concurrency:${account.id}`;
       const result = await this.redis.eval(
         this.ACQUIRE_LUA, 1, key,
@@ -190,11 +240,14 @@ export class AccountPool {
       ) as number;
 
       if (result > 0) {
-        console.log(`[account-pool] smart-acquired ${account.label} (redis=${result}/${account.maxConcurrency})`);
+        console.log(`[account-pool] smart-acquired ${account.label} (redis=${result}/${account.maxConcurrency}) [balanced]`);
         this.prisma.runwayAccount.update({
           where: { id: account.id },
           data: { lastUsedAt: new Date() },
         }).catch(() => {});
+        // Update in-memory cached lastUsedAt so subsequent acquires within cache TTL see fresh order
+        const cached = this.cachedAccounts.find(a => a.id === account.id);
+        if (cached) cached.lastUsedAt = new Date();
         return account;
       }
     }
@@ -207,19 +260,9 @@ export class AccountPool {
    */
   async smartAcquireExcluding(excludeId: string): Promise<AccountEntry | null> {
     const accounts = await this.getAccounts();
-    const now = Date.now();
+    const candidates = await this.buildCandidates(accounts, excludeId);
 
-    for (const account of accounts) {
-      if (account.id === excludeId) continue;
-      if (account.tokenExpiresAt && account.tokenExpiresAt.getTime() < now) continue;
-
-      // Check cooldown
-      const cooldownKey = `account:cooldown:${account.id}`;
-      const inCooldown = await this.redis.get(cooldownKey);
-      if (inCooldown) continue;
-
-      const dbActive = await this.getDbActive(account.id);
-
+    for (const account of candidates) {
       const key = `account:concurrency:${account.id}`;
       const result = await this.redis.eval(
         this.ACQUIRE_LUA, 1, key,
@@ -227,11 +270,13 @@ export class AccountPool {
       ) as number;
 
       if (result > 0) {
-        console.log(`[account-pool] smart-acquired (excl ${excludeId.slice(0,8)}) ${account.label} (redis=${result}/${account.maxConcurrency})`);
+        console.log(`[account-pool] smart-acquired (excl ${excludeId.slice(0,8)}) ${account.label} (redis=${result}/${account.maxConcurrency}) [balanced]`);
         this.prisma.runwayAccount.update({
           where: { id: account.id },
           data: { lastUsedAt: new Date() },
         }).catch(() => {});
+        const cached = this.cachedAccounts.find(a => a.id === account.id);
+        if (cached) cached.lastUsedAt = new Date();
         return account;
       }
     }

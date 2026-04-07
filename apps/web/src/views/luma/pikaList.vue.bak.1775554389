@@ -6,7 +6,7 @@ import {NEmpty,NButton,NPopover, NButtonGroup, useMessage,NPopconfirm} from "nai
 import { mlog } from '@/api';
 import {SvgIcon} from '@/components/common'
 import { t } from '@/locales';
-import { homeStore, useAuthStore } from '@/store';
+import { homeStore } from '@/store';
 
 const st= ref({pIndex:-1});
 const list= ref<PikaTask[]>([]);
@@ -30,36 +30,6 @@ const deleteGo=(item:PikaTask)=>{
 //pikaFeed('66e0818e-05fb-454e-b246-a6f253e9ffbf')
 //pikaFeed('e90a4fa4-009a-4ca8-9002-57d2f2cbb6c3')
 //PikaFeed
-
-// ===== Download picker (server cache vs direct) =====
-const _ptoken = () => (useAuthStore().token || '')
-const _triggerDownload = (url: string, name: string) => {
-  const a = document.createElement('a')
-  a.href = url; a.download = name; a.target = '_blank'
-  document.body.appendChild(a); a.click(); document.body.removeChild(a)
-}
-const pikaDirectDown = (item: PikaTask) => {
-  const url = item.videos[0]?.resultUrl
-  if (!url) { ms.warning('无下载地址'); return }
-  _triggerDownload(url, item.id + '.mp4')
-}
-const pikaServerDown = async (item: PikaTask) => {
-  const url = item.videos[0]?.resultUrl
-  if (!url) { ms.warning('无下载地址'); return }
-  ms.info('服务器缓存中...')
-  try {
-    const r = await fetch('/api/cache-video', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-ptoken': _ptoken() },
-      body: JSON.stringify({ url, key: item.id }),
-    })
-    const d = await r.json()
-    if (!r.ok || !d.localUrl) throw new Error(d.error || '缓存失败')
-    _triggerDownload(d.localUrl, item.id + '.mp4')
-    ms.success(d.cached ? '已使用缓存' : '缓存完成')
-  } catch (e: any) { ms.error(e.message || '失败') }
-}
-
 watch(()=>homeStore.myData.act, (n)=>{
     if(n=='PikaFeed')  initLoad()
 })
@@ -108,15 +78,11 @@ onMounted(() => {
                 </section>
                 <section class="flex justify-end items-center pt-1" > 
                      <n-button-group size="tiny" >
-                        <n-popover trigger="click" placement="bottom" v-if="item.videos[0].resultUrl">
-                          <template #trigger>
-                            <n-button size="tiny" round ghost><SvgIcon icon="mdi:download" /> {{ $t('video.download') }}</n-button>
-                          </template>
-                          <div class="flex flex-col gap-2 p-1 min-w-[140px]">
-                            <n-button size="small" type="primary" @click="pikaServerDown(item)">服务器下载</n-button>
-                            <n-button size="small" @click="pikaDirectDown(item)">直链下载</n-button>
-                          </div>
-                        </n-popover>
+                        <n-button  size="tiny" round ghost    v-if="item.videos[0].resultUrl" >
+                            <a :href="item.videos[0].resultUrl" download  target="_blank" class="flex justify-center items-center"  >
+                                <SvgIcon icon="mdi:download" /> {{ $t('video.download') }}
+                            </a>
+                        </n-button>
                         <n-button   size="tiny"  round ghost    > 
                             <n-popconfirm @positive-click="()=>deleteGo(item)" placement="bottom">
                                 <template #trigger> <SvgIcon icon="mdi:delete"  /></template>

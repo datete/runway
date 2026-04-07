@@ -1,0 +1,88 @@
+import { homeStore } from "@/store"
+import { mlog } from "./mjapi"
+import { SeedreamTask, seedreamStore } from "./seedreamStore"
+import { gptFetch } from "./openapi"
+
+export const seedreamGenerate = async (payload: any, prompt: string, negPrompt?: string) => {
+  const store = new seedreamStore()
+  mlog('seedreamGenerate', payload)
+
+  // Build OpenAI-compatible payload (strip non-standard fields that some proxies reject)
+  const apiPayload: any = {
+    model: payload.model,
+    prompt: payload.prompt,
+    size: payload.size,
+    n: payload.n,
+  }
+  if (payload.quality) apiPayload.quality = payload.quality
+  if (payload.negative_prompt) apiPayload.negative_prompt = payload.negative_prompt
+  if (payload.image) apiPayload.image = payload.image
+
+  let d: any
+  try {
+    d = await gptFetch('/v1/images/generations', apiPayload)
+  } catch (e: any) {
+    throw new Error('网络请求失败: ' + (e?.message || e))
+  }
+  mlog('seedream response', d)
+
+  // Detect error response from proxy
+  if (d?.error) {
+    const msg = typeof d.error === 'string' ? d.error : (d.error.message || JSON.stringify(d.error))
+    throw new Error('接口错误: ' + msg)
+  }
+  if (d?.message && !d?.data) {
+    throw new Error('接口错误: ' + d.message)
+  }
+
+  // Synchronous response: images returned directly
+  if (d?.data && Array.isArray(d.data)) {
+    const taskId = (d.created?.toString() || Date.now().toString()) + '_' + Math.random().toString(36).slice(2, 8)
+    const images = d.data.map((img: any, idx: number) => ({
+      index: idx,
+      url: img.url || (img.b64_json ? 'data:image/png;base64,' + img.b64_json : '')
+    }))
+    const task: SeedreamTask = {
+      cat: 'image',
+      prompt,
+      negative_prompt: negPrompt,
+      model: payload.model,
+      size: payload.size,
+      quality: payload.quality,
+      n: payload.n,
+      last_feed: Date.now(),
+      code: 0,
+      message: 'success',
+      request_id: taskId,
+      data: {
+        task_id: taskId,
+        task_status: 'succeed',
+        task_status_msg: '',
+        created_at: Date.now(),
+        updated_at: Date.now(),
+        task_result: { images }
+      }
+    }
+    store.save(task)
+    homeStore.setMyData({ act: 'SeedreamFeed' })
+    return task
+  }
+
+  // Async response with task_id
+  if (d?.data?.task_id) {
+    const task = d as SeedreamTask
+    task.cat = 'image'
+    task.prompt = prompt
+    task.negative_prompt = negPrompt
+    task.model = payload.model
+    task.size = payload.size
+    task.quality = payload.quality
+    task.n = payload.n
+    task.last_feed = Date.now()
+    store.save(task)
+    homeStore.setMyData({ act: 'SeedreamFeed' })
+    return task
+  }
+
+  throw new Error('未知响应格式: ' + JSON.stringify(d).slice(0, 200))
+}

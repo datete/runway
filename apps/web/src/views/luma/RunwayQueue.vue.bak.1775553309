@@ -232,39 +232,7 @@
                 <SvgIcon icon="ri:close-circle-line" class="text-sm" />
                 <span class="action-btn-label">取消</span>
               </button>
-            
-  <NModal v-model:show="showDownloadPicker" preset="card" :title="'下载视频'" style="width: 340px; background: rgba(15,15,25,0.98); border: 1px solid rgba(255,255,255,0.06); border-radius: 16px;" :segmented="{ content: true }">
-    <div v-if="downloadJob" class="space-y-3 py-1">
-      <button
-        v-if="downloadJob.resultUrl && downloadJob.resultUrl.startsWith('/img/')"
-        class="flex w-full items-center gap-3 rounded-xl border border-sky-400/15 bg-sky-500/[0.06] px-4 py-3 text-left transition-all hover:border-sky-400/30 hover:bg-sky-500/12 active:scale-[0.98]"
-        @click="doDownload(downloadJob.resultUrl!, `video-${downloadJob.id.slice(0,8)}.mp4`)"
-      >
-        <div class="flex h-9 w-9 items-center justify-center rounded-lg bg-sky-500/15">
-          <SvgIcon icon="ri:server-line" class="text-base text-sky-400" />
-        </div>
-        <div>
-          <p class="text-[13px] font-medium text-white/80">服务器缓存下载</p>
-          <p class="text-[11px] text-white/30">从本地服务器下载,速度快</p>
-        </div>
-      </button>
-      <button
-        v-if="directUrl"
-        class="flex w-full items-center gap-3 rounded-xl border border-emerald-400/15 bg-emerald-500/[0.06] px-4 py-3 text-left transition-all hover:border-emerald-400/30 hover:bg-emerald-500/12 active:scale-[0.98]"
-        @click="doDownload(directUrl, `video-${downloadJob.id.slice(0,8)}-hd.mp4`)"
-      >
-        <div class="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-500/15">
-          <SvgIcon icon="ri:cloud-line" class="text-base text-emerald-400" />
-        </div>
-        <div>
-          <p class="text-[13px] font-medium text-white/80">直连下载</p>
-          <p class="text-[11px] text-white/30">从源站直接下载,可能较慢</p>
-        </div>
-      </button>
-      <p v-if="!directUrl && !(downloadJob.resultUrl && downloadJob.resultUrl.startsWith('/img/'))" class="text-center text-[10px] text-white/20">暂无下载地址</p>
-    </div>
-  </NModal>
-</template>
+            </template>
             确定取消此任务?
           </NPopconfirm>
 
@@ -280,15 +248,17 @@
           </button>
 
           <!-- Download (completed jobs) -->
-          <button
+          <a
             v-if="job.status === 'completed' && job.resultUrl"
+            :href="job.resultUrl"
+            target="_blank"
+            rel="noreferrer"
             class="action-btn text-emerald-400/60 hover:text-emerald-400 hover:bg-emerald-400/10"
             title="下载"
-            @click="openDownloadPicker(job)"
           >
             <SvgIcon icon="ri:download-line" class="text-sm" />
             <span class="action-btn-label">下载</span>
-          </button>
+          </a>
 
           <!-- Delete (any job) -->
           <NPopconfirm @positive-click="handleDelete(job.id)">
@@ -308,7 +278,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, reactive, nextTick, watch } from 'vue'
-import { NPopconfirm, NSpin, NModal, useMessage } from 'naive-ui'
+import { NPopconfirm, NSpin, useMessage } from 'naive-ui'
 import { SvgIcon } from '@/components/common'
 import { fetchJobs, cancelJob, retryJob, deleteJob } from '@/api/runwayJobs'
 
@@ -330,7 +300,6 @@ interface RunwayJob {
   finishedAt: string | null
   errorMessage: string | null
   retryCount: number
-  videoUrl?: string | null
 }
 
 type TabKey = 'all' | 'queued' | 'processing' | 'completed' | 'failed'
@@ -549,40 +518,6 @@ onUnmounted(() => {
     clockTimer = null
   }
 })
-
-// ===== Download picker (server cache vs direct) =====
-const showDownloadPicker = ref(false)
-const downloadJob = ref<RunwayJob | null>(null)
-const openDownloadPicker = (job: RunwayJob) => {
-  downloadJob.value = job
-  showDownloadPicker.value = true
-}
-const directUrl = computed(() => {
-  const job = downloadJob.value
-  if (!job) return ''
-  if (job.videoUrl) return job.videoUrl
-  if (job.resultUrl && job.resultUrl.startsWith('http')) return job.resultUrl
-  return ''
-})
-const doDownload = async (url: string, filename: string) => {
-  showDownloadPicker.value = false
-  message.info('开始下载...')
-  try {
-    const res = await fetch(url)
-    if (!res.ok) throw new Error('下载失败')
-    const blob = await res.blob()
-    const objectUrl = URL.createObjectURL(blob)
-    const anchor = document.createElement('a')
-    anchor.href = objectUrl
-    anchor.download = filename
-    anchor.click()
-    URL.revokeObjectURL(objectUrl)
-    message.success('下载完成')
-  } catch {
-    message.warning('浏览器下载失败,将在新窗口打开')
-    window.open(url, '_blank')
-  }
-}
 </script>
 
 <style scoped>

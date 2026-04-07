@@ -175,7 +175,7 @@ export class RunwayService {
 
     // Get counts via single raw SQL, plus paginated jobs
     const isAdmin = role === "admin";
-    const userFilter = isAdmin ? "" : ` AND "userId" = '${userId}'`;
+    const userFilter = isAdmin ? "" : ` AND "user_id" = '${userId}'`;
     const countsQuery = (prisma as any).$queryRawUnsafe(`
       SELECT
         COUNT(*) FILTER (WHERE status NOT IN ('deleted')) AS all,

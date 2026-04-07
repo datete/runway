@@ -3,7 +3,7 @@ import { computed, h, onMounted, onUnmounted, ref, watch } from 'vue'
 import {
   NButton, NDataTable, NDrawer, NDrawerContent, NForm, NFormItem,
   NInput, NInputNumber, NModal, NPagination, NProgress, NSelect,
-  NSwitch, NTabPane, NTabs, NTag, useMessage,
+  NSlider, NSwitch, NTabPane, NTabs, NTag, NTooltip, useMessage,
 } from 'naive-ui'
 import { useRunwayJwt } from '@/composables/useRunwayJwt'
 import { SvgIcon } from '@/components/common'
@@ -26,19 +26,20 @@ interface AdminLog {
 interface UserStat {
   id: string; username: string; role: string; isActive: boolean
   maxConcurrency: number | null; dailyQuota: number | null; totalQuota: number | null
-  totalJobs: number; todayJobs: number; todayCompleted: number; todayFailed: number; currentActive: number
+  totalJobs: number; todayJobs: number; todayCompleted: number; todayFailed: number; currentActive: number; hourlyCompleted: number
 }
 interface DashboardOverview {
   totalUsers: number; activeUsers: number; totalJobs: number; todayJobs: number
   queuedJobs: number; processingJobs: number; completedJobs: number; failedJobs: number
-  todayCompleted: number; todayFailed: number
+  todayCompleted: number; todayFailed: number; hourlyCompleted: number
   totalAccounts: number; activeAccounts: number; totalMaxConcurrency: number; totalCurrentConcurrency: number
+  speedMultiplier?: number
 }
 interface AccountInfo {
   id: string; label: string; tokenShort: string; teamId: string; proxyUrl: string | null
   maxConcurrency: number; currentConcurrency: number; isActive: boolean; priority: number
   inCooldown: boolean; batchResting: boolean; batchRestTtl: number; batchCount: number; batchLimit: number
-  totalGenerated: number; lastUsedAt: string | null
+  totalGenerated: number; hourlyGenerated: number; lastUsedAt: string | null
   lastErrorAt: string | null; lastErrorMessage: string | null
   tokenExpiresAt: string | null; createdAt: string ; activeTasks?: ActiveTask[]
 }
@@ -47,7 +48,7 @@ interface ActiveTask {
 }
 interface AccountStat {
   id: string; label: string; tokenShort: string; isActive: boolean
-  maxConcurrency: number; currentConcurrency: number; totalGenerated: number; activeTasks?: ActiveTask[]
+  maxConcurrency: number; currentConcurrency: number; totalGenerated: number; hourlyGenerated: number; activeTasks?: ActiveTask[]
 }
 
 interface DeviceInfo {
@@ -69,7 +70,62 @@ const message = useMessage()
 const { headers } = useRunwayJwt()
 
 /* ── State ── */
-const overview = ref<DashboardOverview>({ totalUsers: 0, activeUsers: 0, totalJobs: 0, todayJobs: 0, queuedJobs: 0, processingJobs: 0, completedJobs: 0, failedJobs: 0, todayCompleted: 0, todayFailed: 0, totalAccounts: 0, activeAccounts: 0, totalMaxConcurrency: 0, totalCurrentConcurrency: 0 })
+const overview = ref<DashboardOverview>({ totalUsers: 0, activeUsers: 0, totalJobs: 0, todayJobs: 0, queuedJobs: 0, processingJobs: 0, completedJobs: 0, failedJobs: 0, todayCompleted: 0, todayFailed: 0, hourlyCompleted: 0, totalAccounts: 0, activeAccounts: 0, totalMaxConcurrency: 0, totalCurrentConcurrency: 0, speedMultiplier: 1.0 })
+
+/* ── Global speed multiplier ── */
+// UI value is percent (10..200); backend value is float (0.1..2.0)
+const speedPct = ref<number>(100)
+const speedSyncing = ref(false)
+let speedDebounceTimer: ReturnType<typeof setTimeout> | null = null
+let speedSuppressFromServer = false
+const speedColorClass = computed(() => {
+  const p = speedPct.value
+  if (p < 50) return 'speed-zone-slow'
+  if (p <= 120) return 'speed-zone-normal'
+  if (p <= 160) return 'speed-zone-fast'
+  return 'speed-zone-extreme'
+})
+const speedZoneLabel = computed(() => {
+  const p = speedPct.value
+  if (p < 50) return '慢'
+  if (p <= 120) return '正常'
+  if (p <= 160) return '快'
+  return '激进'
+})
+const isDefaultSpeed = computed(() => speedPct.value === 100)
+const pushSpeed = async (pct: number) => {
+  const mult = Math.max(0.1, Math.min(2.0, Math.round(pct) / 100))
+  try {
+    speedSyncing.value = true
+    const res = await fetch('/api/runway/admin/speed', {
+      method: 'POST',
+      headers: { ...headers(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ multiplier: mult }),
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      message.error(err.error || '更新失败')
+      return
+    }
+    const data = await res.json()
+    message.success(`已更新: ${data.multiplier}x`)
+  } catch (e: any) {
+    message.error(e.message || '网络错误')
+  } finally {
+    speedSyncing.value = false
+  }
+}
+const onSpeedChange = (v: number) => {
+  speedPct.value = v
+  if (speedSuppressFromServer) return
+  if (speedDebounceTimer) clearTimeout(speedDebounceTimer)
+  speedDebounceTimer = setTimeout(() => { pushSpeed(v) }, 300)
+}
+const setSpeedPreset = (v: number) => {
+  speedPct.value = v
+  if (speedDebounceTimer) clearTimeout(speedDebounceTimer)
+  pushSpeed(v)
+}
 const userStats = ref<UserStat[]>([])
 const accountStatsData = ref<AccountStat[]>([])
 
@@ -212,6 +268,7 @@ const dashCards = computed(() => [
   { icon: 'ri:group-line', label: '总用户', value: overview.value.totalUsers, sub: `活跃 ${overview.value.activeUsers}`, color: 'from-blue-500 to-cyan-500' },
   { icon: 'ri:movie-2-line', label: '总任务', value: overview.value.totalJobs, sub: `完成 ${overview.value.completedJobs} · 失败 ${overview.value.failedJobs}`, color: 'from-violet-500 to-purple-600' },
   { icon: 'ri:sparkling-2-line', label: '今日生成', value: overview.value.todayJobs, sub: `完成 ${overview.value.todayCompleted} · 失败 ${overview.value.todayFailed}`, color: 'from-amber-500 to-orange-500' },
+  { icon: 'ri:pulse-line', label: '近1h完成', value: overview.value.hourlyCompleted, sub: '最近1小时全局', color: 'from-emerald-500 to-cyan-500' },
   { icon: 'ri:loader-4-line', label: '排队 / 处理中', value: overview.value.queuedJobs + overview.value.processingJobs, sub: `排队 ${overview.value.queuedJobs} · 处理 ${overview.value.processingJobs}`, color: 'from-emerald-500 to-teal-600' },
   { icon: 'ri:key-2-line', label: '账号', value: `${overview.value.activeAccounts}/${overview.value.totalAccounts}`, sub: `并发 ${overview.value.totalCurrentConcurrency}/${overview.value.totalMaxConcurrency}`, color: 'from-pink-500 to-rose-600' },
 ])
@@ -228,6 +285,15 @@ const fetchDashboard = async () => {
     userStats.value = data.userStats || []
     accountStatsData.value = data.accountStats || []
     lastSyncAt.value = new Date()
+    // Sync global speed (only if user isn't mid-drag / pending update)
+    if (!speedSyncing.value && !speedDebounceTimer && typeof data.overview?.speedMultiplier === 'number') {
+      const serverPct = Math.round(data.overview.speedMultiplier * 100)
+      if (serverPct !== speedPct.value) {
+        speedSuppressFromServer = true
+        speedPct.value = serverPct
+        setTimeout(() => { speedSuppressFromServer = false }, 50)
+      }
+    }
   } catch {}
 }
 
@@ -708,8 +774,47 @@ onUnmounted(() => { if (autoRefreshTimer) clearInterval(autoRefreshTimer) })
           </div>
         </div>
 
+        <!-- 全局速度 card -->
+        <div class="speed-card relative overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.03] p-5 backdrop-blur-xl" :class="speedColorClass">
+          <div class="absolute inset-0 pointer-events-none speed-card-bg" />
+          <div class="relative flex flex-col gap-4 lg:flex-row lg:items-center">
+            <div class="flex-shrink-0 text-center lg:w-48">
+              <div class="flex items-center justify-center gap-2">
+                <SvgIcon icon="ri:speed-up-line" class="text-lg" />
+                <p class="text-sm font-bold text-white/90">全局速度</p>
+                <NTooltip>
+                  <template #trigger>
+                    <SvgIcon icon="ri:question-line" class="text-xs text-white/40 cursor-help" />
+                  </template>
+                  <div style="max-width: 280px">数值越高人类行为延迟越短，提交速度越快。100%=正常节奏，200%=最激进，10%=极慢。冷却与批次休息不受影响。</div>
+                </NTooltip>
+              </div>
+              <p class="speed-big-number mt-2">{{ speedPct }}%</p>
+              <p class="text-[11px] text-white/40">全局速度倍率 · {{ speedZoneLabel }}</p>
+              <div v-if="!isDefaultSpeed" class="mt-2 inline-flex items-center gap-1 rounded-full border border-amber-400/40 bg-amber-400/10 px-2 py-0.5 text-[10px] font-semibold text-amber-300 speed-pulse">
+                <span class="h-1.5 w-1.5 rounded-full bg-amber-400" /> 非默认速度
+              </div>
+            </div>
+            <div class="flex-1">
+              <NSlider
+                :value="speedPct"
+                :min="10"
+                :max="200"
+                :step="5"
+                :tooltip="true"
+                :format-tooltip="(v: number) => `${v}%`"
+                @update:value="onSpeedChange"
+              />
+              <div class="mt-3 flex flex-wrap items-center gap-2">
+                <span class="text-[11px] text-white/35 mr-1">快速预设:</span>
+                <NButton v-for="p in [25, 50, 100, 150, 200]" :key="p" size="tiny" :type="speedPct === p ? 'primary' : 'default'" :ghost="speedPct !== p" @click="setSpeedPreset(p)">{{ p }}%</NButton>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- Dashboard overview cards -->
-        <div class="grid grid-cols-2 gap-3 sm:grid-cols-5">
+        <div class="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
           <div
             v-for="card in dashCards"
             :key="card.label"
@@ -765,6 +870,7 @@ onUnmounted(() => { if (autoRefreshTimer) clearInterval(autoRefreshTimer) })
                   <span>总任务 <b class="text-white/70">{{ u.totalJobs }}</b><template v-if="u.totalQuota !== null">/{{ u.totalQuota }}</template></span>
                   <span>今日 <b class="text-white/70">{{ u.todayJobs }}</b><template v-if="u.dailyQuota !== null">/{{ u.dailyQuota }}</template></span>
                   <span>今日完成 <b class="text-emerald-400">{{ u.todayCompleted }}</b></span>
+                  <span>近1h <b :class="u.hourlyCompleted > 0 ? 'text-emerald-400' : 'text-white/30'">{{ u.hourlyCompleted }}</b></span>
                   <span v-if="u.todayFailed > 0">失败 <b class="text-red-400">{{ u.todayFailed }}</b></span>
                   <span>并发 <b :class="u.currentActive > 0 ? 'text-orange-400' : 'text-emerald-400'">{{ u.currentActive }}</b>/<b class="text-white/70">{{ u.maxConcurrency ?? '不限' }}</b></span>
                 </div>
@@ -813,7 +919,22 @@ onUnmounted(() => { if (autoRefreshTimer) clearInterval(autoRefreshTimer) })
                   <span class="text-sm font-semibold text-white/90">{{ a.label }}</span>
                   <NTag :type="a.isActive ? 'success' : 'warning'" size="tiny" round :bordered="false">{{ a.isActive ? '活跃' : '停用' }}</NTag>
                 </div>
-                <span class="text-[11px] text-white/35">已生成 <b class="text-white/60">{{ a.totalGenerated }}</b></span>
+                <div class="flex items-center gap-2 text-[11px] text-white/35">
+                  <NTooltip trigger="hover" placement="top">
+                    <template #trigger>
+                      <span class="inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 transition-colors"
+                        :class="a.hourlyGenerated > 0 ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300' : 'border-white/10 bg-white/[0.03] text-white/30'">
+                        <span class="relative flex h-1.5 w-1.5">
+                          <span v-if="a.hourlyGenerated > 0" class="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" />
+                          <span class="relative inline-flex h-1.5 w-1.5 rounded-full" :class="a.hourlyGenerated > 0 ? 'bg-emerald-400' : 'bg-white/30'" />
+                        </span>
+                        近1h <b class="ml-0.5">{{ a.hourlyGenerated }}</b>
+                      </span>
+                    </template>
+                    最近1小时完成的视频数
+                  </NTooltip>
+                  <span>已生成 <b class="text-white/60">{{ a.totalGenerated }}</b></span>
+                </div>
               </div>
               <div class="px-4 py-2.5">
                 <div class="flex items-center justify-between text-[11px] text-white/40">
@@ -915,6 +1036,7 @@ onUnmounted(() => { if (autoRefreshTimer) clearInterval(autoRefreshTimer) })
                         <span>Token: <span class="text-white/50">...{{ acc.tokenShort }}</span></span>
                         <span>TeamID: <span class="text-white/50">{{ acc.teamId }}</span></span>
                         <span>总生成: <b class="text-white/70">{{ acc.totalGenerated }}</b></span>
+                        <span>近1h: <b :class="acc.hourlyGenerated > 0 ? 'text-emerald-400' : 'text-white/30'">{{ acc.hourlyGenerated }}</b></span>
                         <span>并发: <b :class="acc.currentConcurrency >= acc.maxConcurrency ? 'text-orange-400' : 'text-emerald-400'">{{ acc.currentConcurrency }}</b>/{{ acc.maxConcurrency }}</span>
                         <span class="col-span-2 truncate" v-if="acc.proxyUrl">代理: <span class="text-white/50">{{ acc.proxyUrl }}</span></span>
                         <span class="col-span-2" v-if="acc.activeTasks && acc.activeTasks.length > 0">用户: <b class="text-violet-400">{{ acc.activeTasks.map(t => t.username).filter((v,i,a) => a.indexOf(v)===i).join(', ') }}</b></span>
@@ -1426,4 +1548,22 @@ onUnmounted(() => { if (autoRefreshTimer) clearInterval(autoRefreshTimer) })
   background: rgba(255, 255, 255, 0.06);
   border-radius: 4px;
 }
+
+/* Global speed card */
+.speed-card { transition: box-shadow 0.3s ease, border-color 0.3s ease; }
+.speed-big-number { font-size: 2.5rem; font-weight: 800; line-height: 1; color: #fff; letter-spacing: -0.02em; }
+.speed-card-bg { background: linear-gradient(135deg, rgba(99,102,241,0.06), transparent 60%, rgba(16,185,129,0.04)); }
+.speed-zone-slow { border-color: rgba(59,130,246,0.45) !important; box-shadow: 0 0 24px rgba(59,130,246,0.12); }
+.speed-zone-slow .speed-big-number { color: #60a5fa; }
+.speed-zone-normal { border-color: rgba(16,185,129,0.45) !important; box-shadow: 0 0 24px rgba(16,185,129,0.12); }
+.speed-zone-normal .speed-big-number { color: #34d399; }
+.speed-zone-fast { border-color: rgba(245,158,11,0.5) !important; box-shadow: 0 0 24px rgba(245,158,11,0.15); }
+.speed-zone-fast .speed-big-number { color: #fbbf24; }
+.speed-zone-extreme { border-color: rgba(239,68,68,0.55) !important; box-shadow: 0 0 28px rgba(239,68,68,0.2); }
+.speed-zone-extreme .speed-big-number { color: #f87171; }
+@keyframes speedPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.7; transform: scale(1.05); }
+}
+.speed-pulse { animation: speedPulse 1.6s ease-in-out infinite; }
 </style>

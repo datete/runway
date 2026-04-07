@@ -74,6 +74,28 @@ async function proxyTo3002(targetPath: string, req: express.Request, res: expres
   }
 }
 
+
+// Proxy media-cache (download caching for legacy luma/pika videos)
+const MEDIA_CACHE_BASE = process.env.MEDIA_CACHE_BASE || "http://127.0.0.1:3101";
+async function proxyToMediaCache(targetPath: string, req: express.Request, res: express.Response) {
+  try {
+    const body = req.body && Object.keys(req.body).length > 0 ? JSON.stringify(req.body) : undefined;
+    const headers: Record<string, string> = {
+      "content-type": (req.headers["content-type"] as string) || "application/json",
+    };
+    if (req.headers["x-ptoken"]) headers["x-ptoken"] = req.headers["x-ptoken"] as string;
+    const upstream = await fetch(`${MEDIA_CACHE_BASE}${targetPath}`, { method: req.method, headers, body });
+    const ct = upstream.headers.get("content-type") || "application/json";
+    res.status(upstream.status).set("content-type", ct);
+    if (upstream.body) (upstream.body as any).pipe(res); else res.end();
+  } catch (err: any) {
+    console.error("[media-cache proxy] error:", err.message);
+    res.status(502).json({ error: "media cache unavailable" });
+  }
+}
+app.use("/api/cache-video", (req, res) => proxyToMediaCache(`/api/cache-video${req.url}`, req, res));
+app.use("/videos", (req, res) => proxyToMediaCache(`/videos${req.url}`, req, res));
+
 // Proxy /api/* (except /api/runway) to web service on port 3002
 app.use('/api', (req, res) => proxyTo3002(`/api${req.url}`, req, res));
 

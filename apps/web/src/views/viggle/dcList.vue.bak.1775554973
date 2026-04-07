@@ -5,7 +5,7 @@ import {NEmpty ,NButton,NPopover, NTag,NButtonGroup,useMessage ,NPopconfirm} fro
  
 import { ref, watch } from 'vue';
 import {SvgIcon} from "@/components/common"
-import { homeStore, useAuthStore } from '@/store';
+import { homeStore } from '@/store';
 import { t } from '@/locales';
 
 const st= ref({pIndex:-1});
@@ -27,35 +27,6 @@ const TaskDown=async (item:ViggleTask)=>{
     link.click();
     document.body.removeChild(link);
     
-}
-
-
-
-// ===== Download picker =====
-const _ptoken = () => (useAuthStore().token || '')
-const _triggerDownload = (url: string, name: string) => {
-  const a = document.createElement('a')
-  a.href = url; a.download = name; a.target = '_blank'
-  document.body.appendChild(a); a.click(); document.body.removeChild(a)
-}
-const viggleDirectDown = (item: ViggleTask) => {
-  if (!item.result) { ms.warning('无下载地址'); return }
-  _triggerDownload(item.result, item.taskID + '.mp4')
-}
-const viggleServerDown = async (item: ViggleTask) => {
-  if (!item.result) { ms.warning('无下载地址'); return }
-  ms.info('服务器缓存中...')
-  try {
-    const r = await fetch('/api/cache-video', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-ptoken': _ptoken() },
-      body: JSON.stringify({ url: item.result, key: item.taskID }),
-    })
-    const d = await r.json()
-    if (!r.ok || !d.localUrl) throw new Error(d.error || '缓存失败')
-    _triggerDownload(d.localUrl, item.taskID + '.mp4')
-    ms.success(d.cached ? '已使用缓存' : '缓存完成')
-  } catch (e: any) { ms.error(e.message || '失败') }
 }
 
 watch(()=>homeStore.myData.act, (n)=>{
@@ -104,15 +75,7 @@ initLoad()
 
                     
                       <n-button-group size="tiny">
-                        <n-popover trigger="click" placement="bottom">
-                          <template #trigger>
-                            <n-button size="tiny" round ghost><SvgIcon icon="mdi:download" /> {{ $t('video.download') }}</n-button>
-                          </template>
-                          <div class="flex flex-col gap-2 p-1 min-w-[140px]">
-                            <n-button size="small" type="primary" @click="viggleServerDown(item)">服务器下载</n-button>
-                            <n-button size="small" @click="viggleDirectDown(item)">直链下载</n-button>
-                          </div>
-                        </n-popover>
+                        <n-button  size="tiny" round ghost @click="TaskDown( item )"   ><SvgIcon icon="mdi:download" /> {{ $t('video.download') }}</n-button>
                         <!-- <n-button   size="tiny"  round ghost   ><SvgIcon icon="ri:video-add-line" /> {{ $t('video.extend') }}</n-button> -->
                         <n-button   size="tiny"  round ghost    > 
                                 <n-popconfirm @positive-click="()=>deleteGo(item)" placement="bottom">

@@ -5,6 +5,7 @@ import aiFace from './aiFace.vue'
 import aiBlend from './aiBlend.vue'
 import aiDall from './aiDall.vue'
 import aiIdeoInput from './aiIdeoInput.vue'
+import SdInput from '../seedream/sdInput.vue'
 import { useBasicLayout } from '@/hooks/useBasicLayout'
 import { SvgIcon } from '@/components/common'
 import { onMounted, ref, watch } from 'vue';
@@ -38,7 +39,7 @@ const initLoad=()=>{
     if(route.query.tab){
         st.value.tab= 'midjourney'//route.query.tab as string;
         let tt= (route.query.tab as string).toLocaleLowerCase();
-        if( ['dall.e','ideogram'].indexOf(tt)>-1 ){
+        if( ['dall.e','ideogram','seedream'].indexOf(tt)>-1 ){
            st.value.tab=tt;
         }
         handleUpdateValue(   st.value.tab )
@@ -80,6 +81,9 @@ initLoad();
     <n-tab-pane name="ideogram" tab="IdeoGram">
      <div class="p-2"> <aiIdeoInput/> </div>
     </n-tab-pane>  
+    <n-tab-pane name="seedream" tab="Seedream">
+     <div class="p-1"><SdInput /></div>
+    </n-tab-pane>
     
 
 

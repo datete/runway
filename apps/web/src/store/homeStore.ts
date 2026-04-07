@@ -174,6 +174,8 @@ const getServerInit= ():gptServerType =>{
         let old = JSON.parse(str);
         if(old) v={...v,...old};
     }
+    const validTabs=['runway','kling','pika','runwayml','pixverse','all','batch'];
+    if(!v.TAB_VIDEO||validTabs.indexOf(v.TAB_VIDEO)<0) v.TAB_VIDEO='all';
     return v;
 }
 

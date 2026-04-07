@@ -106,6 +106,15 @@ router.get("/accounts", async (_req: Request, res: Response) => {
     const accounts = await prisma.runwayAccount.findMany({
       orderBy: [{ priority: "desc" }, { createdAt: "asc" }],
     });
+    // Hourly completed count per account (last 60 min)
+    const hourAgo = new Date(Date.now() - 3600_000);
+    const hourlyRows = await prisma.runwayJob.groupBy({
+      by: ["accountId"],
+      where: { status: "completed", finishedAt: { gte: hourAgo }, accountId: { not: null } },
+      _count: { _all: true },
+    });
+    const hourlyMap: Record<string, number> = {};
+    for (const r of hourlyRows) if (r.accountId) hourlyMap[r.accountId] = r._count._all;
     // Get recent jobs per account (max 5 per account, newest first)
     const acctJobs = await prisma.runwayJob.findMany({
       where: { accountId: { not: null }, status: { not: "deleted" } },
@@ -152,6 +161,7 @@ router.get("/accounts", async (_req: Request, res: Response) => {
         batchCount: batchCount ? parseInt(batchCount, 10) : 0,
         batchLimit: batchLimit ? parseInt(batchLimit, 10) : 0,
         totalGenerated: a.totalGenerated,
+        hourlyGenerated: hourlyMap[a.id] || 0,
         lastUsedAt: a.lastUsedAt,
         lastErrorAt: a.lastErrorAt,
         lastErrorMessage: a.lastErrorMessage,
@@ -486,7 +496,8 @@ router.get("/dashboard", async (_req: Request, res: Response) => {
     todayStart.setHours(0, 0, 0, 0);
 
     const notDeleted = { not: "deleted" };
-    const [totalUsers, activeUsers, totalJobs, todayJobs, queuedJobs, processingJobs, completedJobs, failedJobs, todayCompleted, todayFailed, recentJobs] = await Promise.all([
+    const hourAgo = new Date(Date.now() - 3600_000);
+    const [totalUsers, activeUsers, totalJobs, todayJobs, queuedJobs, processingJobs, completedJobs, failedJobs, todayCompleted, todayFailed, recentJobs, hourlyCompleted, hourlyByAccount, hourlyByUser] = await Promise.all([
       prisma.user.count(),
       prisma.user.count({ where: { isActive: true } }),
       prisma.runwayJob.count({ where: { status: notDeleted } }),
@@ -501,7 +512,14 @@ router.get("/dashboard", async (_req: Request, res: Response) => {
         where: { createdAt: { gte: todayStart }, status: notDeleted },
         select: { userId: true, status: true },
       }),
+      prisma.runwayJob.count({ where: { status: "completed", finishedAt: { gte: hourAgo } } }),
+      prisma.runwayJob.groupBy({ by: ["accountId"], where: { status: "completed", finishedAt: { gte: hourAgo }, accountId: { not: null } }, _count: { _all: true } }),
+      prisma.runwayJob.groupBy({ by: ["userId"], where: { status: "completed", finishedAt: { gte: hourAgo }, userId: { not: null } }, _count: { _all: true } }),
     ]);
+    const hourlyByAccountMap: Record<string, number> = {};
+    for (const e of hourlyByAccount) { if (e.accountId) hourlyByAccountMap[e.accountId] = e._count._all; }
+    const hourlyByUserMap: Record<string, number> = {};
+    for (const e of hourlyByUser) { if (e.userId) hourlyByUserMap[e.userId] = e._count._all; }
 
     // Per-user today stats
     const userTodayMap: Record<string, { total: number; completed: number; failed: number }> = {};
@@ -552,6 +570,7 @@ router.get("/dashboard", async (_req: Request, res: Response) => {
         todayCompleted: todayInfo.completed,
         todayFailed: todayInfo.failed,
         currentActive: activeByUserMap[u.id] || 0,
+        hourlyCompleted: hourlyByUserMap[u.id] || 0,
       };
     });
 
@@ -591,6 +610,7 @@ router.get("/dashboard", async (_req: Request, res: Response) => {
         maxConcurrency: a.maxConcurrency,
         currentConcurrency: current ? parseInt(current, 10) : 0,
         totalGenerated: a.totalGenerated,
+        hourlyGenerated: hourlyByAccountMap[a.id] || 0,
         activeTasks: tasks,
       };
     }));
@@ -598,13 +618,25 @@ router.get("/dashboard", async (_req: Request, res: Response) => {
     const totalMaxConcurrency = accounts.filter(a => a.isActive).reduce((sum, a) => sum + a.maxConcurrency, 0);
     const totalCurrentConcurrency = accountStats.reduce((sum, a) => sum + a.currentConcurrency, 0);
 
+    // Read global speed multiplier
+    let speedMultiplier = 1.0;
+    try {
+      const spRaw = await redis.get("runway:speed-multiplier");
+      if (spRaw) {
+        const f = parseFloat(spRaw);
+        if (isFinite(f) && !isNaN(f)) speedMultiplier = Math.max(0.1, Math.min(2.0, f));
+      }
+    } catch {}
+
     res.json({
       overview: {
         totalUsers, activeUsers, totalJobs, todayJobs, queuedJobs, processingJobs, completedJobs, failedJobs, todayCompleted, todayFailed,
+        hourlyCompleted,
         totalAccounts: accounts.length,
         activeAccounts: accounts.filter(a => a.isActive).length,
         totalMaxConcurrency,
         totalCurrentConcurrency,
+        speedMultiplier,
       },
       userStats,
       accountStats,
@@ -676,6 +708,35 @@ router.get("/sessions/user/:userId", async (req: Request, res: Response) => {
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// ============== GLOBAL SPEED MULTIPLIER ==============
+
+// GET /api/runway/admin/speed — read current global speed multiplier
+router.get("/speed", async (_req: Request, res: Response) => {
+  try {
+    let multiplier = 1.0;
+    const raw = await redis.get("runway:speed-multiplier");
+    if (raw) {
+      const f = parseFloat(raw);
+      if (isFinite(f) && !isNaN(f)) multiplier = Math.max(0.1, Math.min(2.0, f));
+    }
+    res.json({ multiplier });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/runway/admin/speed — set global speed multiplier (0.1..2.0)
+router.post("/speed", async (req: Request, res: Response) => {
+  try {
+    const raw = req.body?.multiplier;
+    const f = typeof raw === "number" ? raw : parseFloat(raw);
+    if (!isFinite(f) || isNaN(f)) return res.status(400).json({ error: "multiplier 必须是数字" });
+    if (f < 0.1 || f > 2.0) return res.status(400).json({ error: "multiplier 必须在 0.1 到 2.0 之间" });
+    const clamped = Math.max(0.1, Math.min(2.0, f));
+    await redis.set("runway:speed-multiplier", String(clamped));
+    console.log(`[admin] global speed multiplier set to ${clamped}x by ${(req as any).user?.username || 'unknown'}`);
+    res.json({ ok: true, multiplier: clamped });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
 export { router as adminRouter };

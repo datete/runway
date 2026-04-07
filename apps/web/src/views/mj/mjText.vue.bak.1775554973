@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { useBasicLayout } from '@/hooks/useBasicLayout'
-import { NImage,NButton,NModal,NPopover,useMessage,NInput } from 'naive-ui'
+import { NImage,NButton,NModal,useMessage,NInput } from 'naive-ui'
 import { computed , ref,watch } from 'vue'
 import {flechTask ,localGet,mlog, url2base64,mjImgUrl } from '@/api'
-import { homeStore, useAuthStore } from '@/store'
+import { homeStore } from '@/store'
 import aiCanvas from './aiCanvas.vue'
 import MarkdownIt from 'markdown-it'
 import {t} from "@/locales"
@@ -21,35 +21,6 @@ const props = defineProps<Props>();
 const st = ref( { isLoadImg:false, uri_base64:'', bts:[],isShow:false, isCustom:false ,customText:'',ctrIndex:-1})
 
 const mst= ref({isShow:false,type:''});
-
-
-// ===== Download picker =====
-const _ptoken = () => (useAuthStore().token || '')
-const _triggerDownload = (url: string, name: string) => {
-  const a = document.createElement('a')
-  a.href = url; a.download = name; a.target = '_blank'
-  document.body.appendChild(a); a.click(); document.body.removeChild(a)
-}
-const mjVideoDirect = (url: string, name: string) => {
-  if (!url) { ms.warning('无下载地址'); return }
-  _triggerDownload(url, name)
-}
-const mjVideoServer = async (url: string, key: string, name: string) => {
-  if (!url) { ms.warning('无下载地址'); return }
-  ms.info('服务器缓存中...')
-  try {
-    const r = await fetch('/api/cache-video', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-ptoken': _ptoken() },
-      body: JSON.stringify({ url, key }),
-    })
-    const d = await r.json()
-    if (!r.ok || !d.localUrl) throw new Error(d.error || '缓存失败')
-    _triggerDownload(d.localUrl, name)
-    ms.success(d.cached ? '已使用缓存' : '缓存完成')
-  } catch (e: any) { ms.error(e.message || '失败') }
-}
-
 const reload= ()=>{
     flechTask(chat.value);
 }
@@ -316,15 +287,7 @@ load();
                 <div class="relative flex items-center justify-center bg-white bg-opacity-10 rounded-[8px] overflow-hidden aspect-[16/8.85]">
                     <video  :src="v.url" :controls="st.ctrIndex==k"  loop playsinline class="w-full h-full object-cover"></video>
                 </div>
-                <n-popover trigger="click" placement="bottom">
-                  <template #trigger>
-                    <span class="absolute top-[8px] right-[8px] cursor-pointer"><SvgIcon icon="mdi:download" /></span>
-                  </template>
-                  <div class="flex flex-col gap-2 p-1 min-w-[140px]">
-                    <NButton size="small" type="primary" @click="mjVideoServer(v.url, (chat.mjID||'mj')+'_'+k, (k+1)+'.mp4')">服务器下载</NButton>
-                    <NButton size="small" @click="mjVideoDirect(v.url, (k+1)+'.mp4')">直链下载</NButton>
-                  </div>
-                </n-popover>
+                <a class="absolute top-[8px] right-[8px] cursor-pointer" target="_blank" :href="v.url" :download="(k+1)+'.mp4'"><SvgIcon icon="mdi:download" /></a>
             </div>
         </div>
         <div v-else-if="chat.opt.imageUrls" class="grid grid-cols-2 grid-rows-2 gap-0 max-w-[500px]" >

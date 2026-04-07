@@ -10,7 +10,6 @@ import { ref } from 'vue'
 import { useRoute } from 'vue-router'
 import PixInput from './pixInput.vue'
 import RunwayBatch from './RunwayBatch.vue'
-import SdInput from '../seedream/sdInput.vue'
 import VideoInput from '../video/input.vue'
 import { useRunwayJwt } from '@/composables/useRunwayJwt'
 import { SvgIcon } from '@/components/common'
@@ -38,14 +37,15 @@ const initLoad = () => {
   if (route.query.tab) {
     st.value.tab = 'pixverse'
     const tt = (route.query.tab as string).toLocaleLowerCase()
-    if (['luma', 'runway', 'pika', 'kling', 'runwayml', 'pixverse', 'all', 'batch', 'seedream'].indexOf(tt) > -1)
+    if (['luma', 'runway', 'pika', 'kling', 'runwayml', 'pixverse', 'all', 'batch'].indexOf(tt) > -1)
       st.value.tab = tt
     handleUpdateValue(st.value.tab)
   }
   else {
     st.value.tab = gptServerStore.myData.TAB_VIDEO ? gptServerStore.myData.TAB_VIDEO : 'runway'
   }
-  if (st.value.tab === 'runwayml') st.value.tab = 'runway'
+  if (st.value.tab === 'runwayml' || st.value.tab === 'seedream') st.value.tab = 'runway'
+  handleUpdateValue(st.value.tab)
 }
 initLoad()
 </script>
@@ -111,9 +111,6 @@ initLoad()
         </n-tab-pane>
         <n-tab-pane name="pika" tab="Pika">
           <PikaInput />
-        </n-tab-pane>
-        <n-tab-pane name="seedream" tab="Seedream">
-          <SdInput />
         </n-tab-pane>
         <n-tab-pane name="batch" tab="批量">
           <RunwayBatch />
