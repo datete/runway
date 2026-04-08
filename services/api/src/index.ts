@@ -4,9 +4,11 @@ import cors from 'cors';
 import path from 'path';
 import fetch from 'node-fetch';
 import { runwayRouter } from './routes/runway';
+import { klingRouter } from './routes/kling';
 import { prisma } from './services/prisma';
 import { authRouter } from './routes/auth';
 import { adminRouter } from './routes/admin';
+import { reviewRouter } from './routes/review';
 
 const app = express();
 const PORT = Number(process.env.API_PORT) || 5102;
@@ -41,6 +43,8 @@ app.use('/img', express.static('/root/runway/uploads'));
 app.use('/api/runway/auth', authRouter);
 app.use('/api/runway/admin', adminRouter);
 app.use('/api/runway', runwayRouter);
+app.use('/api/kling', klingRouter);
+app.use('/api/review', reviewRouter);
 
 async function proxyTo3002(targetPath: string, req: express.Request, res: express.Response) {
   try {

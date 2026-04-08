@@ -23,6 +23,8 @@ model User {
   jobs           RunwayJob[]
   devices       UserDevice[]
   logs           UserLog[]
+  klingJobs      KlingJob[]
+  reviewTasks    ReviewTask[]
 
   @@map("users")
 }
@@ -200,4 +202,78 @@ model RunwayVideoJob {
 
   @@index([userId, createdAt(sort: Desc)], map: "idx_runway_video_jobs_user_created")
   @@map("runway_video_jobs")
+}
+
+
+model KlingJob {
+  id          String   @id @default(cuid())
+  taskId      String   @unique @map("task_id")
+  userId      String   @map("user_id") @db.Uuid
+  cat         String?
+  prompt      String?  @db.Text
+  status      String   @default("processing")
+  resultUrl   String?  @map("result_url") @db.Text
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([status])
+  @@map("kling_jobs")
+}
+
+model ReviewTask {
+  id              String       @id @default(cuid())
+  userId          String       @map("user_id") @db.Uuid
+  title           String?
+  genPrompt       String       @map("gen_prompt")
+  qcPrompt        String       @map("qc_prompt")
+  refImages       Json?        @map("ref_images")
+  aspectRatio     String       @default("1:1") @map("aspect_ratio")
+  resolution      String       @default("2k")
+  targetCount     Int          @map("target_count")
+  overGenRatio    Float        @default(2.0) @map("over_gen_ratio")
+  maxRounds       Int          @default(3) @map("max_rounds")
+  currentRound    Int          @default(0) @map("current_round")
+  passedCount     Int          @default(0) @map("passed_count")
+  status          String       @default("running")
+  createdAt       DateTime     @default(now()) @map("created_at")
+  updatedAt       DateTime     @updatedAt @map("updated_at")
+  user            User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items           ReviewItem[]
+
+  @@index([userId, createdAt])
+  @@map("review_tasks")
+}
+
+model ReviewItem {
+  id              String     @id @default(cuid())
+  taskId          String     @map("task_id")
+  round           Int        @default(1)
+  status          String     @default("pending")
+  seedreamJobId   String?    @map("seedream_job_id")
+  currentImageUrl String?    @map("current_image_url")
+  finalImageUrl   String?    @map("final_image_url")
+  lastReason      String?    @map("last_reason")
+  history         Json?
+  createdAt       DateTime   @default(now()) @map("created_at")
+  updatedAt       DateTime   @updatedAt @map("updated_at")
+  task            ReviewTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([taskId])
+  @@index([status])
+  @@map("review_items")
+}
+
+model ReviewEvent {
+  id        String   @id @default(cuid())
+  taskId    String   @map("task_id")
+  itemId    String?  @map("item_id")
+  round     Int?
+  type      String   @db.VarChar(32)
+  payload   Json?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([taskId, createdAt])
+  @@map("review_events")
 }

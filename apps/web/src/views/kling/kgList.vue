@@ -3,12 +3,14 @@ import { LazyImg, Waterfall } from 'vue-waterfall-plugin-next'
 import 'vue-waterfall-plugin-next/dist/style.css'
 
 import { KlingTask, klingStore } from '@/api/klingStore'
-import { nextTick, ref, watch } from 'vue'
-import { NEmpty, NButton, NPopover, NButtonGroup, NSpin, NImage, NPopconfirm, useMessage } from 'naive-ui'
+import { nextTick, ref, watch, onMounted } from 'vue'
+import { NEmpty, NButton, NPopover, NButtonGroup, NSpin, NImage, NPopconfirm, NSelect, useMessage } from 'naive-ui'
 import { ViewCard } from 'vue-waterfall-plugin-next/dist/types/types/waterfall'
 import { useBasicLayout } from '@/hooks/useBasicLayout'
 import { homeStore } from '@/store'
 import { klingFeed } from '@/api/kling'
+import { listKlingJobs, listKlingJobUsers } from '@/api/klingServer'
+import { useRunwayUser } from '@/composables/useRunwayUser'
 import { mlog } from '@/api'
 import { SvgIcon } from '@/components/common'
 import { t } from '@/locales'
@@ -59,12 +61,102 @@ const goShow2 = (item: any) => {
   nextTick(() => showImg.value?.click())
 }
 
+// ---- Admin / server-mirror state ----
+const { isAdmin, username: currentUsername } = useRunwayUser()
+const serverMode = ref(false)
+const selectedUserId = ref<string | null>(null)
+const userOptions = ref<{ label: string; value: string | null }[]>([])
+const loadingUsers = ref(false)
+const loadingJobs = ref(false)
+
+function mapServerJobToKlingTask(j: any): any {
+  const isImage = j.cat === "image"
+  const url = j.resultUrl || ""
+  return {
+    cat: j.cat,
+    prompt: j.prompt,
+    last_feed: Date.parse(j.updatedAt || j.createdAt || "") || Date.now(),
+    code: 0,
+    message: "",
+    request_id: j.id || j.taskId,
+    data: {
+      task_id: j.taskId,
+      task_status: j.status || "",
+      task_status_msg: "",
+      created_at: Date.parse(j.createdAt || "") || 0,
+      updated_at: Date.parse(j.updatedAt || "") || 0,
+      task_result: isImage
+        ? { images: url ? [{ index: 0, url }] : null, videos: null }
+        : { images: null, videos: url ? [{ id: j.taskId, url, duration: "" }] : null },
+    },
+    _serverJob: j,
+  }
+}
+
+async function loadAdminUsers() {
+  if (!isAdmin.value) return
+  loadingUsers.value = true
+  try {
+    const { users } = await listKlingJobUsers()
+    const opts: { label: string; value: string | null }[] = [
+      { label: "全部", value: null },
+      { label: "我自己 (localStorage)", value: "__self__" as any },
+    ]
+    for (const u of users) {
+      opts.push({ label: u.username + " (" + u.jobCount + ")", value: u.id })
+    }
+    userOptions.value = opts
+  } finally {
+    loadingUsers.value = false
+  }
+}
+
+async function loadServerJobs(userId: string | null) {
+  loadingJobs.value = true
+  try {
+    const params: any = { limit: 200 }
+    if (userId) params.userId = userId
+    const { jobs } = await listKlingJobs(params)
+    list.value = jobs.map(mapServerJobToKlingTask) as any
+    toList2()
+  } finally {
+    loadingJobs.value = false
+  }
+}
+
+async function onUserSelect(val: string | null) {
+  selectedUserId.value = val
+  if (val === "__self__") {
+    serverMode.value = false
+    initLoad()
+  } else {
+    serverMode.value = true
+    await loadServerJobs(val)
+  }
+}
+
+function isOwnCard(item: any): boolean {
+  if (!serverMode.value) return true
+  const sj = item.task && item.task._serverJob
+  if (!sj) return true
+  return sj.user && sj.user.username === currentUsername.value
+}
+
 initLoad()
 
+onMounted(() => {
+  if (isAdmin.value) {
+    loadAdminUsers().then(() => {
+      serverMode.value = true
+      loadServerJobs(null)
+    })
+  }
+})
+
 watch(() => homeStore.myData.act, (n) => {
-  if (n === 'KlingFeed') {
+  if (n === "KlingFeed") {
     st.value.isStart = false
-    initLoad()
+    if (!serverMode.value) initLoad()
   }
 })
 
@@ -83,6 +175,28 @@ const deleteGo = (item: any) => {
 </script>
 
 <template>
+  <!-- Admin user filter bar -->
+  <div v-if="isAdmin" class="kg-admin-bar px-3 pt-4 pb-2 flex items-center gap-2 flex-wrap">
+    <div class="flex items-center gap-1.5 text-[11px] text-violet-300/80 font-medium">
+      <SvgIcon icon="mdi:shield-account" class="text-sm" />
+      <span>管理员视图</span>
+    </div>
+    <NSelect
+      :value="selectedUserId"
+      :options="userOptions"
+      :loading="loadingUsers"
+      size="small"
+      style="max-width: 260px; min-width: 180px;"
+      placeholder="选择用户"
+      @update:value="onUserSelect"
+    />
+    <NButton size="tiny" ghost @click="loadAdminUsers" :loading="loadingUsers">
+      <SvgIcon icon="mdi:refresh" />
+    </NButton>
+    <span v-if="loadingJobs" class="text-[11px] text-white/40">加载中...</span>
+    <span v-else-if="serverMode" class="text-[11px] text-white/40">{{ list.length }} 个任务 (服务器)</span>
+  </div>
+
   <!-- Waterfall list -->
   <div v-if="list2.length > 0" class="kg-list-wrap px-3 py-4">
     <Waterfall
@@ -107,6 +221,15 @@ const deleteGo = (item: any) => {
 
           <!-- Status accent strip (left border) -->
           <div class="kg-status-strip" />
+
+          <!-- Username badge (server-mode only) -->
+          <div
+            v-if="serverMode && item.task._serverJob && item.task._serverJob.user && item.task._serverJob.user.username"
+            class="kg-user-badge absolute top-2 right-2 z-30 flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium backdrop-blur-md bg-black/45 text-white/85 border border-white/15"
+          >
+            <SvgIcon icon="mdi:account" class="text-[11px]" />
+            <span>{{ item.task._serverJob.user.username }}</span>
+          </div>
 
           <!-- Status badge (top-left) -->
           <div
@@ -230,7 +353,7 @@ const deleteGo = (item: any) => {
                 class="absolute inset-0 flex flex-col items-center justify-center gap-2 p-3"
               >
                 <SvgIcon icon="mdi:refresh" class="text-2xl text-violet-300" />
-                <NButton size="small" type="primary" ghost @click="getFeed(item)">
+                <NButton size="small" type="primary" ghost :disabled="!isOwnCard(item)" @click="isOwnCard(item) && getFeed(item)">
                   {{ $t('video.repeat2') }}
                 </NButton>
               </div>
@@ -296,8 +419,8 @@ const deleteGo = (item: any) => {
               >
                 <SvgIcon icon="mdi:download" class="text-sm" />
               </a>
-              <!-- Delete -->
-              <NPopconfirm @positive-click="() => deleteGo(item)" placement="top">
+              <!-- Delete (own cards only) -->
+              <NPopconfirm v-if="isOwnCard(item)" @positive-click="() => deleteGo(item)" placement="top">
                 <template #trigger>
                   <button
                     class="action-btn w-7 h-7 rounded-full bg-black/50 backdrop-blur-sm border border-white/15 flex items-center justify-center text-white/70 hover:text-red-400 hover:bg-black/70 transition-all duration-150"
@@ -308,6 +431,13 @@ const deleteGo = (item: any) => {
                 </template>
                 {{ $t('mj.confirmDelete') }}
               </NPopconfirm>
+              <span
+                v-if="serverMode && !isOwnCard(item)"
+                class="action-btn w-7 h-7 rounded-full bg-black/30 border border-white/10 flex items-center justify-center text-white/30"
+                title="只读 (其他用户)"
+              >
+                <SvgIcon icon="mdi:eye" class="text-sm" />
+              </span>
             </div>
           </div>
 

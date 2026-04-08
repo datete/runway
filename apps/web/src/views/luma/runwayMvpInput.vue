@@ -36,7 +36,7 @@ const exploreMode = ref(true)
 const duration = ref(5)
 const resolution = ref('1076x1920')
 const quality = ref('std')
-const sound = ref(true)
+const sound = ref(false)
 const cfgScale = ref(0.5)
 
 // Pro mode: reference video

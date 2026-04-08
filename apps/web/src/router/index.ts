@@ -142,6 +142,12 @@ const routes: RouteRecordRaw[] = [
   // },
 
   {
+    path: '/agent',
+    name: 'agent',
+    component: () => import('@/views/agent/agentLayout.vue'),
+  },
+
+  {
     path: '/404',
     name: '404',
     component: () => import('@/views/exception/404/index.vue'),

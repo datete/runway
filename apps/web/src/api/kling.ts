@@ -2,6 +2,7 @@ import { gptServerStore, homeStore, useAuthStore } from "@/store";
 import { mlog } from "./mjapi";
 import { KlingTask, klingStore } from "./klingStore";
 import { sleep } from "./suno";
+import { updateKlingJob } from "./klingServer";
 
 
 
@@ -91,6 +92,7 @@ export const klingFetch=(url:string,data?:any,opt2?:any )=>{
 
 }
 
+const _klingSeenTerminal = new Set<string>()
 export const klingFeed= async(id:string,cat:string,prompt:string)=>{
     const sunoS = new klingStore();
     let url= '/v1/images/generations/' //images或videos
@@ -115,7 +117,13 @@ export const klingFeed= async(id:string,cat:string,prompt:string)=>{
             //mlog("a",a  )
             sunoS.save( task )
             homeStore.setMyData({act:'KlingFeed'});
-            if(  task.data.task_status =='failed' || 'succeed'== task.data.task_status ){
+            const status = task.data.task_status
+            const resultUrl = task.data.task_result?.videos?.[0]?.url || task.data.task_result?.images?.[0]?.url || ''
+            if (!_klingSeenTerminal.has(id) && (status === 'succeed' || status === 'failed' || resultUrl)) {
+                updateKlingJob(id, { status, resultUrl })
+                if (status === 'succeed' || status === 'failed') _klingSeenTerminal.add(id)
+            }
+            if(  status =='failed' || 'succeed'== status ){
                 break;
             }
         }catch(e){

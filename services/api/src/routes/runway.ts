@@ -506,6 +506,16 @@ runwayRouter.get("/seedream/:id", authMiddleware, async (req: any, res: any) => 
               errorMessage: err || row.errorMessage,
             },
           });
+          // review.engine hook — fire-and-forget
+          try {
+            if (status === "SUCCEEDED" && images && images[0]?.url) {
+              const eng = await import("../services/review.engine");
+              eng.onSeedreamCompleted(row.id, images[0].url).catch((e:any)=>console.error("[review hook]",e?.message));
+            } else if (status === "FAILED") {
+              const eng = await import("../services/review.engine");
+              eng.onSeedreamFailed?.(row.id).catch?.(()=>{});
+            }
+          } catch (e:any) { console.error("[review hook] import error", e?.message); }
           return res.json({ ok: true, job: updated });
         }
       }

@@ -4,6 +4,7 @@ import { useMessage, NButton, NInput, NTag, NSelect } from 'naive-ui'
 import { clearImageBase64, mlog, upImg } from '@/api'
 import { homeStore } from '@/store'
 import { klingFeed, klingFetch } from '@/api/kling'
+import { recordKlingJob } from '@/api/klingServer'
 import { t } from '@/locales'
 import { SvgIcon } from '@/components/common'
 
@@ -77,6 +78,7 @@ const createImg = async () => {
     const d: any = await klingFetch('/v1/videos/' + cat, abc)
     mlog('img', d)
     klingFeed(d.data.task_id, cat, f.value.prompt)
+    recordKlingJob(d.data.task_id, cat, f.value.prompt)
   } catch (error) {}
   st.value.isLoading = false
 }

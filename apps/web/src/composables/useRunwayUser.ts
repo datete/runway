@@ -28,7 +28,7 @@ const DEFAULT_PREFS: RunwayUserPreferences = {
   duration: 5,
   resolution: '1076x1920',
   quality: 'std',
-  sound: true,
+  sound: false,
   cfgScale: 0.5,
 }
 
