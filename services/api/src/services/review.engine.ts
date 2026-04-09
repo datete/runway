@@ -298,7 +298,23 @@ export async function reviewImage(
 
     if (!(r as any).ok) {
       const errText = await (r as any).text().catch(() => "");
+      const bodySnippet = errText || "";
       console.error("[review.engine] upstream error", (r as any).status, errText.slice(0, 500));
+      if (ctx) {
+        try {
+          await emitReviewEvent({
+            taskId: ctx.taskId, itemId: ctx.itemId, round: ctx.round,
+            type: "review_token", persist: false,
+            payload: { itemId: ctx.itemId, delta: `[审核服务暂不可用 ${(r as any).status}] ${bodySnippet.slice(0,120)}
+将在下一轮自动重试…` },
+          });
+          await emitReviewEvent({
+            taskId: ctx.taskId, itemId: ctx.itemId, round: ctx.round,
+            type: "review_done", persist: false,
+            payload: { itemId: ctx.itemId, pass: false, reason: `审核上游错误 ${(r as any).status}`, suggestions: "" },
+          });
+        } catch {}
+      }
       return { pass: false, reason: `审核上游错误 ${(r as any).status}: ${errText.slice(0, 200)}`, suggestions: "", raw: errText };
     }
 
@@ -327,6 +343,20 @@ export async function reviewImage(
 
     // node-fetch v2 streams via .body (Node Readable)
     const stream: any = (r as any).body;
+    let pingTimer: NodeJS.Timeout | null = null;
+    let firstDeltaReceived = false;
+    if (ctx) {
+      pingTimer = setInterval(() => {
+        if (firstDeltaReceived) return;
+        emitReviewEvent({
+          taskId: ctx.taskId, itemId: ctx.itemId, round: ctx.round,
+          type: "review_token", persist: false,
+          payload: { itemId: ctx.itemId, delta: "·" },
+        }).catch(() => {});
+      }, 800);
+    }
+    const clearPing = () => { if (pingTimer) { clearInterval(pingTimer); pingTimer = null; } };
+    try {
     if (stream && typeof stream.on === "function") {
       await new Promise<void>((resolve, reject) => {
         stream.on("data", (chunk: Buffer) => {
@@ -345,6 +375,7 @@ export async function reviewImage(
                 const j = JSON.parse(data);
                 const delta = j?.choices?.[0]?.delta?.content || j?.choices?.[0]?.message?.content || "";
                 if (delta) {
+                  if (!firstDeltaReceived) { firstDeltaReceived = true; clearPing(); }
                   raw += delta;
                   pendingDelta += delta;
                   flush(false).catch(() => {});
@@ -365,6 +396,9 @@ export async function reviewImage(
       } catch {}
     }
     await flush(true);
+    } finally {
+      clearPing();
+    }
 
     let parsed: any = null;
     try {
@@ -651,6 +685,17 @@ async function fastPollScan() {
     });
     for (const item of items) {
       try {
+        // FIX A: heartbeat progress
+        try {
+          const startTs = (item as any).updatedAt || (item as any).createdAt || new Date();
+          const elapsed = Math.max(0, (Date.now() - new Date(startTs).getTime()) / 1000);
+          const percent = Math.min(92, Math.floor(elapsed / 1.2));
+          await emitReviewEvent({
+            taskId: item.taskId, itemId: item.id, round: item.round,
+            type: "seedream_progress", persist: false,
+            payload: { itemId: item.id, percent, status: "generating" },
+          });
+        } catch {}
         const job = await prisma.seedreamJob.findUnique({ where: { id: item.seedreamJobId! } });
         if (!job || !job.remoteTaskId || !job.accountId) continue;
         if (job.status === "SUCCEEDED") {

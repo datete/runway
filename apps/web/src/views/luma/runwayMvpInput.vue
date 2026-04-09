@@ -33,6 +33,8 @@ const prompt = ref('')
 const remark = ref('')
 const images = ref<UploadedImage[]>([])
 const exploreMode = ref(true)
+const creditMode = ref(false)  // 积分生成模式（管理员专用，默认关闭 = 免费无限模式）
+const isAdmin = computed(() => jwtRole.value === "admin")
 const duration = ref(5)
 const resolution = ref('1076x1920')
 const quality = ref('std')
@@ -1039,7 +1041,7 @@ const submit = async () => {
     const payload = {
       prompt: prompt.value.trim(),
       mode: 'image_to_video',
-      exploreMode: exploreMode.value,
+      exploreMode: creditMode.value ? false : exploreMode.value,
       duration: duration.value,
       resolution: resolution.value || undefined,
       quality: quality.value,
@@ -1423,6 +1425,14 @@ onUnmounted(() => {
       <div class="flex items-center justify-between">
         <span class="text-[11px] text-white/40 font-medium">生成声音</span>
         <NSwitch v-model:value="sound" size="small" />
+      </div>
+
+      <!-- 积分生成（管理员专用） -->
+      <div v-if="isAdmin" class="flex items-center justify-between">
+        <span class="text-[11px] font-medium" :class="creditMode ? 'text-amber-400' : 'text-white/40'">
+          积分生成
+        </span>
+        <NSwitch v-model:value="creditMode" size="small" />
       </div>
 
     </div>

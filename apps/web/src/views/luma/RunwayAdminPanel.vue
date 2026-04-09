@@ -36,7 +36,7 @@ interface DashboardOverview {
   speedMultiplier?: number
 }
 interface AccountInfo {
-  id: string; label: string; tokenShort: string; teamId: string; proxyUrl: string | null
+  id: string; label: string; tokenShort: string; teamId: string; proxyUrl: string | null; proxyId: string | null
   maxConcurrency: number; currentConcurrency: number; isActive: boolean; priority: number
   inCooldown: boolean; batchResting: boolean; batchRestTtl: number; batchCount: number; batchLimit: number
   totalGenerated: number; hourlyGenerated: number; lastUsedAt: string | null
@@ -141,8 +141,15 @@ const accountsLoading = ref(false)
 const showAccountModal = ref(false)
 const editingAccount = ref<AccountInfo | null>(null)
 const accountSaving = ref(false)
-const accountForm = ref({ label: '', token: '', teamId: '', proxyUrl: '', maxConcurrency: 2, priority: 0 })
+const accountForm = ref({ label: '', token: '', teamId: '', proxyId: '', proxyUrl: '', maxConcurrency: 2, priority: 0 })
 const accountTesting = ref<string | null>(null)
+const proxies = ref<ProxyInfo[]>([])
+const proxiesLoading = ref(false)
+const proxyTesting = ref<string | null>(null)
+const showProxyModal = ref(false)
+const editingProxy = ref<ProxyInfo | null>(null)
+const proxyForm = ref({ label: '', url: '', isActive: true })
+const proxySaving = ref(false)
 const accountModalTab = ref<'manual' | 'login'>('login')
 const loginForm = ref({ email: '', password: '', proxyUrl: '' })
 const loginLoading = ref(false)
@@ -164,7 +171,8 @@ const devices = ref<DeviceInfo[]>([])
 const devicesLoading = ref(false)
 const suspiciousSessions = ref<LoginSessionInfo[]>([])
 const sessionsLoading = ref(false)
-type AdminTab = 'accounts' | 'users' | 'jobs' | 'logs' | 'devices'
+type AdminTab = 'accounts' | 'proxies' | 'users' | 'jobs' | 'logs' | 'devices'
+interface ProxyInfo { id: string; label: string; url: string; isActive: boolean; lastTestedAt: string | null; lastOk: boolean | null; latencyMs: number | null; lastError: string | null; accountCount: number }
 type AccountFilter = 'all' | 'active' | 'disabled' | 'cooldown'
 type UserFilter = 'all' | 'active' | 'disabled' | 'admin'
 
@@ -317,6 +325,85 @@ const fetchAccounts = async () => {
   finally { accountsLoading.value = false }
 }
 
+const fetchProxies = async () => {
+  proxiesLoading.value = true
+  try {
+    const res = await fetch('/api/runway/admin/proxies', { headers: headers() })
+    if (!res.ok) throw new Error('加载代理失败')
+    proxies.value = await res.json()
+  } catch (e: any) { message.error(e.message) }
+  finally { proxiesLoading.value = false }
+}
+
+const openCreateProxy = () => {
+  editingProxy.value = null
+  proxyForm.value = { label: '', url: '', isActive: true }
+  showProxyModal.value = true
+}
+
+const openEditProxy = (pr: ProxyInfo) => {
+  editingProxy.value = pr
+  proxyForm.value = { label: pr.label, url: pr.url, isActive: pr.isActive }
+  showProxyModal.value = true
+}
+
+const saveProxy = async () => {
+  const f = proxyForm.value
+  if (!f.label.trim() || !f.url.trim()) { message.error('标签和 URL 必填'); return }
+  proxySaving.value = true
+  try {
+    const isEdit = Boolean(editingProxy.value)
+    const url = isEdit ? `/api/runway/admin/proxies/${editingProxy.value?.id}` : '/api/runway/admin/proxies'
+    const res = await fetch(url, { method: isEdit ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json', ...headers() }, body: JSON.stringify({ label: f.label.trim(), url: f.url.trim(), isActive: f.isActive }) })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error || '保存失败')
+    message.success(isEdit ? '代理已更新' : '代理已添加')
+    showProxyModal.value = false
+    fetchProxies()
+  } catch (e: any) { message.error(e.message) }
+  finally { proxySaving.value = false }
+}
+
+const deleteProxy = async (id: string) => {
+  if (!confirm('确认删除该代理？')) return
+  try {
+    const res = await fetch(`/api/runway/admin/proxies/${id}`, { method: 'DELETE', headers: headers() })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error || '删除失败')
+    message.success('已删除')
+    fetchProxies()
+  } catch (e: any) { message.error(e.message) }
+}
+
+const testProxy = async (id: string) => {
+  proxyTesting.value = id
+  try {
+    const res = await fetch(`/api/runway/admin/proxies/${id}/test`, { method: 'POST', headers: headers() })
+    const data = await res.json()
+    if (data.ok) message.success(data.message || '连接成功')
+    else message.error(data.message || '连接失败')
+    fetchProxies()
+  } catch (e: any) { message.error(e.message) }
+  finally { proxyTesting.value = null }
+}
+
+const proxySelectOptions = computed(() => [
+  { label: '不使用代理', value: '' },
+  ...proxies.value.filter(p => p.isActive).map(p => ({
+    label: `${p.label} — ${p.url}` + (p.lastOk === true ? ' ✓' : p.lastOk === false ? ' ✗' : ''),
+    value: p.id,
+  })),
+])
+
+const onProxySelectChange = (id: string) => {
+  accountForm.value.proxyId = id
+  if (id) {
+    const pr = proxies.value.find(x => x.id === id)
+    if (pr) accountForm.value.proxyUrl = pr.url
+  }
+}
+
+
 const fetchAdminJobs = async () => {
   jobsLoading.value = true
   try {
@@ -394,6 +481,7 @@ const refreshAll = async () => {
 }
 
 const refreshCurrentTab = () => {
+  if (activeTab.value === 'proxies') { fetchProxies(); return }
   if (activeTab.value === 'accounts') {
     fetchAccounts()
     fetchDashboard()
@@ -429,7 +517,7 @@ const onLogsFilterChange = () => {
 /* ── Account CRUD ── */
 const openCreateAccount = () => {
   editingAccount.value = null
-  accountForm.value = { label: '', token: '', teamId: '', proxyUrl: '', maxConcurrency: 2, priority: 0 }
+  accountForm.value = { label: '', token: '', teamId: '', proxyId: '', proxyUrl: '', maxConcurrency: 2, priority: 0 }
   loginForm.value = { email: '', password: '', proxyUrl: '' }
   accountModalTab.value = 'login'
   showAccountModal.value = true
@@ -437,7 +525,7 @@ const openCreateAccount = () => {
 
 const openEditAccount = (acc: AccountInfo) => {
   editingAccount.value = acc
-  accountForm.value = { label: acc.label, token: '', teamId: acc.teamId, proxyUrl: acc.proxyUrl || '', maxConcurrency: acc.maxConcurrency, priority: acc.priority }
+  accountForm.value = { label: acc.label, token: '', teamId: acc.teamId, proxyId: acc.proxyId || '', proxyUrl: acc.proxyUrl || '', maxConcurrency: acc.maxConcurrency, priority: acc.priority }
   accountModalTab.value = 'manual'
   showAccountModal.value = true
 }
@@ -449,7 +537,7 @@ const saveAccount = async () => {
 
   accountSaving.value = true
   try {
-    const payload: Record<string, unknown> = { label: f.label.trim(), maxConcurrency: f.maxConcurrency, priority: f.priority, proxyUrl: f.proxyUrl.trim() || null }
+    const payload: Record<string, unknown> = { label: f.label.trim(), maxConcurrency: f.maxConcurrency, priority: f.priority, proxyUrl: f.proxyUrl.trim() || null, proxyId: f.proxyId || null }
     if (f.token.trim()) payload.token = f.token.trim()
     if (f.teamId.trim()) payload.teamId = f.teamId.trim()
 
@@ -1072,6 +1160,50 @@ onUnmounted(() => { if (autoRefreshTimer) clearInterval(autoRefreshTimer) })
               </div>
             </NTabPane>
 
+            <NTabPane name="proxies" :tab="`代理池 (${proxies.length})`">
+              <div class="mb-4 flex flex-wrap items-center gap-2">
+                <div class="ml-auto flex gap-2">
+                  <NButton type="primary" size="small" class="accent-btn" @click="openCreateProxy">
+                    <SvgIcon icon="ri:add-line" class="mr-1" /> 添加代理
+                  </NButton>
+                  <NButton size="small" secondary class="glass-btn" @click="fetchProxies">刷新</NButton>
+                </div>
+              </div>
+              <div class="grid grid-cols-1 gap-3 xl:grid-cols-2">
+                <div
+                  v-for="pr in proxies"
+                  :key="pr.id"
+                  class="account-card rounded-xl border p-4 transition-all duration-200"
+                  :class="pr.isActive ? 'border-white/[0.08] bg-white/[0.03] hover:border-white/[0.15]' : 'border-red-500/20 bg-red-500/[0.03]'"
+                >
+                  <div class="flex items-start justify-between gap-3">
+                    <div class="min-w-0 flex-1">
+                      <div class="flex flex-wrap items-center gap-2">
+                        <span class="truncate text-sm font-semibold text-white/90">{{ pr.label }}</span>
+                        <NTag :type="pr.isActive ? 'success' : 'error'" size="tiny" round :bordered="false">{{ pr.isActive ? '启用' : '停用' }}</NTag>
+                        <NTag v-if="pr.lastOk === true" type="success" size="tiny" round :bordered="false">可用 {{ pr.latencyMs }}ms</NTag>
+                        <NTag v-else-if="pr.lastOk === false" type="error" size="tiny" round :bordered="false">不可用</NTag>
+                        <NTag v-else size="tiny" round :bordered="false">未测试</NTag>
+                        <NTag v-if="pr.accountCount > 0" type="info" size="tiny" round :bordered="false">{{ pr.accountCount }} 账号使用</NTag>
+                      </div>
+                      <div class="mt-2 text-xs text-white/50 break-all">{{ pr.url }}</div>
+                      <div v-if="pr.lastError" class="mt-2 text-xs text-red-300/70">错误: {{ pr.lastError }}</div>
+                      <div v-if="pr.lastTestedAt" class="mt-1 text-[11px] text-white/30">最近测试: {{ formatTime(pr.lastTestedAt) }}</div>
+                    </div>
+                    <div class="flex flex-col gap-1">
+                      <NButton size="tiny" tertiary :loading="proxyTesting === pr.id" @click="testProxy(pr.id)">测试</NButton>
+                      <NButton size="tiny" tertiary @click="openEditProxy(pr)">编辑</NButton>
+                      <NButton size="tiny" tertiary type="error" @click="deleteProxy(pr.id)">删除</NButton>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div v-if="proxies.length === 0 && !proxiesLoading" class="py-12 text-center text-sm text-white/20">
+                <SvgIcon icon="ri:inbox-line" class="mx-auto mb-2 text-3xl text-white/10" />
+                代理池为空，点击上方“添加代理”
+              </div>
+            </NTabPane>
+
             <!-- Users Tab -->
             <NTabPane name="users" :tab="`用户管理 (${users.length})`">
               <div class="mb-4 flex flex-wrap items-center gap-2">
@@ -1215,6 +1347,9 @@ onUnmounted(() => { if (autoRefreshTimer) clearInterval(autoRefreshTimer) })
         <NFormItem label="密码">
           <NInput v-model:value="loginForm.password" type="password" show-password-on="click" placeholder="Runway 登录密码" />
         </NFormItem>
+        <NFormItem label="选择代理">
+          <NSelect :value="accountForm.proxyId" :options="proxySelectOptions" @update:value="(v) => { accountForm.proxyId = v; const pr = proxies.find(x => x.id === v); if (pr) loginForm.proxyUrl = pr.url }" placeholder="从代理池选择" />
+        </NFormItem>
         <NFormItem label="代理地址">
           <NInput v-model:value="loginForm.proxyUrl" placeholder="socks5://user:pass@host:port" />
         </NFormItem>
@@ -1244,6 +1379,9 @@ onUnmounted(() => { if (autoRefreshTimer) clearInterval(autoRefreshTimer) })
         <NFormItem label="Team ID">
           <NInput v-model:value="accountForm.teamId" :placeholder="editingAccount ? accountForm.teamId || '不修改留空' : 'Runway Team ID'" />
         </NFormItem>
+        <NFormItem label="选择代理">
+          <NSelect :value="accountForm.proxyId" :options="proxySelectOptions" @update:value="onProxySelectChange" placeholder="从代理池选择（可留空手动填写）" />
+        </NFormItem>
         <NFormItem label="代理地址">
           <NInput v-model:value="accountForm.proxyUrl" placeholder="可选，如 socks5://user:pass@host:port 或 http://host:port" />
         </NFormItem>
@@ -1260,6 +1398,24 @@ onUnmounted(() => { if (autoRefreshTimer) clearInterval(autoRefreshTimer) })
         <NButton type="primary" :loading="accountSaving" class="accent-btn" @click="saveAccount">保存</NButton>
       </div>
     </template>
+  </NModal>
+
+  <NModal v-model:show="showProxyModal" preset="card" :title="editingProxy ? '编辑代理' : '添加代理'" style="width: min(92vw, 480px)" class="admin-modal">
+    <NForm label-placement="left" label-width="80" class="admin-form">
+      <NFormItem label="标签">
+        <NInput v-model:value="proxyForm.label" placeholder="例如: 美西-SOCKS5" />
+      </NFormItem>
+      <NFormItem label="URL">
+        <NInput v-model:value="proxyForm.url" placeholder="socks5://user:pass@host:port 或 http://host:port" />
+      </NFormItem>
+      <NFormItem label="启用">
+        <NSwitch v-model:value="proxyForm.isActive" />
+      </NFormItem>
+    </NForm>
+    <div class="flex justify-end gap-2 pt-2">
+      <NButton @click="showProxyModal = false">取消</NButton>
+      <NButton type="primary" :loading="proxySaving" class="accent-btn" @click="saveProxy">保存</NButton>
+    </div>
   </NModal>
 </template>
 

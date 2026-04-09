@@ -12,8 +12,8 @@ model User {
   username       String           @unique @db.VarChar(64)
   passwordHash   String           @map("password_hash")
   role           String           @default("user") @db.VarChar(16)
-  createdAt      DateTime         @default(now()) @map("created_at")
-  updatedAt      DateTime         @updatedAt @map("updated_at")
+  createdAt      DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
   dailyQuota     Int?             @map("daily_quota")
   isActive       Boolean          @default(true) @map("is_active")
   maxConcurrency Int?             @map("max_concurrency")
@@ -35,7 +35,7 @@ model UserLog {
   action    String   @db.VarChar(64)
   detail    String?
   ip        String?  @db.VarChar(64)
-  createdAt DateTime @default(now()) @map("created_at")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("user_logs")
@@ -57,10 +57,10 @@ model RunwayJob {
   thumbnailUrl    String?          @map("thumbnail_url")
   errorMessage    String?          @map("error_message")
   retryCount      Int              @default(0) @map("retry_count")
-  createdAt       DateTime         @default(now()) @map("created_at")
-  updatedAt       DateTime         @updatedAt @map("updated_at")
-  startedAt       DateTime?        @map("started_at")
-  finishedAt      DateTime?        @map("finished_at")
+  createdAt       DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
+  startedAt       DateTime?        @map("started_at") @db.Timestamptz(6)
+  finishedAt      DateTime?        @map("finished_at") @db.Timestamptz(6)
   referenceImages String?          @map("reference_images")
   usedToken       String?          @map("used_token") @db.VarChar(64)
   duration        Int?
@@ -91,7 +91,7 @@ model RunwayJobEvent {
   eventType   String    @map("event_type") @db.VarChar(32)
   message     String?
   payloadJson Json?     @map("payload_json")
-  createdAt   DateTime  @default(now()) @map("created_at")
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   job         RunwayJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
 
   @@index([jobId], map: "idx_runway_job_events_job_id")
@@ -115,8 +115,11 @@ model RunwayAccount {
   totalGenerated   Int         @default(0) @map("total_generated")
   createdAt        DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt        DateTime    @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  proxyId          String?     @map("proxy_id") @db.Uuid
+  proxy            Proxy?      @relation(fields: [proxyId], references: [id], onDelete: SetNull)
   jobs             RunwayJob[]
 
+  @@index([proxyId], map: "idx_runway_accounts_proxy_id")
   @@map("runway_accounts")
 }
 
@@ -213,8 +216,8 @@ model KlingJob {
   prompt      String?  @db.Text
   status      String   @default("processing")
   resultUrl   String?  @map("result_url") @db.Text
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
   user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, createdAt])
@@ -237,8 +240,8 @@ model ReviewTask {
   currentRound    Int          @default(0) @map("current_round")
   passedCount     Int          @default(0) @map("passed_count")
   status          String       @default("running")
-  createdAt       DateTime     @default(now()) @map("created_at")
-  updatedAt       DateTime     @updatedAt @map("updated_at")
+  createdAt       DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime     @updatedAt @map("updated_at") @db.Timestamptz(6)
   user            User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   items           ReviewItem[]
 
@@ -256,8 +259,8 @@ model ReviewItem {
   finalImageUrl   String?    @map("final_image_url")
   lastReason      String?    @map("last_reason")
   history         Json?
-  createdAt       DateTime   @default(now()) @map("created_at")
-  updatedAt       DateTime   @updatedAt @map("updated_at")
+  createdAt       DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
   task            ReviewTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
 
   @@index([taskId])
@@ -272,8 +275,24 @@ model ReviewEvent {
   round     Int?
   type      String   @db.VarChar(32)
   payload   Json?
-  createdAt DateTime @default(now()) @map("created_at")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   @@index([taskId, createdAt])
   @@map("review_events")
+}
+
+model Proxy {
+  id           String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  label        String          @db.VarChar(64)
+  url          String
+  isActive     Boolean         @default(true) @map("is_active")
+  lastTestedAt DateTime?       @map("last_tested_at") @db.Timestamptz(6)
+  lastOk       Boolean?        @map("last_ok")
+  latencyMs    Int?            @map("latency_ms")
+  lastError    String?         @map("last_error")
+  createdAt    DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime        @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  accounts     RunwayAccount[]
+
+  @@map("proxies")
 }

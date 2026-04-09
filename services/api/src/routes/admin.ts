@@ -151,6 +151,7 @@ router.get("/accounts", async (_req: Request, res: Response) => {
         tokenShort: a.tokenShort,
         teamId: a.teamId,
         proxyUrl: a.proxyUrl,
+        proxyId: a.proxyId,
         maxConcurrency: a.maxConcurrency,
         currentConcurrency: current ? parseInt(current, 10) : 0,
         isActive: a.isActive,
@@ -177,12 +178,18 @@ router.get("/accounts", async (_req: Request, res: Response) => {
 
 // POST /api/runway/admin/accounts — Add a new account
 router.post("/accounts", async (req: Request, res: Response) => {
-  const { label, token, teamId, proxyUrl, maxConcurrency = 2, priority = 0 } = req.body;
+  const { label, token, teamId, proxyId, maxConcurrency = 2, priority = 0 } = req.body;
+  let { proxyUrl } = req.body;
+  if (proxyId) {
+    const pr = await prisma.proxy.findUnique({ where: { id: proxyId } });
+    if (!pr) return res.status(400).json({ error: "代理不存在" });
+    proxyUrl = pr.url;
+  }
   if (!label || !token || !teamId) return res.status(400).json({ error: "label, token, teamId 必填" });
   try {
     const tokenShort = token.slice(-12);
     const account = await prisma.runwayAccount.create({
-      data: { label, token, tokenShort, teamId: String(teamId), proxyUrl: proxyUrl || null, maxConcurrency, priority },
+      data: { label, token, tokenShort, teamId: String(teamId), proxyUrl: proxyUrl || null, proxyId: proxyId || null, maxConcurrency, priority },
     });
     res.status(201).json({ id: account.id, label: account.label, tokenShort: account.tokenShort, teamId: account.teamId });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
@@ -190,13 +197,20 @@ router.post("/accounts", async (req: Request, res: Response) => {
 
 // PUT /api/runway/admin/accounts/:id — Update an account
 router.put("/accounts/:id", async (req: Request, res: Response) => {
-  const { label, token, teamId, proxyUrl, maxConcurrency, priority, isActive, tokenExpiresAt } = req.body;
+  const { label, token, teamId, proxyId, maxConcurrency, priority, isActive, tokenExpiresAt } = req.body;
+  let { proxyUrl } = req.body;
+  if (proxyId !== undefined && proxyId) {
+    const pr = await prisma.proxy.findUnique({ where: { id: proxyId } });
+    if (!pr) return res.status(400).json({ error: "代理不存在" });
+    proxyUrl = pr.url;
+  }
   try {
     const data: any = {};
     if (label !== undefined) data.label = label;
     if (token !== undefined) { data.token = token; data.tokenShort = token.slice(-12); }
     if (teamId !== undefined) data.teamId = String(teamId);
     if (proxyUrl !== undefined) data.proxyUrl = proxyUrl || null;
+    if (proxyId !== undefined) data.proxyId = proxyId || null;
     if (maxConcurrency !== undefined) data.maxConcurrency = Number(maxConcurrency);
     if (priority !== undefined) data.priority = Number(priority);
     if (isActive !== undefined) data.isActive = Boolean(isActive);
@@ -210,17 +224,24 @@ router.put("/accounts/:id", async (req: Request, res: Response) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-// DELETE /api/runway/admin/accounts/:id — Soft delete (deactivate)
+// DELETE /api/runway/admin/accounts/:id
+// Two-stage: active -> deactivate (soft). Already inactive -> hard delete.
 router.delete("/accounts/:id", async (req: Request, res: Response) => {
   try {
-    await prisma.runwayAccount.update({
-      where: { id: req.params.id },
-      data: { isActive: false },
-    });
-    // Clear concurrency counter
-    await redis.del(`account:concurrency:${req.params.id}`);
-    await redis.del(`account:cooldown:${req.params.id}`);
-    res.json({ ok: true });
+    const id = req.params.id;
+    const acc = await prisma.runwayAccount.findUnique({ where: { id } });
+    if (!acc) return res.status(404).json({ error: "account not found" });
+    if (acc.isActive) {
+      await prisma.runwayAccount.update({ where: { id }, data: { isActive: false } });
+      await redis.del(`account:concurrency:${id}`);
+      await redis.del(`account:cooldown:${id}`);
+      return res.json({ ok: true, stage: "deactivated", message: "账号已停用，再次点击移除将彻底删除" });
+    }
+    await prisma.runwayJob.updateMany({ where: { accountId: id }, data: { accountId: null } });
+    await prisma.runwayAccount.delete({ where: { id } });
+    await redis.del(`account:concurrency:${id}`);
+    await redis.del(`account:cooldown:${id}`);
+    res.json({ ok: true, stage: "deleted" });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
@@ -738,5 +759,107 @@ router.post("/speed", async (req: Request, res: Response) => {
     res.json({ ok: true, multiplier: clamped });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
+
+
+// ============== PROXY POOL MANAGEMENT ==============
+
+function buildAgent(proxyUrl: string) {
+  try {
+    if (proxyUrl.startsWith('socks')) {
+      const mod = require('socks-proxy-agent');
+      return new mod.SocksProxyAgent(proxyUrl);
+    }
+    const mod = require('https-proxy-agent');
+    return new mod.HttpsProxyAgent(proxyUrl);
+  } catch (e: any) {
+    console.warn('[admin] proxy agent error:', e.message);
+    return null;
+  }
+}
+
+// GET /api/runway/admin/proxies
+router.get('/proxies', async (_req: Request, res: Response) => {
+  try {
+    const proxies = await prisma.proxy.findMany({ orderBy: { createdAt: 'desc' } });
+    // attach account count per proxy
+    const rows = await prisma.runwayAccount.groupBy({
+      by: ['proxyId'],
+      _count: { _all: true },
+      where: { proxyId: { not: null } },
+    });
+    const countMap: Record<string, number> = {};
+    for (const r of rows) if (r.proxyId) countMap[r.proxyId] = r._count._all;
+    res.json(proxies.map(p => ({ ...p, accountCount: countMap[p.id] || 0 })));
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/runway/admin/proxies
+router.post('/proxies', async (req: Request, res: Response) => {
+  const { label, url, isActive = true } = req.body;
+  if (!label || !url) return res.status(400).json({ error: 'label 和 url 必填' });
+  try {
+    const p = await prisma.proxy.create({ data: { label: String(label), url: String(url), isActive: Boolean(isActive) } });
+    res.status(201).json(p);
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// PUT /api/runway/admin/proxies/:id
+router.put('/proxies/:id', async (req: Request, res: Response) => {
+  const { label, url, isActive } = req.body;
+  const data: any = {};
+  if (label !== undefined) data.label = String(label);
+  if (url !== undefined) data.url = String(url);
+  if (isActive !== undefined) data.isActive = Boolean(isActive);
+  if (Object.keys(data).length === 0) return res.status(400).json({ error: '无修改内容' });
+  try {
+    const p = await prisma.proxy.update({ where: { id: req.params.id }, data });
+    res.json(p);
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// DELETE /api/runway/admin/proxies/:id
+router.delete('/proxies/:id', async (req: Request, res: Response) => {
+  try {
+    const used = await prisma.runwayAccount.count({ where: { proxyId: req.params.id } });
+    if (used > 0) return res.status(400).json({ error: `该代理正被 ${used} 个账号使用，无法删除` });
+    await prisma.proxy.delete({ where: { id: req.params.id } });
+    res.json({ ok: true });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/runway/admin/proxies/:id/test — test connectivity through this proxy
+router.post('/proxies/:id/test', async (req: Request, res: Response) => {
+  try {
+    const proxy = await prisma.proxy.findUnique({ where: { id: req.params.id } });
+    if (!proxy) return res.status(404).json({ error: '代理不存在' });
+    const fetchMod = await import('node-fetch');
+    const fetchFn = fetchMod.default;
+    const agent = buildAgent(proxy.url);
+    if (!agent) {
+      await prisma.proxy.update({ where: { id: proxy.id }, data: { lastTestedAt: new Date(), lastOk: false, lastError: '代理 URL 无法解析', latencyMs: null } });
+      return res.json({ ok: false, message: '代理 URL 无法解析' });
+    }
+    const target = 'https://api.runwayml.com/';
+    const start = Date.now();
+    try {
+      const r = await fetchFn(target, { agent: agent as any, method: 'GET', timeout: 15000 } as any);
+      const latency = Date.now() - start;
+      const ok = r.status < 500;
+      await prisma.proxy.update({
+        where: { id: proxy.id },
+        data: { lastTestedAt: new Date(), lastOk: ok, latencyMs: latency, lastError: ok ? null : `HTTP ${r.status}` },
+      });
+      res.json({ ok, latencyMs: latency, status: r.status, message: ok ? `连接成功 (${latency}ms)` : `HTTP ${r.status}` });
+    } catch (err: any) {
+      const latency = Date.now() - start;
+      await prisma.proxy.update({
+        where: { id: proxy.id },
+        data: { lastTestedAt: new Date(), lastOk: false, latencyMs: latency, lastError: err.message?.slice(0, 500) || 'unknown' },
+      });
+      res.json({ ok: false, latencyMs: latency, message: err.message || '连接失败' });
+    }
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
 
 export { router as adminRouter };
