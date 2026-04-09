@@ -248,8 +248,9 @@ export class RunwayDirectClient implements RunwayProvider {
   }
 
   async createTask(input: CreateRunwayTaskInput): Promise<{ remoteTaskId: string }> {
-    const taskType = "kling_3_0_pro";
-    const isPro = true; // both tiers use pro model and max resolution
+    const isStandard = input.quality === "standard";
+    const taskType = isStandard ? "kling_3_0_standard" : "kling_3_0_pro";
+    const isPro = !isStandard;
     console.log(`[runway:task] creating ${taskType} (quality=${input.quality || "std"})`);
     console.log(`[runway:task] prompt: "${input.prompt.slice(0, 80)}"`);
     console.log(`[runway:task] duration=${input.duration || 5}s, exploreMode=${input.exploreMode ?? true}`);
@@ -277,10 +278,11 @@ export class RunwayDirectClient implements RunwayProvider {
     }
 
     // Use resolution from frontend directly; fallback to defaults if missing
-    const defaultRes = "1080x1920";
-    const resolutionMap: Record<string, string> = { "1076x1920": "1080x1920", "720x1280": "1080x1920", "1280x720": "1920x1080", "960x960": "1440x1440" };
+    const defaultRes = isStandard ? "720x1280" : "1080x1920";
+    // Standard tier keeps 720p as-is; pro tier upgrades to 1080p variants
+    const proResolutionMap: Record<string, string> = { "1076x1920": "1080x1920", "720x1280": "1080x1920", "1280x720": "1920x1080", "960x960": "1440x1440" };
     const effectiveResolution = input.resolution
-      ? (resolutionMap[input.resolution] || input.resolution)
+      ? (isStandard ? input.resolution : (proResolutionMap[input.resolution] || input.resolution))
       : defaultRes;
 
     const body: any = {

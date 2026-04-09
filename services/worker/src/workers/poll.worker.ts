@@ -254,6 +254,30 @@ new Worker('runway-poll', async (job: Job) => {
       }
     }
 
+    // Stuck zero-progress recovery: processing >10min with progress still 0 → switch account
+    if (result.status !== 'queued' && dbJob.startedAt && (result.progress || 0) === 0) {
+      const stuckMinutes = (Date.now() - new Date(dbJob.startedAt).getTime()) / 60000;
+      if (stuckMinutes > 10) {
+        console.warn(`[poll-worker] job ${jobId.slice(0,8)} processing ${Math.round(stuckMinutes)}min with progress=0, switching account`);
+        await prisma.runwayJob.update({
+          where: { id: jobId },
+          data: {
+            status: 'pending',
+            remoteTaskId: null,
+            errorMessage: `处理中无进度，切换账号重试`,
+            startedAt: null,
+            accountId: null,
+          } as any,
+        });
+        if (accountId) {
+          await accountPool.release(accountId, jobId);
+          await connection.set(`job:avoid-account:${jobId}:${accountId}`, '1', 'EX', 600);
+        }
+        await triggerSubmit(humanSubmitDelay());
+        return;
+      }
+    }
+
     // Processing timeout: 30min
     if (result.status !== 'queued' && dbJob.startedAt) {
       const processingMinutes = (Date.now() - new Date(dbJob.startedAt).getTime()) / 60000;
@@ -287,42 +311,21 @@ new Worker('runway-poll', async (job: Job) => {
       return;
     }
 
-    // Re-acquire slot when THROTTLED job starts actually processing
+    // Re-acquire slot when THROTTLED job starts actually processing (soft: allow temporary over-cap)
     if (result.status !== 'queued' && accountId) {
       const slotReleasedKey = `poll:slot-released:${jobId}`;
       const wasReleased = await connection.get(slotReleasedKey);
       if (wasReleased) {
-        // Job transitioned from THROTTLED -> RUNNING, re-acquire concurrency slot atomically
-        const account = await prisma.runwayAccount.findUnique({ where: { id: accountId }, select: { maxConcurrency: true } });
-        const maxConc = account?.maxConcurrency ?? 3;
         const concKey = `account:concurrency:${accountId}`;
-        // Lua: INCR only if below max — prevents exceeding maxConcurrency
-        const REACQUIRE_LUA = `
-          local key = KEYS[1]
-          local max = tonumber(ARGV[1])
-          local cur = redis.call('INCR', key)
-          if cur <= max then
-            redis.call('EXPIRE', key, 900)
-            return cur
-          else
-            redis.call('DECR', key)
-            return -1
-          end
-        `;
-        const result2 = await connection.eval(REACQUIRE_LUA, 1, concKey, String(maxConc)) as number;
-        if (result2 > 0) {
-          await connection.del(slotReleasedKey);
-          // Clear the release guard so the slot can be properly released on completion
-          await connection.del(`account:released:${accountId}:${jobId}`);
-          await prisma.runwayJob.update({
-            where: { id: jobId },
-            data: { status: 'processing', errorMessage: null } as any,
-          }).catch(() => {});
-          console.log(`[poll-worker] job ${jobId.slice(0,8)} RUNNING again, re-acquired slot (${result2}/${maxConc})`);
-        } else {
-          // Could not re-acquire — account is full. Leave slot released, keep polling.
-          console.log(`[poll-worker] job ${jobId.slice(0,8)} RUNNING but account full (${maxConc}/${maxConc}), skipping re-acquire`);
-        }
+        const cur = await connection.incr(concKey);
+        await connection.expire(concKey, 900);
+        await connection.del(slotReleasedKey);
+        await connection.del(`account:released:${accountId}:${jobId}`);
+        await prisma.runwayJob.update({
+          where: { id: jobId },
+          data: { status: 'processing', errorMessage: null } as any,
+        }).catch(() => {});
+        console.log(`[poll-worker] job ${jobId.slice(0,8)} RUNNING again, re-acquired slot soft (${cur})`);
       }
     }
 

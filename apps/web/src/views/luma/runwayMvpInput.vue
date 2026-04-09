@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { NAlert, NDrawer, NDrawerContent, NInput, NSpin, NSlider, NSwitch, useMessage } from 'naive-ui'
 import { SvgIcon } from '@/components/common'
 import { homeStore } from '@/store'
@@ -50,7 +50,20 @@ const stdResolutions = [
 const proResolutions = [
   { value: '1076x1920', label: '9:16', desc: '竖屏 1080p', iconW: 20, iconH: 34 },
 ]
-const resolutionOptions = computed(() => (quality.value === 'pro' ? proResolutions : stdResolutions))
+const standardResolutions = [
+  { value: '720x1280', label: '9:16', desc: '竖屏 720p', iconW: 20, iconH: 34 },
+  { value: '1280x720', label: '16:9', desc: '横屏 720p', iconW: 34, iconH: 20 },
+]
+const resolutionOptions = computed(() => {
+  if (quality.value === 'pro') return proResolutions
+  if (quality.value === 'standard') return standardResolutions
+  return stdResolutions
+})
+
+watch(quality, (q) => {
+  if (q === 'standard' && !standardResolutions.find(r => r.value === resolution.value)) resolution.value = '720x1280'
+  if (q !== 'standard' && resolution.value !== '1076x1920') resolution.value = '1076x1920'
+})
 
 
 
@@ -63,6 +76,7 @@ const durationHints: Record<number, string> = {
 
 
 const qualityHints: Record<string, string> = {
+  standard: '标准模式 — Kling 3.0 普通版，720p 分辨率，生成速度更快，消耗更少配额',
   std: 'Pro 模式 — 基于参考图片生成视频，最高 1080p 分辨率，适合大多数场景，消耗 1 个配额',
   pro: '大师模式 — 支持参考视频+图片混合输入，运动控制更精准，消耗 2 个配额',
 }
@@ -1335,6 +1349,14 @@ onUnmounted(() => {
       <div>
         <div class="mb-1 text-[11px] text-white/40 font-medium">生成模式</div>
         <div class="flex gap-2">
+          <button
+            type="button"
+            class="pill-btn"
+            :class="{ active: quality === 'standard' }"
+            @click="quality = 'standard'"
+          >
+            标准
+          </button>
           <button
             type="button"
             class="pill-btn"
