@@ -89,7 +89,7 @@ export class RunwayService {
             const todayStart = new Date();
             todayStart.setHours(0, 0, 0, 0);
             const todayCount = await tx.runwayJob.count({
-              where: { userId: input.userId, createdAt: { gte: todayStart }, status: { not: "deleted" } },
+              where: { userId: input.userId, createdAt: { gte: todayStart }, status: { notIn: ["deleted", "failed", "cancelled"] } },
             });
             if (todayCount >= user.dailyQuota) {
               throw new Error(`今日配额已用完（上限 ${user.dailyQuota} 个）`);

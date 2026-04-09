@@ -526,7 +526,10 @@ async function accountSubmitLoop(accountId: string): Promise<void> {
       // 深夜概率性跳过（diurnal >= 2.5 时 80% 概率休长觉）
       {
         const df = diurnalFactor();
-        if (df >= 2.5 && Math.random() < 0.80) {
+        // Runtime toggle: redis key runway:deep-night-enabled ("1"=on, "0"=off). Default on.
+        const dnRaw = await connection.get("runway:deep-night-enabled").catch(() => null);
+        const deepNightOn = dnRaw === null ? (process.env.DISABLE_DEEP_NIGHT_SKIP !== "1") : (dnRaw === "1");
+        if (deepNightOn && df >= 2.5 && Math.random() < 0.80) {
           const skipMs = Math.min(randInt(120_000, 300_001) * df, MAX_DIURNAL_SLEEP);
           console.log(`[loop:${accountId.slice(0,8)}] deep-night skip, sleeping ${(skipMs/60000).toFixed(1)}min`);
           await humanSleep(skipMs);

@@ -95,6 +95,8 @@ const tokenList = ref<TokenStatus[]>([])
 let tokenTimer: ReturnType<typeof setInterval> | null = null
 
 const dailyUsed = ref(0)
+const dailyQuotaUsed = ref(0)
+const systemDailyTotal = ref(0)
 const dailyQuota = ref<number | null>(null)
 const totalUsed = ref(0)
 const totalQuota = ref<number | null>(null)
@@ -171,7 +173,7 @@ const concurrencyClass = computed(() => {
 const quotaLabel = computed(() => {
   const parts: string[] = []
   if (dailyQuota.value !== null) {
-    parts.push(`今日 ${dailyUsed.value}/${dailyQuota.value}`)
+    parts.push(`今日 ${dailyQuotaUsed.value}/${dailyQuota.value}`)
   } else {
     parts.push(`今日生成 ${dailyUsed.value}`)
   }
@@ -182,15 +184,15 @@ const quotaLabel = computed(() => {
 })
 
 const quotaExceeded = computed(() => {
-  if (dailyQuota.value !== null && dailyUsed.value >= dailyQuota.value) return '今日配额已用完'
+  if (dailyQuota.value !== null && dailyQuotaUsed.value >= dailyQuota.value) return '今日配额已用完'
   if (totalQuota.value !== null && totalUsed.value >= totalQuota.value) return '总配额已用完'
   return null
 })
 
 const quotaWarning = computed(() => {
   if (quotaExceeded.value) return null
-  if (dailyQuota.value !== null && dailyUsed.value >= dailyQuota.value * 0.8) {
-    return `今日配额即将用完（${dailyUsed.value}/${dailyQuota.value}）`
+  if (dailyQuota.value !== null && dailyQuotaUsed.value >= dailyQuota.value * 0.8) {
+    return `今日配额即将用完（${dailyQuotaUsed.value}/${dailyQuota.value}）`
   }
   if (totalQuota.value !== null && totalUsed.value >= totalQuota.value * 0.8) {
     return `总配额即将用完（${totalUsed.value}/${totalQuota.value}）`
@@ -226,6 +228,8 @@ const fetchTokenStatus = async () => {
     tokenList.value = []
     tokenWarnings.value = []
     dailyUsed.value = 0
+    dailyQuotaUsed.value = 0
+    systemDailyTotal.value = 0
     dailyQuota.value = null
     totalUsed.value = 0
     totalQuota.value = null
@@ -240,6 +244,8 @@ const fetchTokenStatus = async () => {
     activeTasks.value = data.activeTasks ?? 0
     maxConcurrency.value = data.maxConcurrency ?? 2
     dailyUsed.value = data.dailyUsed ?? 0
+    dailyQuotaUsed.value = data.dailyQuotaUsed ?? data.dailyUsed ?? 0
+    systemDailyTotal.value = data.systemDailyTotal ?? 0
     dailyQuota.value = data.dailyQuota ?? null
     totalUsed.value = data.totalUsed ?? 0
     totalQuota.value = data.totalQuota ?? null
@@ -1135,10 +1141,17 @@ onUnmounted(() => {
           <span class="text-[10px] text-white/35 leading-tight">图生视频 · 单任务模式</span>
         </div>
       </div>
-      <div class="today-badge" :title="`今日累计生成任务数（含已删除）`">
-        <SvgIcon icon="ri:flashlight-line" class="text-[11px] text-amber-300" />
-        <span class="text-[10px] text-white/50">今日生成</span>
-        <span class="text-sm font-bold tabular-nums text-amber-300">{{ dailyUsed }}</span>
+      <div class="flex items-center gap-2">
+        <div class="today-badge" :title="`今日累计生成任务数（含已删除）`">
+          <SvgIcon icon="ri:flashlight-line" class="text-[11px] text-amber-300" />
+          <span class="text-[10px] text-white/50">今日生成</span>
+          <span class="text-sm font-bold tabular-nums text-amber-300">{{ dailyUsed }}</span>
+        </div>
+        <div class="system-badge" :title="`全站今日总生成数（含已删除）`">
+          <SvgIcon icon="ri:global-line" class="text-[11px] text-sky-300" />
+          <span class="text-[10px] text-white/50">系统今日</span>
+          <span class="text-sm font-bold tabular-nums text-sky-300">{{ systemDailyTotal }}</span>
+        </div>
       </div>
     </div>
 
@@ -1167,11 +1180,11 @@ onUnmounted(() => {
           <div class="flex-1 h-1.5 rounded-full bg-white/[0.06] overflow-hidden">
             <div
               class="h-full rounded-full transition-all duration-500"
-              :class="dailyUsed >= dailyQuota ? 'bg-red-400/80' : dailyUsed >= dailyQuota * 0.8 ? 'bg-amber-400/70' : 'bg-sky-400/60'"
-              :style="{ width: Math.min(100, Math.round(dailyUsed / dailyQuota * 100)) + '%' }"
+              :class="dailyQuotaUsed >= dailyQuota ? 'bg-red-400/80' : dailyQuotaUsed >= dailyQuota * 0.8 ? 'bg-amber-400/70' : 'bg-sky-400/60'"
+              :style="{ width: Math.min(100, Math.round(dailyQuotaUsed / dailyQuota * 100)) + '%' }"
             />
           </div>
-          <span class="text-[10px] tabular-nums" :class="dailyUsed >= dailyQuota ? 'text-red-400/80' : 'text-white/30'">{{ dailyUsed }}/{{ dailyQuota }}</span>
+          <span class="text-[10px] tabular-nums" :class="dailyQuotaUsed >= dailyQuota ? 'text-red-400/80' : 'text-white/30'">{{ dailyQuotaUsed }}/{{ dailyQuota }}</span>
         </div>
         <div v-if="totalQuota !== null" class="flex items-center gap-2">
           <span class="text-[10px] text-white/30 w-8 shrink-0">总配</span>
@@ -2488,5 +2501,16 @@ button:focus-visible,
   background: linear-gradient(135deg, rgba(251, 191, 36, 0.12), rgba(251, 146, 60, 0.08));
   border: 1px solid rgba(251, 191, 36, 0.25);
   box-shadow: 0 0 12px rgba(251, 191, 36, 0.08);
+}
+
+.system-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, rgba(56, 189, 248, 0.12), rgba(14, 165, 233, 0.08));
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  box-shadow: 0 0 12px rgba(56, 189, 248, 0.08);
 }
 </style>

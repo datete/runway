@@ -649,6 +649,13 @@ router.get("/dashboard", async (_req: Request, res: Response) => {
       }
     } catch {}
 
+    // Read deep-night mode toggle (default: enabled)
+    let deepNightEnabled = true;
+    try {
+      const dnRaw = await redis.get("runway:deep-night-enabled");
+      if (dnRaw !== null) deepNightEnabled = dnRaw === "1";
+    } catch {}
+
     res.json({
       overview: {
         totalUsers, activeUsers, totalJobs, todayJobs, queuedJobs, processingJobs, completedJobs, failedJobs, todayCompleted, todayFailed,
@@ -658,6 +665,7 @@ router.get("/dashboard", async (_req: Request, res: Response) => {
         totalMaxConcurrency,
         totalCurrentConcurrency,
         speedMultiplier,
+        deepNightEnabled,
       },
       userStats,
       accountStats,
@@ -757,6 +765,25 @@ router.post("/speed", async (req: Request, res: Response) => {
     await redis.set("runway:speed-multiplier", String(clamped));
     console.log(`[admin] global speed multiplier set to ${clamped}x by ${(req as any).user?.username || 'unknown'}`);
     res.json({ ok: true, multiplier: clamped });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/runway/admin/deep-night — read deep-night mode toggle
+router.get("/deep-night", async (_req: Request, res: Response) => {
+  try {
+    const raw = await redis.get("runway:deep-night-enabled");
+    const enabled = raw === null ? true : raw === "1";
+    res.json({ enabled });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/runway/admin/deep-night — set deep-night mode toggle
+router.post("/deep-night", async (req: Request, res: Response) => {
+  try {
+    const enabled = !!req.body?.enabled;
+    await redis.set("runway:deep-night-enabled", enabled ? "1" : "0");
+    console.log(`[admin] deep-night mode ${enabled ? "ENABLED" : "DISABLED"} by ${(req as any).user?.username || "unknown"}`);
+    res.json({ ok: true, enabled });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 

@@ -176,6 +176,50 @@ function startReconciliation() {
   }, 10000);
 }
 
+// Periodic stuck-job sweep: safety net if poll chain is broken.
+// Finds processing/submitted jobs whose updated_at is older than STUCK_SWEEP_MINUTES
+// and re-enqueues them to the poll queue. Poll worker contains all the decision
+// logic (progress/timeout/account switching), so this only re-triggers it.
+const STUCK_SWEEP_MINUTES = Number(process.env.STUCK_SWEEP_MINUTES) || 60;
+const STUCK_SWEEP_INTERVAL_MS = Number(process.env.STUCK_SWEEP_INTERVAL_MS) || 5 * 60 * 1000;
+function startStuckSweep() {
+  const sweep = async () => {
+    try {
+      const cutoff = new Date(Date.now() - STUCK_SWEEP_MINUTES * 60 * 1000);
+      const stuck = await prisma.runwayJob.findMany({
+        where: {
+          status: { in: ["submitted", "processing"] },
+          updatedAt: { lt: cutoff },
+        },
+        select: { id: true, status: true, remoteTaskId: true, accountId: true, updatedAt: true } as any,
+      });
+      if (stuck.length === 0) return;
+      for (const job of stuck as any[]) {
+        const staleMin = Math.round((Date.now() - new Date(job.updatedAt).getTime()) / 60000);
+        if (job.remoteTaskId) {
+          await pollQueue.add("poll", {
+            jobId: job.id,
+            remoteTaskId: job.remoteTaskId,
+            accountId: job.accountId || undefined,
+          }, { delay: 2000 });
+          console.log(`[stuck-sweep] ${String(job.id).slice(0,8)} ${job.status} stale ${staleMin}min -> re-enqueued poll`);
+        } else {
+          await prisma.runwayJob.update({
+            where: { id: job.id },
+            data: { status: "pending", startedAt: null, accountId: null, progress: 0 } as any,
+          }).catch(() => {});
+          if (job.accountId) await accountPool.release(job.accountId, job.id).catch(() => {});
+          console.log(`[stuck-sweep] ${String(job.id).slice(0,8)} ${job.status} stale ${staleMin}min (no remoteTaskId) -> pending`);
+        }
+      }
+    } catch (e: any) {
+      console.warn("[stuck-sweep] error:", e.message);
+    }
+  };
+  setInterval(sweep, STUCK_SWEEP_INTERVAL_MS);
+  setTimeout(sweep, 30000); // initial run after 30s
+}
+
 // Video cache cleanup: delete cached videos older than N days
 const VIDEOS_DIR = "/root/runway/uploads/videos";
 const CACHE_MAX_AGE_DAYS = Number(process.env.VIDEO_CACHE_DAYS) || 30;
@@ -295,5 +339,6 @@ process.on('SIGINT', shutdown);
 setTimeout(recoverStuckJobs, 3000);
 setTimeout(startReconciliation, 5000);
 setTimeout(startCacheCleanup, 8000);
+setTimeout(startStuckSweep, 10000);
 setTimeout(startUploadCleanup, 10000);
 setTimeout(startCapturesCleanup, 12000);

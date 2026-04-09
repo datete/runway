@@ -897,6 +897,20 @@ onUnmounted(() => { if (autoRefreshTimer) clearInterval(autoRefreshTimer) })
                 <span class="text-[11px] text-white/35 mr-1">快速预设:</span>
                 <NButton v-for="p in [25, 50, 100, 150, 200]" :key="p" size="tiny" :type="speedPct === p ? 'primary' : 'default'" :ghost="speedPct !== p" @click="setSpeedPreset(p)">{{ p }}%</NButton>
               </div>
+              <div class="mt-4 flex items-center justify-between rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2">
+                <div class="flex items-center gap-2">
+                  <SvgIcon icon="ri:moon-line" class="text-sm text-indigo-300" />
+                  <span class="text-xs font-medium text-white/80">深夜模式</span>
+                  <NTooltip trigger="hover" placement="top">
+                    <template #trigger>
+                      <SvgIcon icon="ri:information-line" class="text-xs text-white/30" />
+                    </template>
+                    <div style="max-width: 260px">开启后，凌晨 02-08 时段账号有 80% 概率跳过提交并休眠数分钟，模拟真实作息。关闭则全天候跑。</div>
+                  </NTooltip>
+                  <span class="text-[10px]" :class="deepNightEnabled ? text-emerald-300 : text-amber-300">{{ deepNightEnabled ? "启用中" : "已关闭" }}</span>
+                </div>
+                <NSwitch :value="deepNightEnabled" :loading="deepNightSyncing" @update:value="onDeepNightChange" />
+              </div>
             </div>
           </div>
         </div>

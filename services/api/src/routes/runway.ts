@@ -208,11 +208,17 @@ runwayRouter.get("/token-status", authMiddleware, async (req, res) => {
 
     // Daily total (includes deleted — deletion does not decrement)
     let dailyUsed = 0;
+    let dailyQuotaUsed = 0;
+    let systemDailyTotal = 0;
     const dailyQuota = userRecord?.dailyQuota ?? null;
-    if (userId) {
+    {
       const todayStart = new Date();
       todayStart.setHours(0, 0, 0, 0);
-      dailyUsed = await prisma.runwayJob.count({ where: { userId, createdAt: { gte: todayStart } } }).catch(() => 0);
+      if (userId) {
+        dailyUsed = await prisma.runwayJob.count({ where: { userId, createdAt: { gte: todayStart } } }).catch(() => 0);
+        dailyQuotaUsed = await prisma.runwayJob.count({ where: { userId, createdAt: { gte: todayStart }, status: { notIn: ["deleted", "failed", "cancelled"] } } }).catch(() => 0);
+      }
+      systemDailyTotal = await prisma.runwayJob.count({ where: { createdAt: { gte: todayStart } } }).catch(() => 0);
     }
 
     // Total quota info
@@ -265,6 +271,8 @@ runwayRouter.get("/token-status", authMiddleware, async (req, res) => {
       activeTasks: userActiveCount,
       maxConcurrency: userMaxConcurrency,
       dailyUsed,
+      dailyQuotaUsed,
+      systemDailyTotal,
       dailyQuota,
       totalUsed,
       totalQuota,

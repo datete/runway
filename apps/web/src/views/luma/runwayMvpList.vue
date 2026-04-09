@@ -117,6 +117,7 @@ const pageSize = ref(20)
 const totalJobs = ref(0)
 const tabCounts = ref({ all: 0, queued: 0, processing: 0, completed: 0, failed: 0 })
 const activeTab = ref<TabKey>('all')
+const searchKeyword = ref('')
 
 const selectMode = ref(false)
 const selected = ref<Set<string>>(new Set())
@@ -198,7 +199,15 @@ const isActive = (status: string) => isQueued(status) || isProcessing(status)
 
 const tabCount = computed(() => tabCounts.value)
 
-const filteredJobs = computed(() => allJobs.value)
+const filteredJobs = computed(() => {
+  const kw = searchKeyword.value.trim().toLowerCase()
+  if (!kw) return allJobs.value
+  return allJobs.value.filter((j) => {
+    const prompt = (j.prompt || '').toLowerCase()
+    const id = (j.id || '').toLowerCase()
+    return prompt.includes(kw) || id.includes(kw)
+  })
+})
 
 const pageCount = computed(() => Math.max(1, Math.ceil(totalJobs.value / pageSize.value)))
 
@@ -210,7 +219,7 @@ const completionRate = computed(() => {
   return total > 0 ? Math.round(done / total * 100) : 0
 })
 
-const paginatedJobs = computed(() => allJobs.value)
+const paginatedJobs = computed(() => filteredJobs.value)
 
 const selectedJobs = computed(() => allJobs.value.filter((job) => selected.value.has(job.id)))
 
@@ -267,7 +276,12 @@ const fetchJobs = async (silent = false) => {
     }
 
     const data = await res.json()
-    allJobs.value = data.jobs || data
+    const rawJobs = data.jobs || data
+    // UI fix: treat THROTTLED queued (has remoteTaskId) as processing to avoid flip-flop
+    for (const j of rawJobs) {
+      if (j.status === "queued" && (j as any).remoteTaskId) j.status = "processing"
+    }
+    allJobs.value = rawJobs
     totalJobs.value = data.total ?? allJobs.value.length
     if (data.counts) tabCounts.value = data.counts
 
@@ -538,7 +552,7 @@ const handleBatchDownload = async () => {
     message.warning(`最多 ${MAX_BATCH_DOWNLOAD} 条`)
     return
   }
-  const targets = selectedJobs.value.filter((j) => j.status === 'succeeded' && j.resultUrl && j.resultUrl.startsWith('http'))
+  const targets = selectedJobs.value.filter((j) => j.status === 'completed' && j.resultUrl && j.resultUrl.startsWith('http'))
   if (targets.length === 0) {
     message.warning('没有可下载的已完成任务')
     return
@@ -691,6 +705,24 @@ onUnmounted(() => stopPolling())
             class="tab-active-bg absolute inset-0 rounded-lg bg-gradient-to-r from-sky-600 to-blue-600 shadow-lg shadow-sky-500/20"
           />
         </button>
+      </div>
+
+      <!-- Search box -->
+      <div class="mb-3">
+        <div class="flex items-center gap-2 rounded-xl border border-white/8 bg-white/4 px-3 py-2 backdrop-blur-md focus-within:border-sky-400/40">
+          <svg class="h-3.5 w-3.5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-4.35-4.35M17 10a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+          <input
+            v-model="searchKeyword"
+            type="text"
+            placeholder="搜索 prompt 或任务ID..."
+            class="flex-1 border-none bg-transparent text-xs text-white placeholder-slate-500 outline-none"
+          />
+          <button
+            v-if="searchKeyword"
+            class="text-xs text-slate-400 hover:text-white"
+            @click="searchKeyword = ''"
+          >清除</button>
+        </div>
       </div>
 
 
