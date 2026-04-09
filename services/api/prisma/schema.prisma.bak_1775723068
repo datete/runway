@@ -1,0 +1,279 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id             String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  username       String           @unique @db.VarChar(64)
+  passwordHash   String           @map("password_hash")
+  role           String           @default("user") @db.VarChar(16)
+  createdAt      DateTime         @default(now()) @map("created_at")
+  updatedAt      DateTime         @updatedAt @map("updated_at")
+  dailyQuota     Int?             @map("daily_quota")
+  isActive       Boolean          @default(true) @map("is_active")
+  maxConcurrency Int?             @map("max_concurrency")
+  totalQuota     Int?             @map("total_quota")
+  maxDevices    Int?        @default(3) @map("max_devices")
+  sessions      LoginSession[]
+  jobs           RunwayJob[]
+  devices       UserDevice[]
+  logs           UserLog[]
+  klingJobs      KlingJob[]
+  reviewTasks    ReviewTask[]
+
+  @@map("users")
+}
+
+model UserLog {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  action    String   @db.VarChar(64)
+  detail    String?
+  ip        String?  @db.VarChar(64)
+  createdAt DateTime @default(now()) @map("created_at")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_logs")
+}
+
+model RunwayJob {
+  id              String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  seq             Int              @default(autoincrement())
+  userId          String?          @map("user_id") @db.Uuid
+  provider        String           @default("useapi") @db.VarChar(32)
+  mode            String           @db.VarChar(32)
+  prompt          String
+  imageUrl        String?          @map("image_url")
+  status          String           @default("pending") @db.VarChar(32)
+  remoteTaskId    String?          @map("remote_task_id") @db.VarChar(128)
+  exploreMode     Boolean          @default(true) @map("explore_mode")
+  modelName       String           @default("gen4") @map("model_name") @db.VarChar(64)
+  resultUrl       String?          @map("result_url")
+  thumbnailUrl    String?          @map("thumbnail_url")
+  errorMessage    String?          @map("error_message")
+  retryCount      Int              @default(0) @map("retry_count")
+  createdAt       DateTime         @default(now()) @map("created_at")
+  updatedAt       DateTime         @updatedAt @map("updated_at")
+  startedAt       DateTime?        @map("started_at")
+  finishedAt      DateTime?        @map("finished_at")
+  referenceImages String?          @map("reference_images")
+  usedToken       String?          @map("used_token") @db.VarChar(64)
+  duration        Int?
+  remark          String?
+  accountId       String?          @map("account_id") @db.Uuid
+  resolution      String?          @db.VarChar(32)
+  quality         String?          @db.VarChar(32)
+  cfgScale        Float?           @map("cfg_scale")
+  sound           Boolean?
+  videoUrl        String?          @map("video_url")
+  progress        Float?           @default(0)
+  priority        Int              @default(0)
+  events          RunwayJobEvent[]
+  account         RunwayAccount?   @relation(fields: [accountId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  user            User?            @relation(fields: [userId], references: [id])
+
+  @@index([status], map: "idx_runway_jobs_status")
+  @@index([userId], map: "idx_runway_jobs_user_id")
+  @@index([accountId], map: "idx_runway_jobs_account_id")
+  @@index([createdAt], map: "idx_runway_jobs_created_at")
+  @@index([remoteTaskId], map: "idx_runway_jobs_remote_task_id")
+  @@map("runway_jobs")
+}
+
+model RunwayJobEvent {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  jobId       String    @map("job_id") @db.Uuid
+  eventType   String    @map("event_type") @db.VarChar(32)
+  message     String?
+  payloadJson Json?     @map("payload_json")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  job         RunwayJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId], map: "idx_runway_job_events_job_id")
+  @@map("runway_job_events")
+}
+
+model RunwayAccount {
+  id               String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  label            String      @db.VarChar(64)
+  token            String
+  tokenShort       String      @map("token_short") @db.VarChar(16)
+  teamId           String      @map("team_id") @db.VarChar(32)
+  proxyUrl         String?     @map("proxy_url")
+  maxConcurrency   Int         @default(2) @map("max_concurrency")
+  isActive         Boolean     @default(true) @map("is_active")
+  priority         Int         @default(0)
+  tokenExpiresAt   DateTime?   @map("token_expires_at") @db.Timestamptz(6)
+  lastUsedAt       DateTime?   @map("last_used_at") @db.Timestamptz(6)
+  lastErrorAt      DateTime?   @map("last_error_at") @db.Timestamptz(6)
+  lastErrorMessage String?     @map("last_error_message")
+  totalGenerated   Int         @default(0) @map("total_generated")
+  createdAt        DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime    @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  jobs             RunwayJob[]
+
+  @@map("runway_accounts")
+}
+
+model LoginSession {
+  id               String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId           String       @map("user_id") @db.Uuid
+  deviceId         String?      @map("device_id") @db.Uuid
+  ip               String       @db.VarChar(64)
+  city             String?      @db.VarChar(128)
+  region           String?      @db.VarChar(128)
+  country          String?      @db.VarChar(8)
+  userAgent        String?      @map("user_agent")
+  isSuspicious     Boolean?     @default(false) @map("is_suspicious")
+  suspiciousReason String?      @map("suspicious_reason") @db.VarChar(256)
+  createdAt        DateTime?    @default(now()) @map("created_at") @db.Timestamptz(6)
+  device           UserDevice?  @relation(fields: [deviceId], references: [id], onUpdate: NoAction)
+  user             User         @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([createdAt(sort: Desc)], map: "idx_login_sessions_created")
+  @@index([userId], map: "idx_login_sessions_user")
+  @@map("login_sessions")
+}
+
+model UserDevice {
+  id            String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId        String          @map("user_id") @db.Uuid
+  fingerprint   String          @db.VarChar(128)
+  deviceName    String?         @map("device_name") @db.VarChar(256)
+  browser       String?         @db.VarChar(128)
+  os            String?         @db.VarChar(128)
+  firstSeenAt   DateTime?       @default(now()) @map("first_seen_at") @db.Timestamptz(6)
+  lastSeenAt    DateTime?       @default(now()) @map("last_seen_at") @db.Timestamptz(6)
+  lastIp        String?         @map("last_ip") @db.VarChar(64)
+  isTrusted     Boolean?        @default(false) @map("is_trusted")
+  isBlocked     Boolean?        @default(false) @map("is_blocked")
+  sessions      LoginSession[]
+  user          User            @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([userId, fingerprint])
+  @@index([userId], map: "idx_user_devices_user")
+  @@map("user_devices")
+}
+model SeedreamJob {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId          String   @map("user_id") @db.Uuid
+  accountId       String?  @map("account_id") @db.Uuid
+  remoteTaskId    String?  @map("remote_task_id")
+  status          String   @default("pending") @db.VarChar(32)
+  prompt          String
+  aspectRatio     String   @map("aspect_ratio") @db.VarChar(16)
+  resolution      String   @db.VarChar(8)
+  numImages       Int      @default(1) @map("num_images")
+  exploreMode     Boolean  @default(true) @map("explore_mode")
+  referenceImages Json?    @map("reference_images")
+  images          Json?
+  errorMessage    String?  @map("error_message")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([userId, createdAt(sort: Desc)], map: "idx_seedream_jobs_user_created")
+  @@map("seedream_jobs")
+}
+
+model RunwayVideoJob {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId         String   @map("user_id") @db.Uuid
+  accountId      String?  @map("account_id") @db.Uuid
+  remoteTaskId   String?  @map("remote_task_id")
+  status         String   @default("pending") @db.VarChar(32)
+  prompt         String
+  mode           String   @db.VarChar(32)
+  model          String   @default("gen4_turbo") @db.VarChar(32)
+  ratio          String   @default("16:9") @db.VarChar(8)
+  seconds        Int      @default(5)
+  seed           Int?
+  watermark      Boolean  @default(false)
+  exploreMode    Boolean  @default(true) @map("explore_mode")
+  referenceImage Json?    @map("reference_image")
+  videoUrl       String?  @map("video_url")
+  errorMessage   String?  @map("error_message")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([userId, createdAt(sort: Desc)], map: "idx_runway_video_jobs_user_created")
+  @@map("runway_video_jobs")
+}
+
+
+model KlingJob {
+  id          String   @id @default(cuid())
+  taskId      String   @unique @map("task_id")
+  userId      String   @map("user_id") @db.Uuid
+  cat         String?
+  prompt      String?  @db.Text
+  status      String   @default("processing")
+  resultUrl   String?  @map("result_url") @db.Text
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([status])
+  @@map("kling_jobs")
+}
+
+model ReviewTask {
+  id              String       @id @default(cuid())
+  userId          String       @map("user_id") @db.Uuid
+  title           String?
+  genPrompt       String       @map("gen_prompt")
+  qcPrompt        String       @map("qc_prompt")
+  refImages       Json?        @map("ref_images")
+  aspectRatio     String       @default("1:1") @map("aspect_ratio")
+  resolution      String       @default("2k")
+  targetCount     Int          @map("target_count")
+  overGenRatio    Float        @default(2.0) @map("over_gen_ratio")
+  maxRounds       Int          @default(3) @map("max_rounds")
+  currentRound    Int          @default(0) @map("current_round")
+  passedCount     Int          @default(0) @map("passed_count")
+  status          String       @default("running")
+  createdAt       DateTime     @default(now()) @map("created_at")
+  updatedAt       DateTime     @updatedAt @map("updated_at")
+  user            User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items           ReviewItem[]
+
+  @@index([userId, createdAt])
+  @@map("review_tasks")
+}
+
+model ReviewItem {
+  id              String     @id @default(cuid())
+  taskId          String     @map("task_id")
+  round           Int        @default(1)
+  status          String     @default("pending")
+  seedreamJobId   String?    @map("seedream_job_id")
+  currentImageUrl String?    @map("current_image_url")
+  finalImageUrl   String?    @map("final_image_url")
+  lastReason      String?    @map("last_reason")
+  history         Json?
+  createdAt       DateTime   @default(now()) @map("created_at")
+  updatedAt       DateTime   @updatedAt @map("updated_at")
+  task            ReviewTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([taskId])
+  @@index([status])
+  @@map("review_items")
+}
+
+model ReviewEvent {
+  id        String   @id @default(cuid())
+  taskId    String   @map("task_id")
+  itemId    String?  @map("item_id")
+  round     Int?
+  type      String   @db.VarChar(32)
+  payload   Json?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([taskId, createdAt])
+  @@map("review_events")
+}

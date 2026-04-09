@@ -206,10 +206,10 @@ runwayRouter.get("/token-status", authMiddleware, async (req, res) => {
       : null;
     const userMaxConcurrency = userRecord?.maxConcurrency ?? 2;
 
-    // Daily quota info
+    // Daily total (includes deleted — deletion does not decrement)
     let dailyUsed = 0;
     const dailyQuota = userRecord?.dailyQuota ?? null;
-    if (userId && dailyQuota !== null) {
+    if (userId) {
       const todayStart = new Date();
       todayStart.setHours(0, 0, 0, 0);
       dailyUsed = await prisma.runwayJob.count({ where: { userId, createdAt: { gte: todayStart } } }).catch(() => 0);

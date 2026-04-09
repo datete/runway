@@ -125,7 +125,6 @@ let pollTimer: ReturnType<typeof setInterval> | null = null
 
 // Loading state
 const loading = ref(false)
-const mountedOnce = ref(false)
 const fetchError = ref('')
 
 // Inline video playback
@@ -544,7 +543,7 @@ watch(jwtToken, (token) => {
   else stopPolling()
 })
 
-onMounted(async () => { await fetchJobs(); mountedOnce.value = true })
+onMounted(() => fetchJobs())
 onUnmounted(() => stopPolling())
 </script>
 
@@ -713,7 +712,7 @@ onUnmounted(() => stopPolling())
             v-memo="[job.status, job.progress, job.resultUrl, job.thumbnailUrl, selected.has(job.id), playingVideoId === job.id]"
             class="job-card group relative overflow-hidden rounded-2xl border bg-white/4 backdrop-blur-md transition-all duration-300 hover:-translate-y-[2px] hover:scale-[1.005]"
             :class="selected.has(job.id) ? 'border-sky-400/50 shadow-lg shadow-sky-500/15' : 'border-white/8 hover:border-sky-400/20 hover:shadow-lg hover:shadow-sky-500/8'"
-            :style="mountedOnce ? {} : { animationDelay: `${index * 60}ms` }"
+            :style="{ animationDelay: `${index * 60}ms` }"
           >
             <!-- Status left border strip -->
             <div
@@ -751,8 +750,7 @@ onUnmounted(() => stopPolling())
               />
               <!-- Thumbnail state: static preview with play button -->
               <template v-else>
-                <img v-if="job.thumbnailUrl" :src="job.thumbnailUrl" loading="lazy" class="aspect-video w-full object-cover pointer-events-none" />
-                <video v-else preload="none" class="aspect-video w-full object-contain pointer-events-none" :src="job.resultUrl" />
+                <video preload="metadata" class="aspect-video w-full object-contain pointer-events-none" :src="job.resultUrl" />
                 <div class="absolute inset-0 flex cursor-pointer items-center justify-center bg-black/20 transition-all duration-200 hover:bg-black/10">
                   <div class="play-breathe flex h-11 w-11 items-center justify-center rounded-full bg-white/15 backdrop-blur-sm transition-transform">
                     <SvgIcon icon="ri:play-fill" class="ml-0.5 text-xl text-white/90" />

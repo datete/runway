@@ -544,7 +544,7 @@ watch(jwtToken, (token) => {
   else stopPolling()
 })
 
-onMounted(async () => { await fetchJobs(); mountedOnce.value = true })
+onMounted(() => fetchJobs())
 onUnmounted(() => stopPolling())
 </script>
 
