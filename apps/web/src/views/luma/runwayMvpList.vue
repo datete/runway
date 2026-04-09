@@ -6,6 +6,7 @@ import { SvgIcon } from '@/components/common'
 import { useRunwayJwt } from '@/composables/useRunwayJwt'
 import RunwayAdminPanel from './RunwayAdminPanel.vue'
 import RunwayLoginModal from './RunwayLoginModal.vue'
+import JSZip from 'jszip'
 
 interface RunwayJob {
   id: string
@@ -517,6 +518,69 @@ const copyTaskId = (id: string) => {
   })
 }
 
+const downloadStatus = ref<{ active: boolean; phase: 'fetching' | 'zipping' | 'done'; current: number; total: number; percent: number; skipped?: number } | null>(null)
+
+const MAX_BATCH_DOWNLOAD = 20
+
+const batchDownloadDisabled = computed(() => {
+  if (downloadStatus.value?.active) return true
+  const n = selected.value.size
+  if (n === 0) return true
+  if (n > MAX_BATCH_DOWNLOAD) return true
+  return false
+})
+
+const sanitizeFilename = (name: string) => name.replace(/[\\/:*?"<>|\r\n\t]/g, '_').trim()
+
+const handleBatchDownload = async () => {
+  if (selected.value.size === 0) return
+  if (selected.value.size > MAX_BATCH_DOWNLOAD) {
+    message.warning(`最多 ${MAX_BATCH_DOWNLOAD} 条`)
+    return
+  }
+  const targets = selectedJobs.value.filter((j) => j.status === 'succeeded' && j.resultUrl && j.resultUrl.startsWith('http'))
+  if (targets.length === 0) {
+    message.warning('没有可下载的已完成任务')
+    return
+  }
+  const zip = new JSZip()
+  let skipped = 0
+  downloadStatus.value = { active: true, phase: 'fetching', current: 0, total: targets.length, percent: 0, skipped: 0 }
+  for (let i = 0; i < targets.length; i++) {
+    const job = targets[i]
+    downloadStatus.value = { ...downloadStatus.value!, current: i + 1 }
+    try {
+      const blob = await fetch(job.resultUrl!).then((r) => {
+        if (!r.ok) throw new Error('fetch failed')
+        return r.blob()
+      })
+      const base = sanitizeFilename(`${job.id.slice(0, 8)}_${(job.prompt || 'video').slice(0, 20)}`)
+      zip.file(`${base}.mp4`, blob)
+    } catch {
+      skipped++
+      downloadStatus.value = { ...downloadStatus.value!, skipped }
+    }
+  }
+  downloadStatus.value = { ...downloadStatus.value!, phase: 'zipping', percent: 0 }
+  const zipBlob = await zip.generateAsync({ type: 'blob' }, (meta) => {
+    if (downloadStatus.value) {
+      downloadStatus.value = { ...downloadStatus.value, phase: 'zipping', percent: Math.round(meta.percent) }
+    }
+  })
+  const url = URL.createObjectURL(zipBlob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `runway_batch_${Date.now()}.zip`
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+  downloadStatus.value = { active: false, phase: 'done', current: targets.length, total: targets.length, percent: 100, skipped }
+  if (skipped > 0) message.info(`下载完成，跳过 ${skipped} 条`)
+  else message.success('下载完成')
+  setTimeout(() => { downloadStatus.value = null }, 3000)
+}
+
 const handleLogout = () => {
   removeToken()
   allJobs.value = []
@@ -663,6 +727,19 @@ onUnmounted(() => stopPolling())
             >
               删除 {{ selected.size }} 条
             </button>
+            <button
+              v-if="selected.size > 0"
+              :disabled="batchDownloadDisabled"
+              :title="selected.size > MAX_BATCH_DOWNLOAD ? '最多 20 条' : ''"
+              class="glass-btn rounded-lg border border-sky-400/20 bg-sky-500/10 px-3 py-1.5 text-xs font-medium text-sky-300 backdrop-blur transition-all hover:border-sky-400/40 hover:bg-sky-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+              @click="handleBatchDownload"
+            >
+              批量下载 {{ selected.size }} 条
+            </button>
+            <div v-if="downloadStatus?.active" class="rounded-lg border border-sky-400/20 bg-sky-500/10 px-3 py-1.5 text-xs text-sky-200">
+              <template v-if="downloadStatus.phase === 'fetching'">下载中 {{ downloadStatus.current }}/{{ downloadStatus.total }}</template>
+              <template v-else-if="downloadStatus.phase === 'zipping'">压缩 {{ downloadStatus.percent }}%</template>
+            </div>
             <button
               class="glass-btn rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-slate-400 backdrop-blur transition-all hover:border-white/20 hover:bg-white/10"
               @click="cancelSelectMode"

@@ -172,6 +172,8 @@ const quotaLabel = computed(() => {
   const parts: string[] = []
   if (dailyQuota.value !== null) {
     parts.push(`今日 ${dailyUsed.value}/${dailyQuota.value}`)
+  } else {
+    parts.push(`今日生成 ${dailyUsed.value}`)
   }
   if (totalQuota.value !== null) {
     parts.push(`总计 ${totalUsed.value}/${totalQuota.value}`)
@@ -1132,6 +1134,11 @@ onUnmounted(() => {
           <span class="text-sm font-semibold text-white/90 tracking-wide">视频创作</span>
           <span class="text-[10px] text-white/35 leading-tight">图生视频 · 单任务模式</span>
         </div>
+      </div>
+      <div class="today-badge" :title="`今日累计生成任务数（含已删除）`">
+        <SvgIcon icon="ri:flashlight-line" class="text-[11px] text-amber-300" />
+        <span class="text-[10px] text-white/50">今日生成</span>
+        <span class="text-sm font-bold tabular-nums text-amber-300">{{ dailyUsed }}</span>
       </div>
     </div>
 
@@ -2471,4 +2478,15 @@ button:focus-visible,
   transform: translateY(-8px);
 }
 
+
+.today-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, rgba(251, 191, 36, 0.12), rgba(251, 146, 60, 0.08));
+  border: 1px solid rgba(251, 191, 36, 0.25);
+  box-shadow: 0 0 12px rgba(251, 191, 36, 0.08);
+}
 </style>
