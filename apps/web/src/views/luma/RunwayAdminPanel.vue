@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, h, onMounted, onUnmounted, ref, watch } from 'vue'
+
 import {
   NButton, NDataTable, NDrawer, NDrawerContent, NForm, NFormItem,
   NInput, NInputNumber, NModal, NPagination, NProgress, NSelect,
@@ -417,6 +418,49 @@ const fetchAdminJobs = async () => {
     adminJobsTotal.value = data.total || 0
   } catch (e: any) { message.error(e.message) }
   finally { jobsLoading.value = false }
+}
+
+// Kill single job
+async function killJob(jobId: string) {
+  if (!confirm(`确认终止任务 ${jobId.slice(0, 8)}...？`)) return
+  try {
+    const res = await fetch(`/api/runway/admin/jobs/${jobId}/kill`, { method: 'POST', headers: headers() })
+    const data = await res.json()
+    if (data.ok) {
+      message.success(`任务已终止 (原状态: ${data.previousStatus})`)
+      fetchAdminJobs()
+      fetchDashboard()
+    } else {
+      message.error(data.error || '终止失败')
+    }
+  } catch (e: any) { message.error(e.message) }
+}
+
+// Kill all stuck jobs
+const killingStuck = ref(false)
+async function killStuckJobs() {
+  if (!confirm('确认批量清理所有卡住超过30分钟的任务？')) return
+  try {
+    killingStuck.value = true
+    const res = await fetch('/api/runway/admin/jobs/kill-stuck', {
+      method: 'POST',
+      headers: { ...headers(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ minutes: 30 }),
+    })
+    const data = await res.json()
+    if (data.ok) {
+      if (data.killed === 0) {
+        message.info(data.message || '没有卡住的任务')
+      } else {
+        message.success(`已清理 ${data.killed} 个卡住任务，释放 ${data.accounts} 个账号槽位`)
+      }
+      fetchAdminJobs()
+      fetchDashboard()
+    } else {
+      message.error(data.error || '清理失败')
+    }
+  } catch (e: any) { message.error(e.message) }
+  finally { killingStuck.value = false }
 }
 
 const fetchLogs = async () => {

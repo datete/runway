@@ -1147,9 +1147,9 @@ onUnmounted(() => {
           <span class="text-[10px] text-white/50">今日生成</span>
           <span class="text-sm font-bold tabular-nums text-amber-300">{{ dailyUsed }}</span>
         </div>
-        <div class="system-badge" :title="`全站今日总生成数（含已删除）`">
+        <div class="system-badge" :title="`全站今日完成数（status=completed,按完成时间）`">
           <SvgIcon icon="ri:global-line" class="text-[11px] text-sky-300" />
-          <span class="text-[10px] text-white/50">系统今日</span>
+          <span class="text-[10px] text-white/50">系统今日完成</span>
           <span class="text-sm font-bold tabular-nums text-sky-300">{{ systemDailyTotal }}</span>
         </div>
       </div>

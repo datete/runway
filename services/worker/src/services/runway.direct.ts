@@ -270,11 +270,15 @@ export class RunwayDirectClient implements RunwayProvider {
     }
 
     // Upload reference video for pro mode
+    // NOTE: upstream Kling 拒绝 referenceVideos 当参考图 > 1 张时("Reference videos are not supported for this model")
+    // 因此多参考图场景下跳过 ref video,只送参考图。
     let referenceVideoAsset: { url: string; assetId: string } | undefined;
-    if (input.videoUrl) {
+    if (input.videoUrl && referenceImages.length <= 1) {
       console.log(`[runway:task] uploading reference video: ${input.videoUrl}`);
       referenceVideoAsset = await this.uploadFileWithAsset(input.videoUrl);
       console.log(`[runway:task] reference video uploaded, assetId=${referenceVideoAsset.assetId}`);
+    } else if (input.videoUrl && referenceImages.length > 1) {
+      console.log(`[runway:task] skipping ref video (refs=${referenceImages.length} > 1, upstream rejects)`);
     }
 
     // Use resolution from frontend directly; fallback to defaults if missing

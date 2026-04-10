@@ -486,6 +486,74 @@ router.get("/jobs", async (req: Request, res: Response) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
+// POST /api/runway/admin/jobs/:id/kill — Force kill a single job
+router.post("/jobs/:id/kill", async (req: Request, res: Response) => {
+  try {
+    const job = await prisma.runwayJob.findUnique({ where: { id: req.params.id } });
+    if (!job) return res.status(404).json({ error: "任务不存在" });
+    if (job.status === "completed" || job.status === "failed" || job.status === "cancelled" || job.status === "deleted") {
+      return res.status(400).json({ error: `任务已是终态: ${job.status}` });
+    }
+    await prisma.runwayJob.update({
+      where: { id: req.params.id },
+      data: { status: "failed", errorMessage: `管理员 ${req.user?.username || "unknown"} 手动终止` },
+    });
+    // Release account concurrency slot in Redis
+    if (job.accountId) {
+      const key = `account:concurrency:${job.accountId}`;
+      const current = await redis.get(key);
+      if (current && parseInt(current, 10) > 0) {
+        await redis.decr(key);
+      }
+    }
+    console.log(`[admin] job ${req.params.id} killed by ${req.user?.username}, was ${job.status} on account ${job.accountId}`);
+    res.json({ ok: true, jobId: req.params.id, previousStatus: job.status });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/runway/admin/jobs/kill-stuck — Batch kill all stuck jobs (processing/submitted too long)
+router.post("/jobs/kill-stuck", async (req: Request, res: Response) => {
+  try {
+    const minutes = Number(req.body?.minutes) || 30;
+    const cutoff = new Date(Date.now() - minutes * 60 * 1000);
+    // Find stuck jobs first to release their Redis slots
+    const stuckJobs = await prisma.runwayJob.findMany({
+      where: {
+        status: { in: ["processing", "submitted"] },
+        updatedAt: { lt: cutoff },
+      },
+      select: { id: true, status: true, accountId: true },
+    });
+    if (stuckJobs.length === 0) {
+      return res.json({ ok: true, killed: 0, message: `没有超过 ${minutes} 分钟的卡住任务` });
+    }
+    // Batch update to failed
+    const result = await prisma.runwayJob.updateMany({
+      where: {
+        status: { in: ["processing", "submitted"] },
+        updatedAt: { lt: cutoff },
+      },
+      data: {
+        status: "failed",
+        errorMessage: `管理员 ${req.user?.username || "unknown"} 批量清理卡住任务 (>${minutes}min)`,
+      },
+    });
+    // Release Redis concurrency slots
+    const accountIds = [...new Set(stuckJobs.filter(j => j.accountId).map(j => j.accountId!))];
+    for (const accountId of accountIds) {
+      const count = stuckJobs.filter(j => j.accountId === accountId).length;
+      const key = `account:concurrency:${accountId}`;
+      const current = await redis.get(key);
+      if (current) {
+        const newVal = Math.max(0, parseInt(current, 10) - count);
+        await redis.set(key, String(newVal));
+      }
+    }
+    console.log(`[admin] killed ${result.count} stuck jobs (>${minutes}min) by ${req.user?.username}`);
+    res.json({ ok: true, killed: result.count, accounts: accountIds.length, cutoffMinutes: minutes });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
 // ============== LOGS ==============
 
 // GET /api/runway/admin/logs
@@ -527,11 +595,16 @@ router.get("/dashboard", async (_req: Request, res: Response) => {
       prisma.runwayJob.count({ where: { status: { in: ["submitted", "processing"] } } }),
       prisma.runwayJob.count({ where: { status: "completed" } }),
       prisma.runwayJob.count({ where: { status: "failed" } }),
-      prisma.runwayJob.count({ where: { status: "completed", createdAt: { gte: todayStart } } }),
-      prisma.runwayJob.count({ where: { status: "failed", createdAt: { gte: todayStart } } }),
+      prisma.runwayJob.count({ where: { status: "completed", finishedAt: { gte: todayStart } } }),
+      prisma.runwayJob.count({ where: { status: "failed", finishedAt: { gte: todayStart } } }),
       prisma.runwayJob.findMany({
-        where: { createdAt: { gte: todayStart }, status: notDeleted },
-        select: { userId: true, status: true },
+        where: {
+          OR: [
+            { createdAt: { gte: todayStart }, status: notDeleted },
+            { finishedAt: { gte: todayStart }, status: { in: ["completed", "failed"] } },
+          ],
+        },
+        select: { userId: true, status: true, createdAt: true, finishedAt: true },
       }),
       prisma.runwayJob.count({ where: { status: "completed", finishedAt: { gte: hourAgo } } }),
       prisma.runwayJob.groupBy({ by: ["accountId"], where: { status: "completed", finishedAt: { gte: hourAgo }, accountId: { not: null } }, _count: { _all: true } }),
@@ -542,14 +615,16 @@ router.get("/dashboard", async (_req: Request, res: Response) => {
     const hourlyByUserMap: Record<string, number> = {};
     for (const e of hourlyByUser) { if (e.userId) hourlyByUserMap[e.userId] = e._count._all; }
 
-    // Per-user today stats
+    // Per-user today stats: total = created today, completed/failed = finished today (finishedAt-based)
     const userTodayMap: Record<string, { total: number; completed: number; failed: number }> = {};
-    for (const j of recentJobs) {
+    for (const j of recentJobs as any[]) {
       const uid = j.userId || "__none__";
       if (!userTodayMap[uid]) userTodayMap[uid] = { total: 0, completed: 0, failed: 0 };
-      userTodayMap[uid].total++;
-      if (j.status === "completed") userTodayMap[uid].completed++;
-      if (j.status === "failed") userTodayMap[uid].failed++;
+      const createdToday = j.createdAt && new Date(j.createdAt).getTime() >= todayStart.getTime();
+      const finishedToday = j.finishedAt && new Date(j.finishedAt).getTime() >= todayStart.getTime();
+      if (createdToday) userTodayMap[uid].total++;
+      if (finishedToday && j.status === "completed") userTodayMap[uid].completed++;
+      if (finishedToday && j.status === "failed") userTodayMap[uid].failed++;
     }
 
     // Per-user total job counts (exclude deleted)

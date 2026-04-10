@@ -218,7 +218,7 @@ runwayRouter.get("/token-status", authMiddleware, async (req, res) => {
         dailyUsed = await prisma.runwayJob.count({ where: { userId, createdAt: { gte: todayStart } } }).catch(() => 0);
         dailyQuotaUsed = await prisma.runwayJob.count({ where: { userId, createdAt: { gte: todayStart }, status: { notIn: ["deleted", "failed", "cancelled"] } } }).catch(() => 0);
       }
-      systemDailyTotal = await prisma.runwayJob.count({ where: { createdAt: { gte: todayStart } } }).catch(() => 0);
+      systemDailyTotal = await prisma.runwayJob.count({ where: { status: "completed", finishedAt: { gte: todayStart } } }).catch(() => 0);
     }
 
     // Total quota info
