@@ -309,6 +309,7 @@ export class RunwayDirectClient implements RunwayProvider {
           textPrompt:     input.prompt,
           duration:       input.duration || 5,
           resolution:     effectiveResolution,
+          aspectRatio:    "9:16",
           generateAudio:  input.sound !== false,
           exploreMode:    input.exploreMode ?? true,
           creationSource: "tool-mode",
