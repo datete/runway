@@ -18,6 +18,48 @@ runwayRouter.post("/jobs/:id/cancel", authMiddleware, (req, res) => ctrl.cancelJ
 runwayRouter.post("/jobs/:id/retry", authMiddleware, (req, res) => ctrl.retryJob(req, res));
 runwayRouter.delete("/jobs/:id", authMiddleware, (req, res) => ctrl.deleteJob(req, res));
 
+// Tags (remark-based)
+runwayRouter.get("/tags", authMiddleware, async (req, res) => {
+  try {
+    const userId = (req as any).user?.id;
+    const role = (req as any).user?.role;
+    const where: any = role === "admin"
+      ? { remark: { not: null }, status: { not: "deleted" } }
+      : { userId, remark: { not: null }, status: { not: "deleted" } };
+    const tags = await prisma.runwayJob.groupBy({
+      by: ["remark"],
+      where,
+      _count: { id: true },
+      orderBy: { _count: { id: "desc" } },
+    });
+    res.json(tags.filter(t => t.remark).map(t => ({ tag: t.remark, count: t._count.id })));
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+runwayRouter.delete("/tags/:tag", authMiddleware, async (req, res) => {
+  try {
+    const tag = decodeURIComponent(req.params.tag);
+    const userId = (req as any).user?.id;
+    const role = (req as any).user?.role;
+    const where: any = role === "admin"
+      ? { remark: tag, status: { not: "deleted" } }
+      : { userId, remark: tag, status: { not: "deleted" } };
+    // First count
+    const count = await prisma.runwayJob.count({ where });
+    if (count === 0) return res.status(404).json({ error: "no jobs with this tag" });
+    // Soft delete all
+    const result = await prisma.runwayJob.updateMany({
+      where,
+      data: { status: "deleted", finishedAt: new Date() },
+    });
+    res.json({ deleted: result.count, tag });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Upload — require auth
 const ALLOWED_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp", "gif", "mp4", "mov", "avi"]);
 const MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10MB
@@ -280,7 +322,7 @@ runwayRouter.get("/token-status", authMiddleware, async (req, res) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 // ============================================================
-// Seedream 5.0 routes — direct Runway API (taskType: seedream_5)
+// Seedream 5.0 routes — direct API (taskType: seedream_5)
 // Appended to runway.ts. Requires: prisma, authMiddleware, fetch (node-fetch already imported dynamically in this file).
 // ============================================================
 
@@ -336,7 +378,7 @@ runwayRouter.post("/seedream/upload", authMiddleware, async (req: any, res: any)
     if (buf.length > 10 * 1024 * 1024) return res.status(400).json({ error: "图片过大（>10MB）" });
 
     const account = await _pickSeedreamAccount();
-    if (!account) return res.status(503).json({ error: "无可用 Runway 账号" });
+    if (!account) return res.status(503).json({ error: "无可用账号" });
 
     // Step 1: request upload URL
     console.log("[seedream:log] POST /v1/uploads filename:", safeName);
@@ -345,11 +387,11 @@ runwayRouter.post("/seedream/upload", authMiddleware, async (req: any, res: any)
       body: JSON.stringify({ filename: safeName, numberOfParts: 1, type: "DATASET" }),
     }, account);
     console.log("[seedream:log] /v1/uploads status:", r1.status, "body:", r1.text.slice(0,400));
-    if (!r1.ok) return res.status(502).json({ error: `Runway uploads ${r1.status}`, detail: r1.text.slice(0, 500) });
+    if (!r1.ok) return res.status(502).json({ error: `上传失败 ${r1.status}`, detail: r1.text.slice(0, 500) });
     const uploadId = r1.json?.id;
     const uploadUrl = r1.json?.uploadUrls?.[0];
     const uploadHeaders = r1.json?.uploadHeaders || { "Content-Type": mime };
-    if (!uploadId || !uploadUrl) return res.status(502).json({ error: "Runway 未返回 uploadUrls" });
+    if (!uploadId || !uploadUrl) return res.status(502).json({ error: "未返回 uploadUrls" });
 
     // Step 2: PUT bytes to presigned S3
     const fetchMod = await import("node-fetch");
@@ -384,9 +426,9 @@ runwayRouter.post("/seedream/upload", authMiddleware, async (req: any, res: any)
       method: "POST",
       body: JSON.stringify({ parts: [{ PartNumber: 1, ETag: etag }] }),
     }, account);
-    if (!r3.ok) return res.status(502).json({ error: `Runway complete ${r3.status}`, detail: r3.text.slice(0, 500) });
+    if (!r3.ok) return res.status(502).json({ error: `complete 失败 ${r3.status}`, detail: r3.text.slice(0, 500) });
     const cdnUrl = r3.json?.url;
-    if (!cdnUrl) return res.status(502).json({ error: "Runway 未返回 CDN url" });
+    if (!cdnUrl) return res.status(502).json({ error: "未返回 CDN url" });
 
     res.json({ ok: true, assetId: uploadId, url: cdnUrl, filename: safeName });
   } catch (e: any) {
@@ -407,7 +449,7 @@ runwayRouter.post("/seedream", authMiddleware, async (req: any, res: any) => {
     const n = Math.max(1, Math.min(4, Number(numImages) || 1));
 
     const account = await _pickSeedreamAccount();
-    if (!account) return res.status(503).json({ error: "无可用 Runway 账号" });
+    if (!account) return res.status(503).json({ error: "无可用账号" });
 
     const { randomUUID } = await import("crypto");
     const options: any = {
@@ -438,10 +480,10 @@ runwayRouter.post("/seedream", authMiddleware, async (req: any, res: any) => {
         where: { id: account.id },
         data: { lastErrorAt: new Date(), lastErrorMessage: `seedream create ${r.status}: ${r.text.slice(0, 300)}` },
       }).catch(() => {});
-      return res.status(502).json({ error: `Runway API ${r.status}`, detail: r.text.slice(0, 500) });
+      return res.status(502).json({ error: `API ${r.status}`, detail: r.text.slice(0, 500) });
     }
     const remoteTaskId = r.json?.id || r.json?.task?.id || r.json?.taskId;
-    if (!remoteTaskId) return res.status(502).json({ error: "Runway 未返回 taskId", raw: r.json });
+    if (!remoteTaskId) return res.status(502).json({ error: "未返回 taskId", raw: r.json });
 
     const row = await prisma.seedreamJob.create({
       data: {
@@ -504,7 +546,7 @@ runwayRouter.get("/seedream/:id", authMiddleware, async (req: any, res: any) => 
             const artifacts = t.artifacts || t.output || [];
             images = artifacts.map((a: any, i: number) => ({ index: i, url: a.url || a.imageUrl || a }));
           } else if (status === "FAILED") {
-            err = t.errorMessage || t.error || "Runway 任务失败";
+            err = t.errorMessage || t.error || "任务失败";
           }
           const updated = await prisma.seedreamJob.update({
             where: { id: row.id },
@@ -550,7 +592,7 @@ runwayRouter.delete("/seedream/:id", authMiddleware, async (req: any, res: any) 
 });
 
 // ============================================================
-// Runway Video routes — direct Runway API (taskType: gen4 / gen4_turbo)
+// Runway Video routes — direct API (taskType: gen4 / gen4_turbo)
 // ============================================================
 
 async function _pickVideoAccount() {
@@ -576,11 +618,11 @@ async function _uploadAssetToRunway(account: any, dataUrl: string, filename: str
     method: "POST",
     body: JSON.stringify({ filename: safeName, numberOfParts: 1, type: "DATASET" }),
   }, account);
-  if (!r1.ok) throw new Error(`Runway uploads ${r1.status}: ${r1.text.slice(0,300)}`);
+  if (!r1.ok) throw new Error(`上传失败 ${r1.status}: ${r1.text.slice(0,300)}`);
   const uploadId = r1.json?.id;
   const uploadUrl = r1.json?.uploadUrls?.[0];
   const uploadHeaders = r1.json?.uploadHeaders || { "Content-Type": mime };
-  if (!uploadId || !uploadUrl) throw new Error("Runway no uploadUrls");
+  if (!uploadId || !uploadUrl) throw new Error("no uploadUrls");
 
   const fetchMod = await import("node-fetch");
   const fetch: any = (fetchMod as any).default || fetchMod;
@@ -608,9 +650,9 @@ async function _uploadAssetToRunway(account: any, dataUrl: string, filename: str
     method: "POST",
     body: JSON.stringify({ parts: [{ PartNumber: 1, ETag: etag }] }),
   }, account);
-  if (!r3.ok) throw new Error(`Runway complete ${r3.status}: ${r3.text.slice(0,300)}`);
+  if (!r3.ok) throw new Error(`complete 失败 ${r3.status}: ${r3.text.slice(0,300)}`);
   const cdnUrl = r3.json?.url;
-  if (!cdnUrl) throw new Error("Runway no CDN url");
+  if (!cdnUrl) throw new Error("no CDN url");
   return { assetId: uploadId, url: cdnUrl, filename: safeName };
 }
 
@@ -700,10 +742,10 @@ runwayRouter.post("/video", authMiddleware, async (req: any, res: any) => {
         where: { id: account.id },
         data: { lastErrorAt: new Date(), lastErrorMessage: `video create ${r.status}: ${r.text.slice(0, 300)}` },
       }).catch(() => {});
-      return res.status(502).json({ error: `Runway API ${r.status}`, detail: r.text.slice(0, 500) });
+      return res.status(502).json({ error: `API ${r.status}`, detail: r.text.slice(0, 500) });
     }
     const remoteTaskId = r.json?.id || r.json?.task?.id || r.json?.taskId;
-    if (!remoteTaskId) return res.status(502).json({ error: "Runway no taskId", raw: r.json });
+    if (!remoteTaskId) return res.status(502).json({ error: "no taskId", raw: r.json });
 
     const row = await (prisma as any).runwayVideoJob.create({
       data: {
@@ -775,7 +817,7 @@ runwayRouter.get("/video/:id", authMiddleware, async (req: any, res: any) => {
             const first = Array.isArray(artifacts) ? artifacts[0] : null;
             videoUrl = (first && (first.url || first)) || null;
           } else if (mapped === "FAILED") {
-            err = t.errorMessage || t.error || "Runway task failed";
+            err = t.errorMessage || t.error || "task failed";
           }
           const updated = await (prisma as any).runwayVideoJob.update({
             where: { id: row.id },

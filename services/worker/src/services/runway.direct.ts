@@ -248,10 +248,11 @@ export class RunwayDirectClient implements RunwayProvider {
   }
 
   async createTask(input: CreateRunwayTaskInput): Promise<{ remoteTaskId: string }> {
-    const isStandard = input.quality === "standard";
-    const taskType = isStandard ? "kling_3_0_standard" : "kling_3_0_pro";
-    const isPro = !isStandard;
-    console.log(`[runway:task] creating ${taskType} (quality=${input.quality || "std"})`);
+    const isSeedance = input.modelName === "seedance_2";
+    const isStandard = !isSeedance && input.quality === "standard";
+    const taskType = isSeedance ? "seedance_2" : (isStandard ? "kling_3_0_standard" : "kling_3_0_pro");
+    const isPro = !isStandard && !isSeedance;
+    console.log(`[runway:task] creating ${taskType} (model=${input.modelName}, quality=${input.quality || "std"})`);
     console.log(`[runway:task] prompt: "${input.prompt.slice(0, 80)}"`);
     console.log(`[runway:task] duration=${input.duration || 5}s, exploreMode=${input.exploreMode ?? true}`);
 
@@ -262,6 +263,10 @@ export class RunwayDirectClient implements RunwayProvider {
     ].filter(Boolean);
 
     console.log(`[runway:task] reference images to upload: ${sourceUrls.length}`);
+    if (sourceUrls.length > 2) {
+      console.warn(`[runway:task] user sent ${sourceUrls.length} ref images, truncating to 2 (API limit)`);
+      sourceUrls.splice(2);
+    }
 
     // Upload images to Runway
     let referenceImages: Array<{ url: string }> = [];
@@ -282,31 +287,57 @@ export class RunwayDirectClient implements RunwayProvider {
     }
 
     // Use resolution from frontend directly; fallback to defaults if missing
-    const defaultRes = isStandard ? "720x1280" : "1080x1920";
-    // Standard tier keeps 720p as-is; pro tier upgrades to 1080p variants
-    const proResolutionMap: Record<string, string> = { "1076x1920": "1080x1920", "720x1280": "1080x1920", "1280x720": "1920x1080", "960x960": "1440x1440" };
-    const effectiveResolution = input.resolution
-      ? (isStandard ? input.resolution : (proResolutionMap[input.resolution] || input.resolution))
-      : defaultRes;
+    let effectiveResolution: string;
+    if (isSeedance) {
+      // Seedance uses "720p" / "480p" string format
+      effectiveResolution = input.resolution || "720p";
+    } else {
+      const defaultRes = isStandard ? "720x1280" : "1080x1920";
+      const proResolutionMap: Record<string, string> = { "1076x1920": "1080x1920", "720x1280": "1080x1920", "1280x720": "1920x1080", "960x960": "1440x1440" };
+      effectiveResolution = input.resolution
+        ? (isStandard ? input.resolution : (proResolutionMap[input.resolution] || input.resolution))
+        : defaultRes;
+    }
 
-    const body: any = {
-      taskType,
-      options: {
-        name:           input.prompt.slice(0, 100),
-        mode:           "std",
-        textPrompt:     input.prompt,
-        duration:       input.duration || 5,
-        cfgScale:       input.cfgScale ?? 0.5,
-        ...((referenceImages.length === 0 && !referenceVideoAsset) && { resolution: effectiveResolution }),
-        providerSettings: { sound: input.sound !== false },
-        exploreMode:    input.exploreMode ?? false,
-        creationSource: "tool-mode",
-        ...(referenceImages.length > 0 && { referenceImages }),
-        ...(referenceVideoAsset && { referenceVideos: [{ assetId: referenceVideoAsset.assetId, url: referenceVideoAsset.url, durationSeconds: input.duration || 5 }] }),
-      },
-      asTeamId:  this.teamId,
-      sessionId: uuidv4(),
-    };
+    let body: any;
+    if (isSeedance) {
+      // Seedance 2.0 task format
+      body = {
+        taskType: "seedance_2",
+        options: {
+          name:           input.prompt.slice(0, 100),
+          textPrompt:     input.prompt,
+          duration:       input.duration || 5,
+          resolution:     effectiveResolution,
+          generateAudio:  input.sound !== false,
+          exploreMode:    input.exploreMode ?? true,
+          creationSource: "tool-mode",
+          ...(referenceImages.length > 0 && { referenceImages }),
+        },
+        asTeamId:  this.teamId,
+        sessionId: uuidv4(),
+      };
+    } else {
+      // Kling 3.0 task format
+      body = {
+        taskType,
+        options: {
+          name:           input.prompt.slice(0, 100),
+          mode:           "std",
+          textPrompt:     input.prompt,
+          duration:       input.duration || 5,
+          cfgScale:       input.cfgScale ?? 0.5,
+          ...((referenceImages.length === 0 && !referenceVideoAsset) && { resolution: effectiveResolution }),
+          providerSettings: { sound: input.sound !== false },
+          exploreMode:    input.exploreMode ?? true,
+          creationSource: "tool-mode",
+          ...(referenceImages.length > 0 && { referenceImages }),
+          ...(referenceVideoAsset && { referenceVideos: [{ assetId: referenceVideoAsset.assetId, url: referenceVideoAsset.url, durationSeconds: input.duration || 5 }] }),
+        },
+        asTeamId:  this.teamId,
+        sessionId: uuidv4(),
+      };
+    }
 
     console.log(`[runway:task] POST /v1/tasks, referenceImages=${referenceImages.length}`);
 
@@ -333,7 +364,7 @@ export class RunwayDirectClient implements RunwayProvider {
     if (!res.ok) {
       const text = await res.text();
       console.error(`[runway:task] create failed ${res.status}: ${text}`);
-      throw new Error(`Runway createTask ${res.status}: ${text}`);
+      throw new Error(`createTask ${res.status}: ${text}`);
     }
 
     const data = await res.json() as any;
@@ -356,7 +387,7 @@ export class RunwayDirectClient implements RunwayProvider {
     } finally {
       clearTimeout(getTimeout);
     }
-    if (!res.ok) throw new Error(`Runway getTask ${res.status}: ${await res.text()}`);
+    if (!res.ok) throw new Error(`getTask ${res.status}: ${await res.text()}`);
     const data = await res.json() as any;
     const t = data.task;
 
@@ -414,3 +445,4 @@ export class RunwayDirectClient implements RunwayProvider {
     });
   }
 }
+

@@ -100,7 +100,7 @@ export async function createSeedreamJobForReview(opts: {
           .catch(() => {});
         const waitSec = Math.min(30, 3 * Math.pow(2, attempt));
         await new Promise((res) => setTimeout(res, waitSec * 1000));
-        lastError = new Error(`Runway API 429: ${(r.text || "").slice(0, 200)}`);
+        lastError = new Error(`API 429: ${(r.text || "").slice(0, 200)}`);
         continue;
       }
       await prisma.runwayAccount
@@ -112,11 +112,11 @@ export async function createSeedreamJobForReview(opts: {
           },
         })
         .catch(() => {});
-      throw new Error(`Runway API ${r.status}: ${r.text.slice(0, 300)}`);
+      throw new Error(`API ${r.status}: ${r.text.slice(0, 300)}`);
     }
 
     const remoteTaskId = r.json?.id || r.json?.task?.id || r.json?.taskId;
-    if (!remoteTaskId) throw new Error("Runway 未返回 taskId");
+    if (!remoteTaskId) throw new Error("未返回 taskId");
 
     const row = await prisma.seedreamJob.create({
       data: {
@@ -652,7 +652,7 @@ async function safetyNetScan() {
               } else if (status === "FAILED") {
                 await prisma.seedreamJob.update({
                   where: { id: job.id },
-                  data: { status, errorMessage: t.errorMessage || "Runway 任务失败" },
+                  data: { status, errorMessage: t.errorMessage || "任务失败" },
                 });
                 await onSeedreamFailed(job.id);
                 continue;
@@ -725,7 +725,7 @@ async function fastPollScan() {
         } else if (status === "FAILED") {
           await prisma.seedreamJob.update({
             where: { id: job.id },
-            data: { status, errorMessage: t.errorMessage || "Runway 任务失败" },
+            data: { status, errorMessage: t.errorMessage || "任务失败" },
           });
           await onSeedreamFailed(job.id);
         }

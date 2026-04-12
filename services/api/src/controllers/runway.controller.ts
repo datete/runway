@@ -44,8 +44,10 @@ export class RunwayController {
       const page = parseInt(req.query.page as string) || 1;
       const pageSize = parseInt(req.query.pageSize as string) || 20;
       const status = req.query.status as string | undefined;
+      const search = req.query.search as string | undefined;
 
-      const result = await svc.listJobs(req.user?.id, req.user?.role, { page, pageSize, status });
+      const tag = req.query.tag as string | undefined;
+      const result = await svc.listJobs(req.user?.id, req.user?.role, { page, pageSize, status, search, tag });
 
       const queueData = await prisma.$queryRawUnsafe(`
         SELECT id,

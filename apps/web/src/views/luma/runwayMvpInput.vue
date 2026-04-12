@@ -21,8 +21,11 @@ interface TokenStatus {
   inCooldown: boolean
   cooldownTtl: number
 }
-
 const MAX_IMAGES = 4
+const BATCH_MAX_IMAGES = 10
+const batchMode = ref(false)
+const batchSubmitting = ref(false)
+const batchProgress = ref({ current: 0, total: 0, success: 0, fail: 0 })
 
 const message = useMessage()
 const { headers: authHeaders, token: jwtToken, username: jwtUsername, role: jwtRole } = useRunwayJwt()
@@ -32,9 +35,13 @@ const submitSuccess = ref(false)
 const prompt = ref('')
 const remark = ref('')
 const images = ref<UploadedImage[]>([])
+const refVideoUrl = ref('')
+const refVideoUploading = ref(false)
+const refVideoPreview = ref('')
 const exploreMode = ref(true)
 const creditMode = ref(false)  // 积分生成模式（管理员专用，默认关闭 = 免费无限模式）
 const isAdmin = computed(() => jwtRole.value === "admin")
+const selectedModel = ref<'kling' | 'seedance'>('kling')
 const duration = ref(5)
 const resolution = ref('1076x1920')
 const quality = ref('std')
@@ -42,25 +49,33 @@ const sound = ref(false)
 const cfgScale = ref(0.5)
 
 // Pro mode: reference video
-const refVideo = ref<{ preview: string; url: string; uploading: boolean } | null>(null)
 
 const stdResolutions = [
   { value: '1076x1920', label: '9:16', desc: '竖屏 1080p', iconW: 20, iconH: 34 },
 ]
-const proResolutions = [
-  { value: '1076x1920', label: '9:16', desc: '竖屏 1080p', iconW: 20, iconH: 34 },
-]
+
 const standardResolutions = [
   { value: '720x1280', label: '9:16', desc: '竖屏 720p', iconW: 20, iconH: 34 },
   { value: '1280x720', label: '16:9', desc: '横屏 720p', iconW: 34, iconH: 20 },
 ]
 const resolutionOptions = computed(() => {
-  if (quality.value === 'pro') return proResolutions
+  if (selectedModel.value === 'seedance') return [{ value: '720p', label: '9:16', desc: '720p', iconW: 20, iconH: 34 }]
   if (quality.value === 'standard') return standardResolutions
   return stdResolutions
 })
 
+watch(selectedModel, (m) => {
+  if (m === 'seedance') {
+    resolution.value = '720p'
+    quality.value = 'std'
+  } else {
+    resolution.value = '1076x1920'
+    removeRefVideo()
+  }
+})
+
 watch(quality, (q) => {
+  if (selectedModel.value === 'seedance') return
   if (q === 'standard' && !standardResolutions.find(r => r.value === resolution.value)) resolution.value = '720x1280'
   if (q !== 'standard' && resolution.value !== '1076x1920') resolution.value = '1076x1920'
 })
@@ -73,12 +88,16 @@ const durationHints: Record<number, string> = {
   15: '适合复杂场景、长镜头叙事，生成时间较长',
 }
 
+const modelHints: Record<string, string> = {
+  kling: '可灵 3.0 Pro — 高画质 1080p，支持标准/Pro模式，精确提示词控制',
+  seedance: 'Seedance 2.0 — ByteDance 出品，720p，支持参考图+视频，自带音效生成',
+}
+
 
 
 const qualityHints: Record<string, string> = {
   standard: '标准模式 — Kling 3.0 普通版，720p 分辨率，生成速度更快，消耗更少配额',
   std: 'Pro 模式 — 基于参考图片生成视频，最高 1080p 分辨率，适合大多数场景，消耗 1 个配额',
-  pro: '大师模式 — 支持参考视频+图片混合输入，运动控制更精准，消耗 2 个配额',
 }
 
 const cfgHint = computed(() => {
@@ -103,9 +122,8 @@ const totalQuota = ref<number | null>(null)
 
 const isUploading = computed(() => images.value.some((item) => item.uploading))
 const uploadedUrls = computed(() => images.value.filter((item) => item.url).map((item) => item.url))
-const remainingSlots = computed(() => Math.max(0, MAX_IMAGES - images.value.length))
+const remainingSlots = computed(() => Math.max(0, (batchMode.value ? BATCH_MAX_IMAGES : MAX_IMAGES) - images.value.length))
 
-const isVideoUploading = computed(() => refVideo.value?.uploading === true)
 
 const promptLength = computed(() => prompt.value.length)
 const PROMPT_MAX_LENGTH = 2000
@@ -120,9 +138,8 @@ const promptHint = computed(() => {
 const canSubmit = computed(() => {
   if (!jwtToken.value) return false
   if (!prompt.value.trim()) return false
-  if (uploadedUrls.value.length === 0) return false
-  if (quality.value === 'pro' && (!refVideo.value || !refVideo.value.url)) return false
-  if (loading.value || isUploading.value || isVideoUploading.value) return false
+  if (uploadedUrls.value.length === 0 && !(selectedModel.value === 'seedance' && refVideoUrl.value)) return false
+  if (loading.value || isUploading.value || batchSubmitting.value) return false
   if (quotaExceeded.value) return false
   if (promptLength.value > PROMPT_MAX_LENGTH) return false
   return true
@@ -130,21 +147,18 @@ const canSubmit = computed(() => {
 
 const canSubmitReason = computed(() => {
   if (!jwtToken.value) return '请先登录后再提交任务'
-  if (loading.value) return '正在提交任务，请稍候'
+  if (loading.value || batchSubmitting.value) return '正在提交任务，请稍候'
   if (isUploading.value) return '参考图片上传中，请稍候'
-  if (isVideoUploading.value) return '参考视频上传中，请稍候'
   if (quotaExceeded.value) return quotaExceeded.value
   if (promptLength.value > PROMPT_MAX_LENGTH) return `提示词超出${PROMPT_MAX_LENGTH}字上限（当前${promptLength.value}字），请精简后再提交`
   if (!prompt.value.trim()) return '请输入提示词'
-  if (uploadedUrls.value.length === 0) return '请上传参考图片'
-  if (quality.value === 'pro' && (!refVideo.value || !refVideo.value.url)) return '大师模式必须上传参考视频'
+  if (uploadedUrls.value.length === 0 && !(selectedModel.value === 'seedance' && refVideoUrl.value)) return '请上传参考图片或视频'
   return ''
 })
 
 const completionItems = computed(() => [
   { key: 'prompt', label: '提示词', done: Boolean(prompt.value.trim()) },
   { key: 'images', label: '参考图', done: uploadedUrls.value.length > 0 },
-  { key: 'video', label: '参考视频', done: quality.value !== 'pro' || Boolean(refVideo.value?.url) },
 ])
 
 const completionRatio = computed(() => {
@@ -286,6 +300,45 @@ const removeAllImages = () => {
   uploadFlash.value.clear()
 }
 
+const handleVideoSelect = async (e: Event) => {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  if (!file.type.startsWith('video/')) { message.warning('请选择视频文件'); return }
+  if (file.size > 50 * 1024 * 1024) { message.error('视频文件最大 50MB'); return }
+  refVideoUploading.value = true
+  refVideoPreview.value = URL.createObjectURL(file)
+  try {
+    const reader = new FileReader()
+    const base64: string = await new Promise((resolve, reject) => {
+      reader.onload = () => resolve(reader.result as string)
+      reader.onerror = reject
+      reader.readAsDataURL(file)
+    })
+    const res = await fetch('/api/runway/upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ data: base64, filename: file.name }),
+    })
+    if (!res.ok) throw new Error('上传失败')
+    const data = await res.json()
+    refVideoUrl.value = data.url
+    message.success('参考视频上传成功')
+  } catch (e: any) {
+    message.error(e.message || '视频上传失败')
+    refVideoUrl.value = ''
+    refVideoPreview.value = ''
+  } finally {
+    refVideoUploading.value = false
+  }
+}
+
+const removeRefVideo = () => {
+  refVideoUrl.value = ''
+  refVideoPreview.value = ''
+}
+
 // Drag-and-drop support
 const isDragging = ref(false)
 let dragCounter = 0
@@ -355,35 +408,7 @@ const processFiles = async (fileList: File[]) => {
   }
 }
 
-const handleVideoSelect = async (event: Event) => {
-  const input = event.target as HTMLInputElement
-  const file = input.files?.[0]
-  if (!file) return
-  refVideo.value = { preview: '', url: '', uploading: true }
-  const reader = new FileReader()
-  reader.onload = async (readerEvent) => {
-    const base64 = String(readerEvent.target?.result || '')
-    if (!base64) { refVideo.value = null; message.error('视频读取失败'); return }
-    if (refVideo.value) refVideo.value.preview = base64
-    try {
-      const uploadRes = await fetch('/api/runway/upload', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({ data: base64, filename: file.name }),
-      })
-      if (!uploadRes.ok) throw new Error('上传失败')
-      const uploadData = await uploadRes.json()
-      if (refVideo.value) { refVideo.value.url = uploadData.url; refVideo.value.uploading = false }
-    } catch (error: any) {
-      refVideo.value = null
-      message.error(`视频上传失败：${error.message || file.name}`)
-    }
-  }
-  reader.readAsDataURL(file)
-  input.value = ''
-}
 
-const removeVideo = () => { refVideo.value = null }
 // ── AI Prompt Optimization ──
 const showAiOptimize = ref(false)
 const aiAutoOptimize = ref(false)
@@ -1060,18 +1085,20 @@ const submit = async () => {
   if (!canSubmit.value) return
   loading.value = true
   try {
+    const isSeedance = selectedModel.value === 'seedance'
     const payload = {
       prompt: prompt.value.trim(),
       mode: 'image_to_video',
+      model: isSeedance ? 'seedance_2' : undefined,
       exploreMode: creditMode.value ? false : exploreMode.value,
       duration: duration.value,
       resolution: resolution.value || undefined,
-      quality: quality.value,
-      cfgScale: cfgScale.value,
+      quality: isSeedance ? 'std' : quality.value,
+      cfgScale: isSeedance ? undefined : cfgScale.value,
       sound: sound.value,
       remark: remark.value.trim() || undefined,
       imageUrls: uploadedUrls.value,
-      videoUrl: (quality.value === 'pro' && refVideo.value?.url) ? refVideo.value.url : undefined,
+      videoUrl: refVideoUrl.value || undefined,
     }
     const res = await fetch('/api/runway/jobs', {
       method: 'POST',
@@ -1085,7 +1112,7 @@ const submit = async () => {
     prompt.value = ''
     remark.value = ''
     images.value = []
-    refVideo.value = null
+    removeRefVideo()
     homeStore.setMyData({ act: 'RunwayMvpRefresh' })
     fetchTokenStatus()
   } catch (error: any) {
@@ -1093,6 +1120,60 @@ const submit = async () => {
   } finally {
     loading.value = false
   }
+}
+
+const batchSubmit = async () => {
+  if (!canSubmit.value || !batchMode.value) return
+  const urls = uploadedUrls.value.slice()
+  if (urls.length < 2) {
+    // Only 1 image, use normal submit
+    return submit()
+  }
+  batchSubmitting.value = true
+  batchProgress.value = { current: 0, total: urls.length, success: 0, fail: 0 }
+  const isSeedance = selectedModel.value === 'seedance'
+  const basePayload = {
+    prompt: prompt.value.trim(),
+    mode: 'image_to_video',
+    model: isSeedance ? 'seedance_2' : undefined,
+    exploreMode: creditMode.value ? false : exploreMode.value,
+    duration: duration.value,
+    resolution: resolution.value || undefined,
+    quality: isSeedance ? 'std' : quality.value,
+    cfgScale: isSeedance ? undefined : cfgScale.value,
+    sound: sound.value,
+    remark: remark.value.trim() || undefined,
+    videoUrl: refVideoUrl.value || undefined,
+  }
+  for (let i = 0; i < urls.length; i++) {
+    batchProgress.value.current = i + 1
+    try {
+      const res = await fetch('/api/runway/jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ ...basePayload, imageUrls: [urls[i]] }),
+      })
+      if (!res.ok) throw new Error('fail')
+      batchProgress.value.success++
+    } catch {
+      batchProgress.value.fail++
+    }
+  }
+  const { success, fail } = batchProgress.value
+  if (success > 0) {
+    message.success(`批量提交完成：${success} 个成功` + (fail > 0 ? `，${fail} 个失败` : ''))
+    submitSuccess.value = true
+    setTimeout(() => { submitSuccess.value = false }, 3000)
+    prompt.value = ''
+    remark.value = ''
+    images.value = []
+    removeRefVideo()
+    homeStore.setMyData({ act: 'RunwayMvpRefresh' })
+    fetchTokenStatus()
+  } else {
+    message.error('批量提交全部失败')
+  }
+  batchSubmitting.value = false
 }
 
 const handleSubmitHotkey = (event: KeyboardEvent) => {
@@ -1138,7 +1219,7 @@ onUnmounted(() => {
         </div>
         <div class="flex flex-col">
           <span class="text-sm font-semibold text-white/90 tracking-wide">视频创作</span>
-          <span class="text-[10px] text-white/35 leading-tight">图生视频 · 单任务模式</span>
+          <span class="text-[10px] text-white/35 leading-tight">{{ selectedModel === 'seedance' ? 'Seedance 2.0' : '可灵 3.0' }} · {{ batchMode ? '批量' : '单任务' }}</span>
         </div>
       </div>
       <div class="flex items-center gap-2">
@@ -1152,6 +1233,37 @@ onUnmounted(() => {
           <span class="text-[10px] text-white/50">系统今日完成</span>
           <span class="text-sm font-bold tabular-nums text-sky-300">{{ systemDailyTotal }}</span>
         </div>
+      </div>
+    </div>
+
+    <div class="section-divider" />
+
+    <!-- 批量模式切换 -->
+    <div class="flex items-center justify-between rounded-xl border px-3.5 py-2.5 transition-all duration-300 cursor-pointer"
+      :class="batchMode
+        ? 'border-violet-400/30 bg-gradient-to-r from-violet-500/[0.08] to-fuchsia-500/[0.05]'
+        : 'border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12]'"
+      @click="batchMode = !batchMode; images = []"
+    >
+      <div class="flex items-center gap-2">
+        <div class="flex h-6 w-6 items-center justify-center rounded-lg"
+          :class="batchMode ? 'bg-violet-500/20' : 'bg-white/[0.05]'">
+          <SvgIcon :icon="batchMode ? 'ri:stack-fill' : 'ri:stack-line'"
+            class="text-sm" :class="batchMode ? 'text-violet-400' : 'text-white/30'" />
+        </div>
+        <div class="flex flex-col">
+          <span class="text-[11px] font-semibold" :class="batchMode ? 'text-violet-300/90' : 'text-white/50'">
+            {{ batchMode ? '批量模式 — 每张图一个任务' : '单任务模式' }}
+          </span>
+          <span class="text-[9px]" :class="batchMode ? 'text-violet-300/40' : 'text-white/25'">
+            {{ batchMode ? `可上传最多 ${BATCH_MAX_IMAGES} 张图片` : `最多 ${MAX_IMAGES} 张参考图` }}
+          </span>
+        </div>
+      </div>
+      <div class="flex h-5 w-9 items-center rounded-full px-0.5 transition-all duration-300"
+        :class="batchMode ? 'bg-violet-500/40 justify-end' : 'bg-white/10 justify-start'">
+        <div class="h-4 w-4 rounded-full transition-all duration-300 shadow"
+          :class="batchMode ? 'bg-violet-300' : 'bg-white/40'" />
       </div>
     </div>
 
@@ -1252,10 +1364,11 @@ onUnmounted(() => {
 
     <!-- 参考图片 - 拖拽上传 -->
     <div class="flex flex-col gap-1.5">
-      <label class="section-label">参考图片 *（最多 {{ MAX_IMAGES }} 张）</label>
+      <label class="section-label">{{ batchMode ? "批量图片 *（每张图 = 一个任务）" : selectedModel === 'seedance' ? '参考图片（可选，可上传多张）' : `参考图片 *（最多 ${MAX_IMAGES} 张）` }}</label>
       <div v-if="images.length > 0" class="mb-0.5 flex items-center justify-between">
         <p class="text-[10px] text-white/30">
           已上传 {{ uploadedUrls.length }}/{{ images.length }} 张
+          <span v-if="batchMode && uploadedUrls.length > 1" class="text-violet-400/70"> · 将创建 {{ uploadedUrls.length }} 个任务</span>
         </p>
         <button
           type="button"
@@ -1330,6 +1443,80 @@ onUnmounted(() => {
       </div>
     </div>
 
+    <!-- 参考视频 (Seedance) -->
+    <div v-if="selectedModel === 'seedance'" class="flex flex-col gap-1.5">
+      <label class="section-label">参考视频（可选）</label>
+      <div v-if="refVideoPreview" class="relative rounded-xl border border-emerald-400/20 bg-black/20 overflow-hidden">
+        <video :src="refVideoPreview" class="w-full max-h-32 object-contain" controls />
+        <div v-if="refVideoUploading" class="absolute inset-0 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          <NSpin size="small" />
+          <span class="ml-2 text-[10px] text-white/60">上传中...</span>
+        </div>
+        <button
+          v-if="!refVideoUploading"
+          class="absolute right-2 top-2 flex h-6 w-6 items-center justify-center rounded-full bg-black/60 text-white/70 transition-all hover:bg-red-500/80 hover:text-white"
+          @click="removeRefVideo"
+        >
+          <SvgIcon icon="ri:close-line" class="text-sm" />
+        </button>
+        <div v-if="refVideoUrl" class="absolute bottom-2 left-2 flex items-center gap-1 rounded-md bg-black/50 px-1.5 py-0.5">
+          <SvgIcon icon="ri:check-line" class="text-[10px] text-emerald-400" />
+          <span class="text-[9px] text-emerald-300/80">已上传</span>
+        </div>
+      </div>
+      <label v-else class="flex cursor-pointer items-center justify-center gap-2 rounded-xl border border-dashed border-emerald-400/15 bg-emerald-500/[0.03] py-3 transition-all hover:border-emerald-400/30 hover:bg-emerald-500/[0.06]">
+        <SvgIcon icon="ri:video-add-line" class="text-base text-emerald-400/40" />
+        <span class="text-[11px] text-emerald-300/40">上传参考视频（mp4/mov，最大 50MB）</span>
+        <input type="file" accept="video/mp4,video/quicktime,video/x-msvideo" class="hidden" @change="handleVideoSelect" />
+      </label>
+    </div>
+
+    <div class="section-divider" />
+
+    <!-- 模型选择 -->
+    <div class="flex flex-col gap-2">
+      <label class="section-label">模型</label>
+      <div class="grid grid-cols-2 gap-2">
+        <button
+          class="group flex items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left transition-all duration-200"
+          :class="selectedModel === 'kling'
+            ? 'border-sky-400/40 bg-gradient-to-br from-sky-500/[0.08] to-blue-500/[0.05] shadow-md shadow-sky-500/8'
+            : 'border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12] hover:bg-white/[0.04]'"
+          @click="selectedModel = 'kling'"
+        >
+          <div class="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg transition-all"
+            :class="selectedModel === 'kling' ? 'bg-sky-500/20' : 'bg-white/[0.05]'">
+            <SvgIcon icon="ri:video-ai-line" class="text-base"
+              :class="selectedModel === 'kling' ? 'text-sky-400' : 'text-white/30'" />
+          </div>
+          <div class="flex flex-col min-w-0">
+            <span class="text-[11px] font-semibold" :class="selectedModel === 'kling' ? 'text-sky-300' : 'text-white/50'">可灵 3.0</span>
+            <span class="text-[9px]" :class="selectedModel === 'kling' ? 'text-sky-400/50' : 'text-white/25'">最高 1080p</span>
+          </div>
+        </button>
+        <button
+          class="group flex items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left transition-all duration-200"
+          :class="selectedModel === 'seedance'
+            ? 'border-emerald-400/40 bg-gradient-to-br from-emerald-500/[0.08] to-teal-500/[0.05] shadow-md shadow-emerald-500/8'
+            : 'border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12] hover:bg-white/[0.04]'"
+          @click="selectedModel = 'seedance'"
+        >
+          <div class="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg transition-all"
+            :class="selectedModel === 'seedance' ? 'bg-emerald-500/20' : 'bg-white/[0.05]'">
+            <SvgIcon icon="ri:seedling-line" class="text-base"
+              :class="selectedModel === 'seedance' ? 'text-emerald-400' : 'text-white/30'" />
+          </div>
+          <div class="flex flex-col min-w-0">
+            <span class="text-[11px] font-semibold" :class="selectedModel === 'seedance' ? 'text-emerald-300' : 'text-white/50'">Seedance 2.0</span>
+            <span class="text-[9px]" :class="selectedModel === 'seedance' ? 'text-emerald-400/50' : 'text-white/25'">720p · 含音效</span>
+          </div>
+        </button>
+      </div>
+      <Transition name="hint-fade">
+        <p class="text-[11px] text-white/30">{{ modelHints[selectedModel] }}</p>
+      </Transition>
+    </div>
+
     <div class="section-divider" />
 
     <!-- 生成设置 -->
@@ -1365,8 +1552,8 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <!-- 生成模式 -->
-      <div>
+      <!-- 生成模式 (仅可灵) -->
+      <div v-if="selectedModel === 'kling'">
         <div class="mb-1 text-[11px] text-white/40 font-medium">生成模式</div>
         <div class="flex gap-2">
           <button
@@ -1385,51 +1572,12 @@ onUnmounted(() => {
           >
             Pro
           </button>
-          <button
-            type="button"
-            class="pill-btn"
-            :class="{ active: quality === 'pro' }"
-            @click="quality = 'pro'"
-          >
-            大师
-          </button>
         </div>
         <Transition name="hint-fade">
           <p v-if="qualityHints[quality]" class="mt-1 text-[11px] text-white/30">{{ qualityHints[quality] }}</p>
         </Transition>
       </div>
 
-      <!-- 参考视频（仅 pro 模式） -->
-      <Transition name="hint-fade">
-        <div v-if="quality === 'pro'">
-          <div class="mb-1 text-[11px] text-white/40 font-medium">参考视频 *</div>
-          <div class="flex items-center gap-2">
-            <div v-if="refVideo" class="group relative h-16 w-28 overflow-hidden rounded-lg border border-white/10">
-              <video v-if="refVideo.preview" :src="refVideo.preview" class="h-full w-full object-cover" muted />
-              <div v-if="refVideo.uploading" class="absolute inset-0 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-                <NSpin size="small" />
-              </div>
-              <button
-                v-else
-                type="button"
-                class="absolute right-0.5 top-0.5 hidden rounded-full bg-black/70 p-0.5 text-white/80 group-hover:block hover:bg-red-500/80 transition-colors"
-                @click="removeVideo"
-              >
-                <SvgIcon icon="ri:close-line" class="text-sm" />
-              </button>
-            </div>
-            <label
-              v-if="!refVideo"
-              class="upload-area upload-trigger flex h-16 w-28 cursor-pointer flex-col items-center justify-center gap-1 rounded-lg"
-            >
-              <SvgIcon icon="ri:video-add-line" class="text-xl text-white/30" />
-              <span class="text-[10px] text-white/35">上传视频</span>
-              <input type="file" accept="video/*" class="hidden" @change="handleVideoSelect" />
-            </label>
-          </div>
-          <p class="mt-1 text-[11px] text-amber-400/80">大师模式必须上传参考视频，AI 会 1:1 复刻视频中的动作和运动轨迹，分辨率自动升级至 1080p</p>
-        </div>
-      </Transition>
 
       <!-- 时长 -->
       <div>
@@ -1451,8 +1599,8 @@ onUnmounted(() => {
         </Transition>
       </div>
 
-      <!-- 提示词关联度 cfgScale -->
-      <div class="slider-section">
+      <!-- 提示词关联度 cfgScale (仅可灵) -->
+      <div v-if="selectedModel === 'kling'" class="slider-section">
         <div class="mb-1 flex items-center justify-between text-[11px] text-white/40 font-medium">
           <span>提示词关联度</span>
           <span class="font-mono text-[11px] text-sky-400/70">{{ cfgScale.toFixed(2) }}</span>
@@ -1491,6 +1639,21 @@ onUnmounted(() => {
 
     <!-- AI自动优化开关 + 提交按钮 -->
     <div class="action-block flex flex-col gap-2">
+      <!-- Batch progress bar -->
+      <div v-if="batchSubmitting" class="mb-2 rounded-xl border border-violet-400/20 bg-violet-500/[0.05] px-3.5 py-2.5">
+        <div class="mb-1.5 flex items-center justify-between text-[11px]">
+          <span class="text-violet-300/70">批量提交进度</span>
+          <span class="font-mono text-violet-300/90">{{ batchProgress.current }} / {{ batchProgress.total }}</span>
+        </div>
+        <div class="h-1.5 rounded-full bg-white/[0.06] overflow-hidden">
+          <div class="h-full rounded-full bg-gradient-to-r from-violet-500 to-fuchsia-500 transition-all duration-300"
+            :style="{ width: Math.round(batchProgress.current / batchProgress.total * 100) + '%' }" />
+        </div>
+        <div class="mt-1 flex items-center gap-3 text-[10px]">
+          <span class="text-emerald-400/60">成功 {{ batchProgress.success }}</span>
+          <span v-if="batchProgress.fail > 0" class="text-red-400/60">失败 {{ batchProgress.fail }}</span>
+        </div>
+      </div>
       <div class="action-progress">
         <div class="progress-meta">
           <span class="text-[10px] text-white/30">提交准备度</span>
@@ -1527,7 +1690,7 @@ onUnmounted(() => {
         :class="{ 'can-submit': canSubmit, 'is-submitting': loading }"
         :disabled="!canSubmit"
         :title="canSubmit ? `快捷提交：${submitShortcutLabel}` : canSubmitReason"
-        @click="handleSubmitWithAi"
+        @click="batchMode && uploadedUrls.length > 1 ? batchSubmit() : handleSubmitWithAi()"
       >
         <template v-if="loading">
           <div class="submit-spinner" />
@@ -1537,9 +1700,13 @@ onUnmounted(() => {
           <SvgIcon icon="ri:check-line" class="text-base text-emerald-300" />
           <span class="text-emerald-300">已提交</span>
         </template>
+        <template v-else-if="batchSubmitting">
+          <div class="submit-spinner" />
+          批量提交中 {{ batchProgress.current }}/{{ batchProgress.total }}
+        </template>
         <template v-else>
           <SvgIcon icon="ri:play-circle-line" class="text-base" />
-          生成视频
+          {{ batchMode && uploadedUrls.length > 1 ? `批量生成 (${uploadedUrls.length} 个任务)` : '生成视频' }}
         </template>
       </button>
       <p v-if="canSubmit" class="text-center text-[10px] text-sky-300/55">按 {{ submitShortcutLabel }} 可快速提交</p>

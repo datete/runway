@@ -176,14 +176,7 @@ async function trySubmitOneOnAccount(account: AccountEntry): Promise<SubmitResul
   // Account already acquired by the per-account loop caller.
   // Caller is responsible for checking batch-rest / cooldown / global cooldown before calling us.
 
-  // Global cooldown recheck (defensive — caller checks too, but state can change quickly)
-  const globalCooldown = await connection.get("global:rate-limit-cooldown");
-  if (globalCooldown) {
-    const ttl = await connection.ttl("global:rate-limit-cooldown");
-    console.log(`[submit-worker] global cooldown active (${ttl}s left)`);
-    await accountPool.releaseNoJob(account.id);
-    return "rate_limited";
-  }
+  // Global cooldown removed — only per-account cooldown applies
 
   // ── 僵尸任务清理 ──
   await prisma.$executeRawUnsafe(`
@@ -328,16 +321,7 @@ async function trySubmitOneOnAccount(account: AccountEntry): Promise<SubmitResul
     // API 调用前三重检查（延迟期间情况可能已变）
     // ══════════════════════════════════════════════════════════
 
-    // 检查1: 全局限流冷却
-    const recheckCooldown = await connection.get("global:rate-limit-cooldown");
-    if (recheckCooldown) {
-      console.log(`[submit-worker] cooldown appeared during delay, aborting ${jobId.slice(0,8)}`);
-      await accountPool.release(account.id);
-      await prisma.runwayJob.update({ where: { id: jobId }, data: { status: "pending", accountId: null, startedAt: null } as any });
-      return "rate_limited";
-    }
-
-    // 检查2: 账号冷却
+    // 检查1: 账号冷却
     const acctCooldown = await connection.get(`account:cooldown:${account.id}`);
     if (acctCooldown) {
       console.log(`[submit-worker] account ${account.label} entered cooldown during delay, aborting ${jobId.slice(0,8)}`);
@@ -363,23 +347,23 @@ async function trySubmitOneOnAccount(account: AccountEntry): Promise<SubmitResul
       return "no_account";
     }
 
-    // 检查4: Runway 平台实际并发数（远程 API 权威数据）
+    // 检查4: Platform 平台实际并发数（远程 API 权威数据）
     try {
       const realActive = await client.getActiveConcurrency();
       if (realActive >= account.maxConcurrency) {
-        console.log(`[submit-worker] Runway reports ${realActive} active for ${account.label} (max ${account.maxConcurrency}), aborting ${jobId.slice(0,8)}`);
+        console.log(`[submit-worker] Platform reports ${realActive} active for ${account.label} (max ${account.maxConcurrency}), aborting ${jobId.slice(0,8)}`);
         await accountPool.release(account.id);
         await prisma.runwayJob.update({ where: { id: jobId }, data: { status: "pending", accountId: null, startedAt: null } as any });
         return "no_account";
       }
-      console.log(`[submit-worker] Runway real concurrency: ${realActive}/${account.maxConcurrency} for ${account.label}`);
+      console.log(`[submit-worker] Platform real concurrency: ${realActive}/${account.maxConcurrency} for ${account.label}`);
     } catch (e: any) {
       // API 查询失败不阻塞提交，退回本地检查
       console.warn(`[submit-worker] getActiveConcurrency failed for ${account.label}: ${e.message}, proceeding with local check`);
     }
 
     // ══════════════════════════════════════════════════════════
-    // 调用 Runway API
+    // 调用 Platform API
     // ══════════════════════════════════════════════════════════
 
     const { remoteTaskId } = await client.createTask({
@@ -389,7 +373,7 @@ async function trySubmitOneOnAccount(account: AccountEntry): Promise<SubmitResul
       imageUrls,
       duration:    dbJob.duration || 5,
       exploreMode: dbJob.exploreMode ?? true,
-      modelName:   "kling_3_0_pro",
+      modelName:   dbJob.modelName || "kling_3_0_pro",
       resolution:  dbJob.resolution,
       quality:     dbJob.quality,
       cfgScale:    dbJob.cfgScale,
@@ -433,7 +417,6 @@ async function trySubmitOneOnAccount(account: AccountEntry): Promise<SubmitResul
       await accountPool.release(account.id);
       await accountPool.recordError(account.id, "429 Rate Limited");
       await accountPool.setCooldown(account.id, 420);
-      await connection.set("global:rate-limit-cooldown", "1", "EX", 180);
       await prisma.runwayJob.update({ where: { id: jobId }, data: { status: "pending", accountId: null, startedAt: null } as any });
       return "rate_limited";
     }
@@ -552,13 +535,6 @@ async function accountSubmitLoop(accountId: string): Promise<void> {
         continue;
       }
 
-      // Global rate-limit cooldown?
-      const globalCool = await connection.get("global:rate-limit-cooldown");
-      if (globalCool) {
-        await sleep(15_000);
-        continue;
-      }
-
       // Try to acquire a slot ON THIS ACCOUNT
       const acquired = await accountPool.acquireSpecific(account.id);
       if (!acquired) {
@@ -652,10 +628,6 @@ setInterval(async () => {
 
     // 所有账号都在批次休息中不触发
     if (await areAllAccountsResting()) return;
-
-    // 冷却中不触发
-    const cooldown = await connection.get("global:rate-limit-cooldown");
-    if (cooldown) return;
 
     // 检查是否有账号在 DB 层有空位（排除休息中的账号）
     const accounts = await accountPool.getAccounts();

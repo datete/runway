@@ -151,10 +151,10 @@ new Worker('runway-poll', async (job: Job) => {
     }
     await triggerSubmit(humanSubmitDelay());
   } else if (result.status === 'cancelled') {
-    // Remote task was cancelled by Runway — auto-retry with different account
+    // Remote task was cancelled by platform — auto-retry with different account
     const retryCount = (dbJob.retryCount || 0);
     if (retryCount < MAX_REMOTE_RETRIES) {
-      console.warn(`[poll-worker] job ${jobId.slice(0,8)} cancelled by Runway, switching account (retry ${retryCount + 1}/${MAX_REMOTE_RETRIES})`);
+      console.warn(`[poll-worker] job ${jobId.slice(0,8)} cancelled by platform, switching account (retry ${retryCount + 1}/${MAX_REMOTE_RETRIES})`);
       await prisma.runwayJob.update({
         where: { id: jobId },
         data: {
@@ -168,7 +168,7 @@ new Worker('runway-poll', async (job: Job) => {
       });
       if (accountId) {
         await accountPool.release(accountId, jobId);
-        await accountPool.recordError(accountId, 'Task cancelled by Runway');
+        await accountPool.recordError(accountId, 'Task cancelled by platform');
         await connection.set(`job:avoid-account:${jobId}:${accountId}`, '1', 'EX', 600);
       }
       await triggerSubmit(humanSubmitDelay());
@@ -330,7 +330,7 @@ new Worker('runway-poll', async (job: Job) => {
     }
 
     // THROTTLED/queued: release concurrency slot so other jobs can use the account
-    // The task is still being tracked on Runway side, we just free the local slot
+    // The task is still being tracked on Platform side, we just free the local slot
     if (result.status === 'queued' && accountId) {
       const slotKey = `poll:slot-released:${jobId}`;
       const alreadyReleased = await connection.get(slotKey);

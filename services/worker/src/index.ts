@@ -22,8 +22,8 @@ async function makeClientForAccount(accountId: string): Promise<RunwayDirectClie
 
 async function recoverStuckJobs() {
   try {
-    // Step 0: Verify remote task states via Runway API
-    // For submitted/processing jobs with remoteTaskId, check if they still exist on Runway
+    // Step 0: Verify remote task states via Platform API
+    // For submitted/processing jobs with remoteTaskId, check if they still exist on Platform
     const activeJobs = await prisma.runwayJob.findMany({
       where: {
         status: { in: ["submitted", "processing"] },
@@ -32,7 +32,7 @@ async function recoverStuckJobs() {
     });
 
     if (activeJobs.length > 0) {
-      console.log(`[startup-recovery] verifying ${activeJobs.length} active job(s) with Runway API...`);
+      console.log(`[startup-recovery] verifying ${activeJobs.length} active job(s) with Platform API...`);
       for (const job of activeJobs) {
         const j = job as any;
         try {
@@ -46,10 +46,10 @@ async function recoverStuckJobs() {
           const remote = await client.getTask(j.remoteTaskId);
 
           if (remote.status === 'completed') {
-            console.log(`[startup-recovery] ${job.id.slice(0,8)} already completed on Runway, will poll to cache video`);
+            console.log(`[startup-recovery] ${job.id.slice(0,8)} already completed on Platform, will poll to cache video`);
             // Let poll worker handle caching
           } else if (remote.status === 'failed') {
-            console.log(`[startup-recovery] ${job.id.slice(0,8)} failed on Runway: ${remote.errorMessage || 'unknown'}`);
+            console.log(`[startup-recovery] ${job.id.slice(0,8)} failed on Platform: ${remote.errorMessage || 'unknown'}`);
             await prisma.runwayJob.update({
               where: { id: job.id },
               data: {

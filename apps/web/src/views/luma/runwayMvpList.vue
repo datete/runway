@@ -118,6 +118,61 @@ const totalJobs = ref(0)
 const tabCounts = ref({ all: 0, queued: 0, processing: 0, completed: 0, failed: 0 })
 const activeTab = ref<TabKey>('all')
 const searchKeyword = ref('')
+const activeTag = ref('')
+
+// Tags
+const allTags = ref<Array<{ tag: string; count: number }>>([])
+const tagsLoading = ref(false)
+const showTagDeleteConfirm = ref(false)
+const tagToDelete = ref<{ tag: string; count: number } | null>(null)
+const tagDeleting = ref(false)
+
+const fetchTags = async () => {
+  if (!jwtToken.value) return
+  tagsLoading.value = true
+  try {
+    const res = await fetch('/api/runway/tags', { headers: authHeaders() })
+    if (res.ok) allTags.value = await res.json()
+  } catch {}
+  tagsLoading.value = false
+}
+
+const filterByTag = (tag: string) => {
+  activeTag.value = activeTag.value === tag ? '' : tag
+  page.value = 1
+}
+const clearTag = () => {
+  activeTag.value = ''
+  page.value = 1
+}
+
+const confirmDeleteTag = (t: { tag: string; count: number }) => {
+  tagToDelete.value = t
+  showTagDeleteConfirm.value = true
+}
+
+const doDeleteTag = async () => {
+  if (!tagToDelete.value) return
+  tagDeleting.value = true
+  try {
+    const res = await fetch('/api/runway/tags/' + encodeURIComponent(tagToDelete.value.tag), {
+      method: 'DELETE',
+      headers: authHeaders(),
+    })
+    if (!res.ok) throw new Error('删除失败')
+    const data = await res.json()
+    message.success('已删除标签「' + tagToDelete.value.tag + '」下 ' + data.deleted + ' 条任务')
+    showTagDeleteConfirm.value = false
+    tagToDelete.value = null
+    if (searchKeyword.value) searchKeyword.value = ''
+    fetchJobs()
+    fetchTags()
+  } catch (e: any) {
+    message.error(e.message || '删除失败')
+  } finally {
+    tagDeleting.value = false
+  }
+}
 
 const selectMode = ref(false)
 const selected = ref<Set<string>>(new Set())
@@ -205,7 +260,8 @@ const filteredJobs = computed(() => {
   return allJobs.value.filter((j) => {
     const prompt = (j.prompt || '').toLowerCase()
     const id = (j.id || '').toLowerCase()
-    return prompt.includes(kw) || id.includes(kw)
+    const remarkStr = (j.remark || '').toLowerCase()
+    return prompt.includes(kw) || id.includes(kw) || remarkStr.includes(kw)
   })
 })
 
@@ -269,6 +325,8 @@ const fetchJobs = async (silent = false) => {
     const statusMap: Record<string, string> = { queued: 'queued', processing: 'processing', completed: 'completed', failed: 'failed' }
     const params = new URLSearchParams({ page: String(page.value), pageSize: String(pageSize.value) })
     if (activeTab.value !== 'all') params.set('status', statusMap[activeTab.value] || '')
+    if (searchKeyword.value.trim()) params.set('search', searchKeyword.value.trim())
+    if (activeTag.value) params.set('tag', activeTag.value)
     const res = await fetch('/api/runway/jobs?' + params.toString(), { headers: authHeaders() })
     if (!res.ok) {
       if (res.status === 401) { showLoginModal.value = true; return }
@@ -311,6 +369,14 @@ const switchTab = (tab: TabKey) => {
 
 // Refetch when page changes (also covers tab switch when page wasn't 1)
 watch(page, () => { fetchJobs(true) })
+
+// Debounced search: refetch from server when keyword changes
+let searchDebounce: ReturnType<typeof setTimeout> | null = null
+watch(searchKeyword, () => {
+  if (searchDebounce) clearTimeout(searchDebounce)
+  searchDebounce = setTimeout(() => { page.value = 1; fetchJobs(true) }, 400)
+})
+watch(activeTag, () => { fetchJobs(true) })
 watch(pageCount, (pc) => { if (page.value > pc) page.value = Math.max(1, pc) })
 
 const toggleSelect = (id: string) => {
@@ -536,25 +602,27 @@ const downloadStatus = ref<{ active: boolean; phase: 'fetching' | 'zipping' | 'd
 
 const MAX_BATCH_DOWNLOAD = 20
 
+const downloadableJobs = computed(() => {
+  return allJobs.value.filter((j) => selected.value.has(j.id) && j.status === 'completed' && j.resultUrl)
+})
+
 const batchDownloadDisabled = computed(() => {
   if (downloadStatus.value?.active) return true
-  const n = selected.value.size
-  if (n === 0) return true
-  if (n > MAX_BATCH_DOWNLOAD) return true
+  if (downloadableJobs.value.length === 0) return true
+  if (downloadableJobs.value.length > MAX_BATCH_DOWNLOAD) return true
   return false
 })
 
 const sanitizeFilename = (name: string) => name.replace(/[\\/:*?"<>|\r\n\t]/g, '_').trim()
 
 const handleBatchDownload = async () => {
-  if (selected.value.size === 0) return
-  if (selected.value.size > MAX_BATCH_DOWNLOAD) {
-    message.warning(`最多 ${MAX_BATCH_DOWNLOAD} 条`)
+  const targets = downloadableJobs.value
+  if (targets.length === 0) {
+    message.warning('选中的任务中没有可下载的已完成视频')
     return
   }
-  const targets = selectedJobs.value.filter((j) => j.status === 'completed' && j.resultUrl && j.resultUrl.startsWith('http'))
-  if (targets.length === 0) {
-    message.warning('没有可下载的已完成任务')
+  if (targets.length > MAX_BATCH_DOWNLOAD) {
+    message.warning(`可下载的视频最多 ${MAX_BATCH_DOWNLOAD} 个，当前选中 ${targets.length} 个`)
     return
   }
   const zip = new JSZip()
@@ -622,7 +690,7 @@ watch(jwtToken, (token) => {
   else stopPolling()
 })
 
-onMounted(async () => { await fetchJobs(); mountedOnce.value = true })
+onMounted(async () => { await fetchJobs(); fetchTags(); mountedOnce.value = true })
 onUnmounted(() => stopPolling())
 </script>
 
@@ -714,7 +782,7 @@ onUnmounted(() => stopPolling())
           <input
             v-model="searchKeyword"
             type="text"
-            placeholder="搜索 prompt 或任务ID..."
+            placeholder="搜索提示词、备注标签或任务ID..."
             class="flex-1 border-none bg-transparent text-xs text-white placeholder-slate-500 outline-none"
           />
           <button
@@ -739,54 +807,81 @@ onUnmounted(() => stopPolling())
           </span>
         </div>
 
-      <!-- Bulk select bar -->
+        <!-- Tags row -->
+        <div v-if="allTags.length > 0" class="mt-2 flex flex-wrap items-center gap-1.5">
+          <span class="text-[10px] text-white/20 mr-0.5">标签:</span>
+          <span
+            class="inline-flex items-center rounded-md border px-1.5 py-0.5 text-[10px] transition-all duration-200 cursor-pointer"
+            :class="!activeTag
+              ? 'border-violet-500/50 bg-violet-500/20 text-violet-300'
+              : 'border-white/10 bg-white/5 text-white/40 hover:border-white/20 hover:text-white/60'"
+            @click="clearTag"
+          >全部</span>
+          <div
+            v-for="t in allTags"
+            :key="t.tag"
+            class="group/tag inline-flex items-center gap-0.5 rounded-md border px-1.5 py-0.5 text-[10px] transition-all duration-200 cursor-pointer"
+            :class="activeTag === t.tag
+              ? 'border-violet-400/40 bg-violet-500/15 text-violet-300'
+              : 'border-white/8 bg-white/[0.03] text-white/40 hover:border-violet-400/25 hover:bg-violet-500/[0.06] hover:text-violet-300/70'"
+            @click="filterByTag(t.tag)"
+          >
+            <span class="max-w-[80px] truncate"># {{ t.tag }}</span>
+            <span class="text-[9px] opacity-50">{{ t.count }}</span>
+            <button
+              class="ml-0.5 hidden h-3.5 w-3.5 items-center justify-center rounded-full text-[9px] text-red-400/0 transition-all group-hover/tag:inline-flex group-hover/tag:text-red-400/60 hover:!bg-red-500/20 hover:!text-red-300"
+              title="删除此标签及其所有任务"
+              @click.stop="confirmDeleteTag(t)"
+            >
+              ×
+            </button>
+          </div>
+        </div>
+
+      <!-- Bulk action bar -->
       <div class="mb-3 flex items-center justify-between">
-        <p class="text-xs text-slate-500">当前共 {{ filteredJobs.length }} 条任务</p>
         <div class="flex items-center gap-2">
-          <template v-if="selectMode">
-            <NCheckbox
-              :checked="allPageSelected"
-              :indeterminate="selected.size > 0 && !allPageSelected"
-              class="runway-checkbox"
-              @update:checked="toggleSelectAll"
-            >
-              <span class="text-xs text-slate-300">全选当前页</span>
-            </NCheckbox>
-            <button
-              v-if="selected.size > 0"
-              class="glass-btn rounded-lg border border-red-400/20 bg-red-500/10 px-3 py-1.5 text-xs font-medium text-red-300 backdrop-blur transition-all hover:border-red-400/40 hover:bg-red-500/20"
-              @click="confirmBulkDelete"
-            >
-              删除 {{ selected.size }} 条
-            </button>
-            <button
-              v-if="selected.size > 0"
-              :disabled="batchDownloadDisabled"
-              :title="selected.size > MAX_BATCH_DOWNLOAD ? '最多 20 条' : ''"
-              class="glass-btn rounded-lg border border-sky-400/20 bg-sky-500/10 px-3 py-1.5 text-xs font-medium text-sky-300 backdrop-blur transition-all hover:border-sky-400/40 hover:bg-sky-500/20 disabled:cursor-not-allowed disabled:opacity-50"
-              @click="handleBatchDownload"
-            >
-              批量下载 {{ selected.size }} 条
-            </button>
-            <div v-if="downloadStatus?.active" class="rounded-lg border border-sky-400/20 bg-sky-500/10 px-3 py-1.5 text-xs text-sky-200">
-              <template v-if="downloadStatus.phase === 'fetching'">下载中 {{ downloadStatus.current }}/{{ downloadStatus.total }}</template>
-              <template v-else-if="downloadStatus.phase === 'zipping'">压缩 {{ downloadStatus.percent }}%</template>
-            </div>
-            <button
-              class="glass-btn rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-slate-400 backdrop-blur transition-all hover:border-white/20 hover:bg-white/10"
-              @click="cancelSelectMode"
-            >
-              取消
-            </button>
-          </template>
-          <template v-else>
-            <button
-              class="glass-btn rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-slate-400 backdrop-blur transition-all hover:border-sky-400/30 hover:bg-sky-500/10 hover:text-sky-300"
-              @click="selectMode = true"
-            >
-              批量选择
-            </button>
-          </template>
+          <p class="text-xs text-slate-500">共 {{ filteredJobs.length }} 条</p>
+          <button
+            v-if="!selectMode"
+            class="glass-btn rounded-lg border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] text-slate-400 backdrop-blur transition-all hover:border-sky-400/30 hover:bg-sky-500/10 hover:text-sky-300"
+            @click="selectMode = true"
+          >
+            <SvgIcon icon="ri:checkbox-multiple-line" class="mr-1 inline text-xs" />选择
+          </button>
+        </div>
+        <div v-if="selectMode" class="flex items-center gap-1.5">
+          <button
+            class="rounded-md border border-white/10 bg-white/5 px-2 py-1 text-[11px] text-slate-300 transition-all hover:bg-white/10"
+            @click="toggleSelectAll"
+          >
+            {{ allPageSelected ? '取消全选' : '全选' }}
+          </button>
+          <button
+            v-if="selected.size > 0"
+            :disabled="batchDownloadDisabled"
+            class="rounded-md border border-sky-400/25 bg-sky-500/10 px-2 py-1 text-[11px] font-medium text-sky-300 transition-all hover:bg-sky-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+            @click="handleBatchDownload"
+          >
+            下载 {{ downloadableJobs.length > 0 ? downloadableJobs.length : '' }}{{ downloadableJobs.length > 0 && downloadableJobs.length !== selected.size ? '/' + selected.size : '' }}
+          </button>
+          <button
+            v-if="selected.size > 0"
+            class="rounded-md border border-red-400/20 bg-red-500/10 px-2 py-1 text-[11px] font-medium text-red-300 transition-all hover:bg-red-500/20"
+            @click="confirmBulkDelete"
+          >
+            删除 {{ selected.size }}
+          </button>
+          <div v-if="downloadStatus?.active" class="rounded-md border border-sky-400/20 bg-sky-500/10 px-2 py-1 text-[11px] text-sky-200">
+            <template v-if="downloadStatus.phase === 'fetching'">下载 {{ downloadStatus.current }}/{{ downloadStatus.total }}</template>
+            <template v-else-if="downloadStatus.phase === 'zipping'">压缩 {{ downloadStatus.percent }}%</template>
+          </div>
+          <button
+            class="rounded-md border border-white/8 px-2 py-1 text-[11px] text-slate-500 transition-all hover:text-slate-300"
+            @click="cancelSelectMode"
+          >
+            取消
+          </button>
         </div>
       </div>
 
@@ -819,11 +914,24 @@ onUnmounted(() => stopPolling())
           <div
             v-for="(job, index) in paginatedJobs"
             :key="job.id"
-            v-memo="[job.status, job.progress, job.resultUrl, job.thumbnailUrl, selected.has(job.id), playingVideoId === job.id]"
+            v-memo="[job.status, job.progress, job.resultUrl, job.thumbnailUrl, selected.has(job.id), playingVideoId === job.id, selectMode]"
             class="job-card group relative overflow-hidden rounded-2xl border bg-white/4 backdrop-blur-md transition-all duration-300 hover:-translate-y-[2px] hover:scale-[1.005]"
             :class="selected.has(job.id) ? 'border-sky-400/50 shadow-lg shadow-sky-500/15' : 'border-white/8 hover:border-sky-400/20 hover:shadow-lg hover:shadow-sky-500/8'"
             :style="mountedOnce ? {} : { animationDelay: `${index * 60}ms` }"
+            @click="selectMode ? toggleSelect(job.id) : undefined"
           >
+            <!-- Select mode overlay checkbox -->
+            <div
+              v-if="selectMode"
+              class="absolute left-3 top-3 z-20 flex h-5 w-5 cursor-pointer items-center justify-center rounded-md border transition-all duration-200"
+              :class="selected.has(job.id)
+                ? 'border-sky-400 bg-sky-500 shadow-md shadow-sky-500/30'
+                : 'border-white/25 bg-black/40 backdrop-blur-sm hover:border-sky-400/50'"
+              @click.stop="toggleSelect(job.id)"
+            >
+              <SvgIcon v-if="selected.has(job.id)" icon="ri:check-line" class="text-xs text-white" />
+            </div>
+
             <!-- Status left border strip -->
             <div
               class="absolute left-0 top-0 bottom-0 w-1"
@@ -836,15 +944,7 @@ onUnmounted(() => stopPolling())
               }"
             />
 
-            <!-- 11. Bulk select checkbox row -->
-            <div
-              v-if="selectMode"
-              class="flex cursor-pointer items-center gap-2 border-b border-white/8 px-4 py-2 pl-5 transition-colors hover:bg-white/5"
-              @click="toggleSelect(job.id)"
-            >
-              <NCheckbox :checked="selected.has(job.id)" class="runway-checkbox" @update:checked="() => toggleSelect(job.id)" />
-              <p class="truncate text-xs text-slate-400">{{ job.remark || job.prompt }}</p>
-            </div>
+
 
             <!-- 4. Video preview - inline playback -->
             <div v-if="job.resultUrl" class="video-thumb relative bg-black" @click="toggleInlinePlay(job.id, $event)">
@@ -869,9 +969,10 @@ onUnmounted(() => stopPolling())
                 </div>
               </template>
 
-              <!-- Duration badge -->
-              <div v-if="job.duration && playingVideoId !== job.id" class="absolute bottom-2 right-2 rounded-md bg-black/60 px-1.5 py-0.5 text-[10px] font-medium text-white/70 backdrop-blur-sm">
-                {{ job.duration }}s
+              <!-- Duration + model badges -->
+              <div v-if="playingVideoId !== job.id" class="absolute bottom-2 right-2 flex items-center gap-1">
+                <span v-if="job.modelName === 'seedance_2'" class="rounded-md bg-emerald-500/70 px-1.5 py-0.5 text-[9px] font-medium text-white backdrop-blur-sm">SD2</span>
+                <span v-if="job.duration" class="rounded-md bg-black/60 px-1.5 py-0.5 text-[10px] font-medium text-white/70 backdrop-blur-sm">{{ job.duration }}s</span>
               </div>
             </div>
 
@@ -880,11 +981,10 @@ onUnmounted(() => stopPolling())
               v-else-if="isActive(job.status)"
               class="relative aspect-video w-full overflow-hidden bg-slate-900/80"
             >
-              <img
-                v-if="getFirstImage(job)"
-                :src="getFirstImage(job) as string"
-                class="h-full w-full object-cover opacity-50"
-              />
+              <div v-if="getAllImages(job).length > 1" class="absolute inset-0 grid grid-cols-2 gap-0.5">
+                <img v-for="(img, i) in getAllImages(job).slice(0, 2)" :key="i" :src="img" class="h-full w-full object-cover opacity-50" />
+              </div>
+              <img v-else-if="getFirstImage(job)" :src="getFirstImage(job) as string" class="h-full w-full object-cover opacity-50" />
               <div class="shimmer-overlay absolute inset-0" />
               <div class="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/90 via-black/50 to-transparent px-4 py-3">
                 <div class="flex items-center gap-2">
@@ -901,7 +1001,10 @@ onUnmounted(() => stopPolling())
 
             <!-- 5b. Static preview for non-active jobs (failed/cancelled/no video) -->
             <div v-else-if="getFirstImage(job)" class="relative aspect-video w-full overflow-hidden bg-slate-900/60">
-              <img :src="getFirstImage(job) as string" class="h-full w-full object-cover opacity-60 transition-opacity group-hover:opacity-75" />
+              <div v-if="getAllImages(job).length > 1" class="absolute inset-0 grid grid-cols-2 gap-0.5">
+                <img v-for="(img, i) in getAllImages(job).slice(0, 2)" :key="i" :src="img" class="h-full w-full object-cover opacity-60 transition-opacity group-hover:opacity-75" />
+              </div>
+              <img v-else :src="getFirstImage(job) as string" class="h-full w-full object-cover opacity-60 transition-opacity group-hover:opacity-75" />
               <div class="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 to-transparent px-3 py-2">
                 <span
                   class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium"
@@ -918,7 +1021,7 @@ onUnmounted(() => stopPolling())
             </div>
 
             <!-- Card body -->
-            <div class="card-body relative p-4 pl-5 cursor-pointer" @click="openDetail(job)">
+            <div class="card-body relative p-4 pl-5 cursor-pointer" @click.stop="selectMode ? toggleSelect(job.id) : openDetail(job)">
               <!-- Click hint -->
               <div class="absolute right-2 top-2 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
                 <SvgIcon icon="ri:arrow-right-up-line" class="text-sm text-white/20" />
@@ -954,6 +1057,14 @@ onUnmounted(() => stopPolling())
                 </span>
                 <span v-if="job.duration" class="rounded-md border border-white/8 bg-white/5 px-1.5 py-0.5 text-slate-400">
                   {{ job.duration }} 秒
+                </span>
+                <span
+                  class="rounded-md border px-1.5 py-0.5 font-medium"
+                  :class="job.modelName === 'seedance_2'
+                    ? 'border-emerald-400/20 bg-emerald-500/10 text-emerald-300'
+                    : 'border-sky-400/12 bg-sky-500/8 text-sky-300/70'"
+                >
+                  {{ job.modelName === 'seedance_2' ? 'Seedance' : '可灵' }}
                 </span>
                 <span v-if="formatElapsed(job)" class="text-slate-500">耗时 {{ formatElapsed(job) }}</span>
               </div>
@@ -1118,7 +1229,9 @@ onUnmounted(() => stopPolling())
           </div>
           <div v-if="detailJob.modelName" class="detail-row">
             <span class="detail-label">模型</span>
-            <span class="detail-value font-mono text-[11px]">{{ detailJob.modelName }}</span>
+            <span class="detail-value text-[11px]" :class="detailJob.modelName === 'seedance_2' ? 'text-emerald-400' : 'text-sky-400'">
+              {{ detailJob.modelName === 'seedance_2' ? 'Seedance 2.0' : detailJob.modelName === 'kling_3_0_pro' ? '可灵 3.0 Pro' : detailJob.modelName }}
+            </span>
           </div>
           <div v-if="detailJob.username" class="detail-row">
             <span class="detail-label">用户</span>
@@ -1220,6 +1333,47 @@ onUnmounted(() => stopPolling())
         >
           <NSpin v-if="deleting" size="small" class="mr-1.5" />
           {{ deleting ? '删除中...' : `确认删除 ${selected.size} 条` }}
+        </button>
+      </div>
+    </div>
+  </NModal>
+
+  <!-- Tag Delete Confirm Modal -->
+  <NModal v-model:show="showTagDeleteConfirm" :mask-style="{ backdropFilter: 'blur(8px)', background: 'rgba(0,0,0,0.6)' }">
+    <div v-if="tagToDelete" class="mx-auto w-96 rounded-2xl border border-white/10 bg-[#0f0f19]/98 p-6 shadow-2xl backdrop-blur-xl">
+      <div class="mb-4 flex items-center gap-3">
+        <div class="flex h-10 w-10 items-center justify-center rounded-xl bg-red-500/15 border border-red-400/20">
+          <SvgIcon icon="ri:price-tag-3-line" class="text-lg text-red-400" />
+        </div>
+        <h3 class="text-base font-semibold text-slate-100">删除标签</h3>
+      </div>
+
+      <div class="space-y-3 text-sm text-slate-300">
+        <p>
+          确认删除标签 <span class="font-semibold text-violet-400"># {{ tagToDelete.tag }}</span> ？
+        </p>
+        <div class="rounded-xl border border-red-400/15 bg-red-500/[0.06] p-3">
+          <p class="flex items-center gap-1.5 text-xs text-red-300/80">
+            <SvgIcon icon="ri:error-warning-line" class="text-sm" />
+            此操作将同时删除该标签下的 <span class="font-bold text-red-300">{{ tagToDelete.count }}</span> 条任务，删除后无法恢复！
+          </p>
+        </div>
+      </div>
+
+      <div class="mt-5 flex justify-end gap-2">
+        <button
+          class="glass-btn rounded-lg border border-white/10 bg-white/5 px-4 py-2 text-sm text-slate-300 backdrop-blur transition-all hover:bg-white/10"
+          @click="showTagDeleteConfirm = false"
+        >
+          取消
+        </button>
+        <button
+          class="rounded-lg border border-red-400/30 bg-red-500/20 px-4 py-2 text-sm font-medium text-red-300 transition-all hover:bg-red-500/30 disabled:opacity-50"
+          :disabled="tagDeleting"
+          @click="doDeleteTag"
+        >
+          <NSpin v-if="tagDeleting" size="small" class="mr-1.5" />
+          {{ tagDeleting ? '删除中...' : '确认删除' }}
         </button>
       </div>
     </div>

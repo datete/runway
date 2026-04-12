@@ -41,12 +41,50 @@ function randInt(min: number, max: number): number {
   return min + Math.floor(Math.random() * (max - min));
 }
 
+/** 日夜节律倍率：根据上海本地时间 */
+function diurnalFactor(): number {
+  const now = new Date();
+  // 上海时间 = UTC + 8
+  const shHour = (now.getUTCHours() + 8) % 24;
+  if (shHour >= 2 && shHour < 8) return 3.0;        // 02-08 深夜
+  if (shHour < 2 || (shHour >= 8 && shHour < 10)) return 1.8; // 00-02/08-10 过渡
+  if ((shHour >= 10 && shHour < 14) || (shHour >= 19 && shHour < 24)) return 1.0; // 高峰
+  return 1.2; // 14-19 午后
+}
+
+const MAX_DIURNAL_SLEEP = 15 * 60_000;
+
+/** 长尾人类延迟：70% 快速、25% 正常、5% 走神 */
+function humanDelay(minMs: number, maxMs: number): number {
+  const r = Math.random();
+  const span = maxMs - minMs;
+  if (r < 0.70) return randInt(minMs, minMs + Math.floor(span * 0.5) + 1);
+  if (r < 0.95) return randInt(minMs + Math.floor(span * 0.5), maxMs + 1);
+  // 5% 走神
+  const zoned = randInt(maxMs, maxMs * 3 + 1);
+  return Math.min(zoned, 10 * 60_000);
+}
+
+/** 对延迟叠加日夜节律并 clamp */
+function withDiurnal(ms: number): number {
+  return Math.min(Math.floor(ms * diurnalFactor()), MAX_DIURNAL_SLEEP);
+}
+
 /** 获取某账号当前批次的目标数（首次随机生成） */
 async function getBatchLimit(accountId: string): Promise<number> {
   const key = `submit:batch-limit:${accountId}`;
   const val = await connection.get(key);
   if (val) return parseInt(val, 10);
-  const limit = randInt(BATCH_SIZE_MIN, BATCH_SIZE_MAX + 1);
+  // 不规则批次：15% 小休息批次 / 10% 马拉松 / 75% 正常
+  let limit: number;
+  const brRand = Math.random();
+  if (brRand < 0.15) {
+    limit = randInt(8, 16); // 短休息批次
+  } else if (brRand < 0.25) {
+    limit = randInt(45, 61); // 马拉松
+  } else {
+    limit = randInt(BATCH_SIZE_MIN, BATCH_SIZE_MAX + 1);
+  }
   await connection.set(key, String(limit));
   console.log(`[batch:${accountId.slice(0,8)}] new batch limit: ${limit} tasks`);
   return limit;
@@ -63,7 +101,10 @@ async function incrementBatchAndCheck(accountId: string, accountLabel: string): 
 
 /** 某账号开始批次休息 */
 async function startBatchRest(accountId: string, accountLabel: string): Promise<number> {
-  const restMs = randInt(BATCH_REST_MIN, BATCH_REST_MAX + 1);
+  // 20% 概率短休息（模拟人去倒水接电话），80% 正常长休息
+  const restMs = Math.random() < 0.20
+    ? randInt(5 * 60_000, 12 * 60_000 + 1)
+    : randInt(BATCH_REST_MIN, BATCH_REST_MAX + 1);
   const restSec = Math.ceil(restMs / 1000);
   const restKey = `submit:batch-resting:${accountId}`;
   const countKey = `submit:batch-count:${accountId}`;
@@ -271,9 +312,17 @@ async function trySubmitOneOnAccount(account: AccountEntry): Promise<SubmitResul
     });
 
     // ── 人工延迟：模拟操作时间 ──
-    const preSubmitDelay = randInt(PRE_SUBMIT_DELAY_MIN, PRE_SUBMIT_DELAY_MAX + 1);
-    console.log(`[submit-worker] pre-submit delay ${(preSubmitDelay/1000).toFixed(0)}s for ${jobId.slice(0,8)} on ${account.label}`);
-    await new Promise(r => setTimeout(r, preSubmitDelay));
+    let preSubmitDelay = humanDelay(PRE_SUBMIT_DELAY_MIN, PRE_SUBMIT_DELAY_MAX);
+    // 提示词打字时长：每字符 40-130ms，上限 +20s
+    const promptLen = (dbJob.prompt ? String(dbJob.prompt).length : 0);
+    const typingBonus = Math.min(promptLen * randInt(40, 131), 20_000);
+    preSubmitDelay = Math.min(preSubmitDelay + typingBonus, PRE_SUBMIT_DELAY_MAX + 20_000);
+    {
+      const _sp = await getSpeedMultiplier();
+      const _eff = Math.round(preSubmitDelay / _sp);
+      console.log(`[submit-worker] pre-submit delay ${(_eff/1000).toFixed(0)}s for ${jobId.slice(0,8)} on ${account.label}${_sp !== 1.0 ? ` (speed=${_sp}x)` : ''}`);
+      await sleep(_eff);
+    }
 
     // ══════════════════════════════════════════════════════════
     // API 调用前三重检查（延迟期间情况可能已变）
@@ -429,6 +478,28 @@ new Worker("runway-submit", async (_job: Job) => {
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
+/** 全局速度倍率：从 Redis 读取，clamp 到 [0.1, 2.0]，默认 1.0
+ *  speed=2.0 → 更快 → 除以；speed=0.1 → 极慢 → 除以（结果变大）
+ *  effective sleep = baseMs / speed
+ */
+async function getSpeedMultiplier(): Promise<number> {
+  try {
+    const v = await connection.get("runway:speed-multiplier");
+    if (!v) return 1.0;
+    const f = parseFloat(v);
+    if (!isFinite(f) || isNaN(f)) return 1.0;
+    return Math.max(0.1, Math.min(2.0, f));
+  } catch {
+    return 1.0;
+  }
+}
+
+/** 按全局速度倍率缩放后的人类延迟睡眠 */
+async function humanSleep(ms: number): Promise<void> {
+  const sp = await getSpeedMultiplier();
+  await sleep(Math.round(ms / sp));
+}
+
 const accountLoops = new Map<string, { stopFlag: boolean }>();
 
 async function accountSubmitLoop(accountId: string): Promise<void> {
@@ -450,6 +521,20 @@ async function accountSubmitLoop(accountId: string): Promise<void> {
       if (account.tokenExpiresAt && account.tokenExpiresAt.getTime() < Date.now()) {
         await sleep(60_000);
         continue;
+      }
+
+      // 深夜概率性跳过（diurnal >= 2.5 时 80% 概率休长觉）
+      {
+        const df = diurnalFactor();
+        // Runtime toggle: redis key runway:deep-night-enabled ("1"=on, "0"=off). Default on.
+        const dnRaw = await connection.get("runway:deep-night-enabled").catch(() => null);
+        const deepNightOn = dnRaw === null ? (process.env.DISABLE_DEEP_NIGHT_SKIP !== "1") : (dnRaw === "1");
+        if (deepNightOn && df >= 2.5 && Math.random() < 0.80) {
+          const skipMs = Math.min(randInt(120_000, 300_001) * df, MAX_DIURNAL_SLEEP);
+          console.log(`[loop:${accountId.slice(0,8)}] deep-night skip, sleeping ${(skipMs/60000).toFixed(1)}min`);
+          await humanSleep(skipMs);
+          continue;
+        }
       }
 
       // Account-level batch rest?
@@ -478,7 +563,7 @@ async function accountSubmitLoop(accountId: string): Promise<void> {
       const acquired = await accountPool.acquireSpecific(account.id);
       if (!acquired) {
         // Slot full — wait for a poll release
-        await sleep(8_000);
+        await humanSleep(humanDelay(6_000, 14_000));
         continue;
       }
 
@@ -489,28 +574,31 @@ async function accountSubmitLoop(accountId: string): Promise<void> {
         case "submitted": {
           const needRest = await incrementBatchAndCheck(account.id, account.label);
           if (needRest) await startBatchRest(account.id, account.label);
-          const d = randInt(POST_SUBMIT_DELAY_MIN, POST_SUBMIT_DELAY_MAX + 1);
-          console.log(`[loop:${account.label}] submitted OK, sleeping ${(d/1000).toFixed(0)}s`);
-          await sleep(d);
+          const d = withDiurnal(humanDelay(POST_SUBMIT_DELAY_MIN, POST_SUBMIT_DELAY_MAX));
+          const _sp = await getSpeedMultiplier();
+          const _eff = Math.round(d / _sp);
+          console.log(`[loop:${account.label}] submitted OK, sleeping ${(_eff/1000).toFixed(0)}s${_sp !== 1.0 ? ` (speed=${_sp}x)` : ''}`);
+          await sleep(_eff);
           break;
         }
         case "no_pending":
-          await sleep(10_000);
+          await humanSleep(humanDelay(8_000, 16_000));
           break;
         case "no_account":
-          await sleep(8_000);
+          await humanSleep(humanDelay(6_000, 12_000));
           break;
         case "rate_limited":
-          await sleep(5_000);
+          // 保留 5s 冷却，但加 ±2s 抖动 (不缩放 — 这是速率限制冷却)
+          await sleep(5_000 + randInt(-2_000, 2_001));
           break;
         case "network_error":
-          await sleep(randInt(NETWORK_RETRY_MIN, NETWORK_RETRY_MAX + 1));
+          await humanSleep(humanDelay(NETWORK_RETRY_MIN, NETWORK_RETRY_MAX) * randInt(1, 4));
           break;
         case "job_failed":
-          await sleep(5_000);
+          await humanSleep(humanDelay(15_000, 45_000));
           break;
         case "batch_resting":
-          await sleep(30_000);
+          await humanSleep(humanDelay(25_000, 45_000));
           break;
       }
     } catch (e: any) {
@@ -529,7 +617,11 @@ async function refreshAccountLoops(): Promise<void> {
     const activeIds = new Set(accounts.map(a => a.id));
     for (const a of accounts) {
       if (!accountLoops.has(a.id)) {
-        accountSubmitLoop(a.id).catch(e => console.error(`[loop:spawn] ${e.message}`));
+        // 随机错开启动，避免 3 个账号齐步走
+        const offset = randInt(0, 45_001);
+        setTimeout(() => {
+          accountSubmitLoop(a.id).catch(e => console.error(`[loop:spawn] ${e.message}`));
+        }, offset);
       }
     }
     for (const id of accountLoops.keys()) {

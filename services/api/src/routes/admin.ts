@@ -120,9 +120,9 @@ router.get("/accounts", async (_req: Request, res: Response) => {
       where: { accountId: { not: null }, status: { not: "deleted" } },
       orderBy: { updatedAt: "desc" },
       take: 50,
-      select: { id: true, accountId: true, userId: true, status: true, progress: true, prompt: true, createdAt: true, updatedAt: true, user: { select: { username: true } } },
+      select: { id: true, accountId: true, userId: true, status: true, progress: true, prompt: true, referenceImages: true, thumbnailUrl: true, videoUrl: true, createdAt: true, updatedAt: true, user: { select: { username: true } } },
     });
-    const accountTasksMap: Record<string, Array<{ jobId: string; username: string; status: string; progress: number; prompt: string; createdAt: string }>> = {};
+    const accountTasksMap: Record<string, Array<{ jobId: string; username: string; status: string; progress: number; prompt: string; referenceImages: any; thumbnailUrl: string | null; videoUrl: string | null; createdAt: string }>> = {};
     for (const j of acctJobs) {
       if (!j.accountId) continue;
       if (!accountTasksMap[j.accountId]) accountTasksMap[j.accountId] = [];
@@ -133,6 +133,9 @@ router.get("/accounts", async (_req: Request, res: Response) => {
         status: j.status,
         progress: j.progress || 0,
         prompt: (j.prompt || "").slice(0, 30),
+        referenceImages: j.referenceImages || null,
+        thumbnailUrl: (j as any).thumbnailUrl || null,
+        videoUrl: (j as any).videoUrl || null,
         createdAt: j.createdAt.toISOString(),
       });
     }
@@ -595,8 +598,8 @@ router.get("/dashboard", async (_req: Request, res: Response) => {
       prisma.runwayJob.count({ where: { status: { in: ["submitted", "processing"] } } }),
       prisma.runwayJob.count({ where: { status: "completed" } }),
       prisma.runwayJob.count({ where: { status: "failed" } }),
-      prisma.runwayJob.count({ where: { status: "completed", finishedAt: { gte: todayStart } } }),
-      prisma.runwayJob.count({ where: { status: "failed", finishedAt: { gte: todayStart } } }),
+      prisma.runwayJob.count({ where: { status: "completed", createdAt: { gte: todayStart } } }),
+      prisma.runwayJob.count({ where: { status: "failed", createdAt: { gte: todayStart } } }),
       prisma.runwayJob.findMany({
         where: {
           OR: [
@@ -623,8 +626,8 @@ router.get("/dashboard", async (_req: Request, res: Response) => {
       const createdToday = j.createdAt && new Date(j.createdAt).getTime() >= todayStart.getTime();
       const finishedToday = j.finishedAt && new Date(j.finishedAt).getTime() >= todayStart.getTime();
       if (createdToday) userTodayMap[uid].total++;
-      if (finishedToday && j.status === "completed") userTodayMap[uid].completed++;
-      if (finishedToday && j.status === "failed") userTodayMap[uid].failed++;
+      if (createdToday && j.status === "completed") userTodayMap[uid].completed++;
+      if (createdToday && j.status === "failed") userTodayMap[uid].failed++;
     }
 
     // Per-user total job counts (exclude deleted)
@@ -679,9 +682,9 @@ router.get("/dashboard", async (_req: Request, res: Response) => {
       where: { accountId: { not: null }, status: { not: "deleted" } },
       orderBy: { updatedAt: "desc" },
       take: 50,
-      select: { id: true, accountId: true, userId: true, status: true, progress: true, prompt: true, createdAt: true, updatedAt: true, user: { select: { username: true } } },
+      select: { id: true, accountId: true, userId: true, status: true, progress: true, prompt: true, referenceImages: true, thumbnailUrl: true, videoUrl: true, createdAt: true, updatedAt: true, user: { select: { username: true } } },
     });
-    const accountTasksMap: Record<string, Array<{ jobId: string; username: string; status: string; progress: number; prompt: string; createdAt: string }>> = {};
+    const accountTasksMap: Record<string, Array<{ jobId: string; username: string; status: string; progress: number; prompt: string; referenceImages: any; thumbnailUrl: string | null; videoUrl: string | null; createdAt: string }>> = {};
     for (const j of accountRecentJobs) {
       if (!j.accountId) continue;
       if (!accountTasksMap[j.accountId]) accountTasksMap[j.accountId] = [];
@@ -692,6 +695,9 @@ router.get("/dashboard", async (_req: Request, res: Response) => {
         status: j.status,
         progress: j.progress || 0,
         prompt: (j.prompt || "").slice(0, 30),
+        referenceImages: j.referenceImages || null,
+        thumbnailUrl: (j as any).thumbnailUrl || null,
+        videoUrl: (j as any).videoUrl || null,
         createdAt: j.createdAt.toISOString(),
       });
     }

@@ -108,16 +108,17 @@ export class RunwayService {
       }
 
       // Always accept the job — it enters the global queue
-      return tx.runwayJob.create({
+      const jobId = uuidv4();
+      const created = await tx.runwayJob.create({
         data: {
-          id: uuidv4(),
+          id: jobId,
           userId: input.userId,
           prompt: input.prompt,
           mode: input.mode,
           imageUrl: input.imageUrl,
           referenceImages: input.imageUrls ? JSON.stringify(input.imageUrls) : undefined,
           exploreMode: input.exploreMode ?? true,
-          modelName: "kling_3_0_pro",
+          modelName: input.model || "kling_3_0_pro",
           status: "pending",
           provider: "direct",
           duration: input.duration || 5,
@@ -129,6 +130,16 @@ export class RunwayService {
           videoUrl: input.videoUrl || null,
         } as any,
       });
+
+      // Credit mode (exploreMode=false) gets higher priority — processed before free tasks
+      if (input.exploreMode === false) {
+        await tx.$executeRawUnsafe(
+          `UPDATE runway_jobs SET priority = 10 WHERE id = $1`,
+          jobId
+        );
+      }
+
+      return created;
     }, { isolationLevel: "Serializable" });
 
     // Trigger the submit worker to pick up pending jobs (FIFO from DB)
@@ -149,7 +160,7 @@ export class RunwayService {
     return job;
   }
 
-  async listJobs(userId?: string, role?: string, options?: { page?: number; pageSize?: number; status?: string }) {
+  async listJobs(userId?: string, role?: string, options?: { page?: number; pageSize?: number; status?: string; search?: string; tag?: string }) {
     const page = Math.max(1, options?.page || 1);
     const pageSize = Math.min(100, Math.max(1, options?.pageSize || 20));
 
@@ -169,6 +180,22 @@ export class RunwayService {
       where.status = "completed";
     } else if (statusFilter === "failed") {
       where.status = { in: ["failed", "cancelled"] };
+    }
+
+    // Exact tag (remark) filter
+    const tagFilter = options?.tag?.trim();
+    if (tagFilter) {
+      where.remark = tagFilter;
+    }
+
+    // Text search: match prompt, remark, or job id
+    const searchTerm = options?.search?.trim();
+    if (searchTerm) {
+      where.OR = [
+        { prompt: { contains: searchTerm, mode: "insensitive" } },
+        { remark: { contains: searchTerm, mode: "insensitive" } },
+        { id: { contains: searchTerm, mode: "insensitive" } },
+      ];
     }
 
     const include = role === "admin" ? { user: { select: { username: true } } } : undefined;

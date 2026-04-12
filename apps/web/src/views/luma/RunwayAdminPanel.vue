@@ -45,7 +45,22 @@ interface AccountInfo {
   tokenExpiresAt: string | null; createdAt: string ; activeTasks?: ActiveTask[]
 }
 interface ActiveTask {
-  jobId: string; username: string; status: string; progress: number; prompt: string; createdAt: string
+  jobId: string; username: string; status: string; progress: number; prompt: string; referenceImages: string | null; thumbnailUrl: string | null; videoUrl: string | null; createdAt: string
+}
+
+/* helper: parse task ref images */
+const parseTaskImages = (task: ActiveTask): string[] => {
+  if (!task.referenceImages) return []
+  try {
+    const parsed = typeof task.referenceImages === "string" ? JSON.parse(task.referenceImages) : task.referenceImages
+    if (Array.isArray(parsed)) return parsed.filter((s: any) => typeof s === "string" && s.length > 0)
+  } catch {}
+  return []
+}
+const getTaskThumb = (task: ActiveTask): string | null => {
+  if (task.thumbnailUrl) return task.thumbnailUrl
+  const imgs = parseTaskImages(task)
+  return imgs.length > 0 ? imgs[0] : null
 }
 interface AccountStat {
   id: string; label: string; tokenShort: string; isActive: boolean
@@ -1096,33 +1111,43 @@ onUnmounted(() => { if (autoRefreshTimer) clearInterval(autoRefreshTimer) })
                   class="mt-1.5"
                 />
               </div>
-              <div v-if="a.activeTasks && a.activeTasks.length > 0" class="border-t border-white/[0.06] px-4 py-2.5">
-                <p class="mb-2 text-[10px] font-semibold uppercase tracking-widest text-white/25">最近任务</p>
-                <div class="space-y-1.5">
-                  <div v-for="t in a.activeTasks" :key="t.jobId" class="flex items-center gap-2 rounded-lg border border-white/[0.04] bg-white/[0.02] px-3 py-2 transition-colors hover:bg-white/[0.05]">
-                    <div class="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-violet-500/20 text-[9px] font-bold text-violet-300">
-                      {{ t.username.charAt(0).toUpperCase() }}
-                    </div>
-                    <div class="min-w-0 flex-1">
-                      <div class="flex items-center gap-1.5">
-                        <span class="text-[11px] font-medium text-violet-400">{{ t.username }}</span>
-                        <span class="text-[10px] text-white/20">#{{ t.jobId }}</span>
-                        <NTag :type="t.status === 'completed' ? 'success' : t.status === 'failed' ? 'error' : t.status === 'cancelled' ? 'warning' : 'info'" size="tiny" round :bordered="false">
-                          {{ {completed: '完成', failed: '失败', cancelled: '取消', processing: '生成中', submitted: '提交中', pending: '排队'}[t.status] || t.status }}
-                        </NTag>
+              <div v-if="a.activeTasks && a.activeTasks.filter(x => ['processing','submitted'].includes(x.status)).length > 0" class="border-t border-white/[0.06] px-4 py-2.5">
+                <p class="mb-2 text-[10px] font-semibold uppercase tracking-widest text-white/25">正在处理的视频 ({{ a.activeTasks.filter(x => ['processing','submitted'].includes(x.status)).length }})</p>
+                <div class="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
+                  <div v-for="t in a.activeTasks.filter(x => ['processing','submitted'].includes(x.status))" :key="t.jobId"
+                    class="group relative overflow-hidden rounded-lg border border-white/[0.06] bg-white/[0.02] transition-all hover:border-white/[0.15]">
+                    <div class="relative aspect-video bg-black/30">
+                      <img v-if="getTaskThumb(t)" :src="getTaskThumb(t)!" class="h-full w-full object-cover opacity-70" />
+                      <div v-else class="flex h-full w-full items-center justify-center">
+                        <SvgIcon icon="ri:film-line" class="text-2xl text-white/10" />
                       </div>
-                      <p class="truncate text-[10px] text-white/25">{{ t.prompt || '...' }}</p>
+                      <div v-if="t.progress > 0" class="absolute bottom-0 left-0 right-0">
+                        <div class="h-1 bg-emerald-500/80 transition-all" :style="{ width: Math.round(t.progress * 100) + '%' }" />
+                      </div>
+                      <div class="absolute left-1 top-1">
+                        <span class="inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[9px] font-bold backdrop-blur-sm"
+                          :class="t.status === 'processing' ? 'bg-blue-500/40 text-blue-200' : 'bg-amber-500/40 text-amber-200'">
+                          <span class="h-1 w-1 rounded-full animate-pulse" :class="t.status === 'processing' ? 'bg-blue-300' : 'bg-amber-300'" />
+                          {{ t.status === 'processing' ? '生成中' : '提交中' }}
+                        </span>
+                      </div>
+                      <div v-if="t.progress > 0" class="absolute right-1 top-1 rounded-full bg-black/60 px-1.5 py-0.5 text-[10px] font-bold text-emerald-300 backdrop-blur-sm">
+                        {{ Math.round(t.progress * 100) }}%
+                      </div>
                     </div>
-                    <div v-if="t.status === 'processing' && t.progress > 0" class="w-10 flex-shrink-0 text-right text-[11px] font-bold text-emerald-400">
-                      {{ Math.round(t.progress * 100) }}%
+                    <div class="px-2 py-1.5">
+                      <div class="flex items-center gap-1">
+                        <span class="text-[10px] font-medium text-violet-400">{{ t.username }}</span>
+                        <span class="text-[9px] text-white/20">#{{ t.jobId }}</span>
+                      </div>
+                      <p class="truncate text-[9px] text-white/25">{{ t.prompt || '...' }}</p>
                     </div>
                   </div>
                 </div>
               </div>
               <div v-else class="border-t border-white/[0.06] px-4 py-2.5">
-                <p class="text-center text-[11px] text-white/15">暂无任务记录</p>
-              </div>
-            </div>
+                <p class="text-center text-[11px] text-white/15">暂无处理中的任务</p>
+              </div>            </div>
           </div>
         </div>
 
