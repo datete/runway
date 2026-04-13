@@ -385,7 +385,7 @@ const processFiles = async (fileList: File[]) => {
       img.src = base64
       img.onload = () => {
         if (img.width < 300 || img.height < 300) {
-          message.error(`图片 ${file.name} 尺寸太小(${img.width}x${img.height})，Runway要求至少300x300px`, { duration: 6000 })
+          message.error(`图片 ${file.name} 尺寸太小(${img.width}x${img.height})，系统要求至少300x300px`, { duration: 6000 })
         } else if (img.width > img.height) {
           message.warning(`图片 ${file.name} 为横屏(${img.width}x${img.height})，建议上传竖屏(9:16)图片以获得最佳效果`, { duration: 5000 })
         }

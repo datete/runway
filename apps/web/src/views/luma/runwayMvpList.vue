@@ -113,7 +113,7 @@ const openDevicePanel = () => {
 
 const allJobs = ref<RunwayJob[]>([])
 const page = ref(1)
-const pageSize = ref(20)
+const pageSize = ref(24)
 const totalJobs = ref(0)
 const tabCounts = ref({ all: 0, queued: 0, processing: 0, completed: 0, failed: 0 })
 const activeTab = ref<TabKey>('all')
@@ -350,7 +350,7 @@ const fetchJobs = async (silent = false) => {
     }
 
     const hasActive = activeJobCount.value > 0
-    if (hasActive && !pollTimer) pollTimer = setInterval(() => { if (document.visibilityState === "visible") fetchJobs(true) }, 10000)
+    if (hasActive && !pollTimer) pollTimer = setInterval(() => { if (document.visibilityState === "visible") fetchJobs(true) }, 8000)
     if (!hasActive) stopPolling()
   } catch (e: any) {
     if (!silent) fetchError.value = e.message || '网络异常'
@@ -361,10 +361,10 @@ const fetchJobs = async (silent = false) => {
 
 const switchTab = (tab: TabKey) => {
   activeTab.value = tab
-  const wasPage1 = page.value === 1
   page.value = 1
   selected.value = new Set()
-  if (wasPage1) fetchJobs(true)
+  playingVideoId.value = null
+  fetchJobs(true)
 }
 
 // Refetch when page changes (also covers tab switch when page wasn't 1)
@@ -915,9 +915,9 @@ onUnmounted(() => stopPolling())
             v-for="(job, index) in paginatedJobs"
             :key="job.id"
             v-memo="[job.status, job.progress, job.resultUrl, job.thumbnailUrl, selected.has(job.id), playingVideoId === job.id, selectMode]"
-            class="job-card group relative overflow-hidden rounded-2xl border bg-white/4 backdrop-blur-md transition-all duration-300 hover:-translate-y-[2px] hover:scale-[1.005]"
-            :class="selected.has(job.id) ? 'border-sky-400/50 shadow-lg shadow-sky-500/15' : 'border-white/8 hover:border-sky-400/20 hover:shadow-lg hover:shadow-sky-500/8'"
-            :style="mountedOnce ? {} : { animationDelay: `${index * 60}ms` }"
+            class="job-card group relative overflow-hidden rounded-2xl border bg-white/4 backdrop-blur-md transition-colors duration-200"
+            :class="selected.has(job.id) ? 'border-sky-400/50 shadow-lg shadow-sky-500/15' : 'border-white/8 hover:border-white/15'"
+            :style="mountedOnce ? {} : { animationDelay: `${Math.min(index, 6) * 40}ms` }"
             @click="selectMode ? toggleSelect(job.id) : undefined"
           >
             <!-- Select mode overlay checkbox -->
@@ -961,7 +961,9 @@ onUnmounted(() => stopPolling())
               <!-- Thumbnail state: static preview with play button -->
               <template v-else>
                 <img v-if="job.thumbnailUrl" :src="job.thumbnailUrl" loading="lazy" class="aspect-video w-full object-cover pointer-events-none" />
-                <video v-else preload="none" class="aspect-video w-full object-contain pointer-events-none" :src="job.resultUrl" />
+                <div v-else class="aspect-video w-full bg-gradient-to-br from-slate-800 to-slate-900 flex items-center justify-center">
+                  <SvgIcon icon="ri:movie-2-line" class="text-2xl text-white/20" />
+                </div>
                 <div class="absolute inset-0 flex cursor-pointer items-center justify-center bg-black/20 transition-all duration-200 hover:bg-black/10">
                   <div class="play-breathe flex h-11 w-11 items-center justify-center rounded-full bg-white/15 backdrop-blur-sm transition-transform">
                     <SvgIcon icon="ri:play-fill" class="ml-0.5 text-xl text-white/90" />
@@ -972,6 +974,7 @@ onUnmounted(() => stopPolling())
               <!-- Duration + model badges -->
               <div v-if="playingVideoId !== job.id" class="absolute bottom-2 right-2 flex items-center gap-1">
                 <span v-if="job.modelName === 'seedance_2'" class="rounded-md bg-emerald-500/70 px-1.5 py-0.5 text-[9px] font-medium text-white backdrop-blur-sm">SD2</span>
+                <span v-else class="rounded-md bg-sky-500/70 px-1.5 py-0.5 text-[9px] font-medium text-white backdrop-blur-sm">可灵</span>
                 <span v-if="job.duration" class="rounded-md bg-black/60 px-1.5 py-0.5 text-[10px] font-medium text-white/70 backdrop-blur-sm">{{ job.duration }}s</span>
               </div>
             </div>
@@ -1005,7 +1008,7 @@ onUnmounted(() => stopPolling())
                 <img v-for="(img, i) in getAllImages(job).slice(0, 2)" :key="i" :src="img" class="h-full w-full object-cover opacity-60 transition-opacity group-hover:opacity-75" />
               </div>
               <img v-else :src="getFirstImage(job) as string" class="h-full w-full object-cover opacity-60 transition-opacity group-hover:opacity-75" />
-              <div class="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 to-transparent px-3 py-2">
+              <div class="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 to-transparent px-3 py-2 flex items-center justify-between">
                 <span
                   class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium"
                   :class="{
@@ -1017,6 +1020,10 @@ onUnmounted(() => stopPolling())
                   <span v-if="(job as any).priority > 0 && isQueued(job.status)">⚡</span>
                   {{ (job as any).priority > 0 && isQueued(job.status) ? '优先排队' : (statusLabel[job.status] || job.status) }}
                 </span>
+                <span
+                  class="rounded-md px-1.5 py-0.5 text-[9px] font-medium backdrop-blur-sm"
+                  :class="job.modelName === 'seedance_2' ? 'bg-emerald-500/70 text-white' : 'bg-sky-500/70 text-white'"
+                >{{ job.modelName === 'seedance_2' ? 'SD2' : '可灵' }}</span>
               </div>
             </div>
 
@@ -1074,7 +1081,7 @@ onUnmounted(() => stopPolling())
                 v-if="job.errorMessage"
                 class="mb-2.5 rounded-lg border border-red-400/15 bg-red-500/10 px-3 py-2 text-xs text-red-300"
               >
-                {{ job.errorMessage?.replace(/request to https?:\/\/[^ ]+/g, '上传请求失败').replace('The user aborted a request.', '网络超时(将自动重试)').replace(/S3 PUT \d+/, '上传失败(将重试)') || job.errorMessage }}
+                {{ (job.errorMessage || '').replace(/request to https?:\/\/[^ ]+/g, '上传请求失败').replace('The user aborted a request.', '网络超时(将自动重试)').replace(/S3 PUT \d+/, '上传失败(将重试)').replace(/createTask \d+:.*/, '任务创建失败').slice(0, 80) }}
               </div>
 
               <!-- 7. Action buttons -->

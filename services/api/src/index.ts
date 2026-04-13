@@ -9,6 +9,7 @@ import { prisma } from './services/prisma';
 import { authRouter } from './routes/auth';
 import { adminRouter } from './routes/admin';
 import { reviewRouter } from './routes/review';
+import { v1Router } from './routes/v1';
 
 const app = express();
 const PORT = Number(process.env.API_PORT) || 5102;
@@ -45,6 +46,9 @@ app.use('/api/runway/admin', adminRouter);
 app.use('/api/runway', runwayRouter);
 app.use('/api/kling', klingRouter);
 app.use('/api/review', reviewRouter);
+
+// V1 OpenAI-compatible API (API key auth)
+app.use('/v1', v1Router);
 
 async function proxyTo3002(targetPath: string, req: express.Request, res: express.Response) {
   try {

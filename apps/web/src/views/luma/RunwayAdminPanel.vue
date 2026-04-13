@@ -187,7 +187,22 @@ const devices = ref<DeviceInfo[]>([])
 const devicesLoading = ref(false)
 const suspiciousSessions = ref<LoginSessionInfo[]>([])
 const sessionsLoading = ref(false)
-type AdminTab = 'accounts' | 'proxies' | 'users' | 'jobs' | 'logs' | 'devices'
+
+/* ── API Keys state ── */
+interface ApiKeyInfo {
+  id: string; name: string; prefix: string; userId: string; username: string
+  rateLimit: number; enabled: boolean; lastUsedAt: string | null
+  expiresAt: string | null; createdAt: string
+}
+const apiKeys = ref<ApiKeyInfo[]>([])
+const apiKeysLoading = ref(false)
+const showCreateKeyModal = ref(false)
+const newKeyName = ref('')
+const newKeyUserId = ref('')
+const newKeyRateLimit = ref(60)
+const createdKeyValue = ref('')
+const apiKeyStats = ref<any>({ keys: [], overall: { activeKeys: 0, totalKeys: 0 } })
+type AdminTab = 'accounts' | 'proxies' | 'users' | 'jobs' | 'logs' | 'devices' | 'apikeys'
 interface ProxyInfo { id: string; label: string; url: string; isActive: boolean; lastTestedAt: string | null; lastOk: boolean | null; latencyMs: number | null; lastError: string | null; accountCount: number }
 type AccountFilter = 'all' | 'active' | 'disabled' | 'cooldown'
 type UserFilter = 'all' | 'active' | 'disabled' | 'admin'
@@ -539,6 +554,84 @@ const refreshAll = async () => {
   ])
 }
 
+/* ── API Key functions ── */
+async function fetchApiKeys() {
+  apiKeysLoading.value = true
+  try {
+    const res = await fetch('/api/runway/admin/api-keys', { headers: { Authorization: `Bearer ${jwt.value}` } })
+    apiKeys.value = await res.json()
+  } catch (e) { ms.error('获取API Key列表失败') }
+  finally { apiKeysLoading.value = false }
+}
+
+async function fetchApiKeyStats() {
+  try {
+    const res = await fetch('/api/runway/admin/api-keys/stats', { headers: { Authorization: `Bearer ${jwt.value}` } })
+    apiKeyStats.value = await res.json()
+  } catch (e) { console.error('fetchApiKeyStats error', e) }
+}
+
+async function createApiKey() {
+  if (!newKeyName.value || !newKeyUserId.value) { ms.warning('请填写名称和用户ID'); return }
+  try {
+    const res = await fetch('/api/runway/admin/api-keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt.value}` },
+      body: JSON.stringify({ name: newKeyName.value, userId: newKeyUserId.value, rateLimit: newKeyRateLimit.value }),
+    })
+    const data = await res.json()
+    if (data.key) {
+      createdKeyValue.value = data.key
+      newKeyName.value = ''
+      newKeyUserId.value = ''
+      newKeyRateLimit.value = 60
+      fetchApiKeys()
+    } else { ms.error(data.error || '创建失败') }
+  } catch (e) { ms.error('创建API Key失败') }
+}
+
+async function toggleApiKey(id: string, enabled: boolean) {
+  try {
+    await fetch(`/api/runway/admin/api-keys/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt.value}` },
+      body: JSON.stringify({ enabled }),
+    })
+    fetchApiKeys()
+  } catch (e) { ms.error('更新失败') }
+}
+
+async function deleteApiKey(id: string) {
+  if (!confirm('确定删除此API Key？')) return
+  try {
+    await fetch(`/api/runway/admin/api-keys/${id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${jwt.value}` },
+    })
+    fetchApiKeys()
+  } catch (e) { ms.error('删除失败') }
+}
+
+const apiKeyColumns = [
+  { title: '名称', key: 'name', width: 100 },
+  { title: '前缀', key: 'prefix', width: 100 },
+  { title: '用户', key: 'username', width: 100 },
+  { title: '频率限制', key: 'rateLimit', width: 80 },
+  {
+    title: '状态', key: 'enabled', width: 70,
+    render: (row: any) => h(NSwitch, {
+      value: row.enabled,
+      'onUpdate:value': (v: boolean) => toggleApiKey(row.id, v),
+    }),
+  },
+  { title: '最后使用', key: 'lastUsedAt', width: 140, render: (row: any) => row.lastUsedAt ? new Date(row.lastUsedAt).toLocaleString('zh-CN') : '-' },
+  { title: '创建时间', key: 'createdAt', width: 140, render: (row: any) => new Date(row.createdAt).toLocaleString('zh-CN') },
+  {
+    title: '操作', key: 'actions', width: 80,
+    render: (row: any) => h(NButton, { size: 'tiny', type: 'error', onClick: () => deleteApiKey(row.id) }, { default: () => '删除' }),
+  },
+]
+
 const refreshCurrentTab = () => {
   if (activeTab.value === 'proxies') { fetchProxies(); return }
   if (activeTab.value === 'accounts') {
@@ -551,7 +644,8 @@ const refreshCurrentTab = () => {
     fetchAdminJobs()
   } else if (activeTab.value === 'logs') {
     fetchLogs()
-  } else if (activeTab.value === 'devices') {
+  } else if (activeTab.value === 'apikeys') { fetchApiKeys(); fetchApiKeyStats(); return }
+  if (activeTab.value === 'devices') {
     fetchDevices()
     fetchSuspiciousSessions()
   }
@@ -1371,11 +1465,167 @@ onUnmounted(() => { if (autoRefreshTimer) clearInterval(autoRefreshTimer) })
                 <NDataTable :columns="sessionColumns" :data="suspiciousSessions" :loading="sessionsLoading" :scroll-x="800" size="small" />
               </div>
             </NTabPane>
+            <!-- API Keys Tab -->
+            <NTabPane name="apikeys" :tab="`API Keys (${apiKeys.length})`">
+              <!-- Stats Overview -->
+              <div class="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <div class="rounded-xl border border-white/[0.08] bg-white/[0.03] p-3 text-center">
+                  <div class="text-2xl font-bold text-sky-400">{{ apiKeyStats.overall?.activeKeys || 0 }}</div>
+                  <div class="text-xs text-white/40">活跃 Key</div>
+                </div>
+                <div class="rounded-xl border border-white/[0.08] bg-white/[0.03] p-3 text-center">
+                  <div class="text-2xl font-bold text-emerald-400">{{ apiKeyStats.keys?.reduce((s: number, k: any) => s + (k.totalJobs || 0), 0) || 0 }}</div>
+                  <div class="text-xs text-white/40">总调用次数</div>
+                </div>
+                <div class="rounded-xl border border-white/[0.08] bg-white/[0.03] p-3 text-center">
+                  <div class="text-2xl font-bold text-amber-400">{{ apiKeyStats.keys?.reduce((s: number, k: any) => s + (k.jobsToday || 0), 0) || 0 }}</div>
+                  <div class="text-xs text-white/40">今日调用</div>
+                </div>
+                <div class="rounded-xl border border-white/[0.08] bg-white/[0.03] p-3 text-center">
+                  <div class="text-2xl font-bold text-rose-400">{{ apiKeyStats.keys?.reduce((s: number, k: any) => s + (k.active || 0), 0) || 0 }}</div>
+                  <div class="text-xs text-white/40">进行中</div>
+                </div>
+              </div>
+
+              <!-- Key Management -->
+              <div class="mb-3 flex items-center gap-3">
+                <NButton type="primary" size="small" @click="showCreateKeyModal = true">+ 创建 API Key</NButton>
+              </div>
+
+              <!-- Per-key Stats Table -->
+              <div class="mb-4 table-shell overflow-hidden rounded-xl border border-white/[0.08]">
+                <NDataTable :columns="apiKeyColumns" :data="apiKeys" :loading="apiKeysLoading" :scroll-x="900" size="small" />
+              </div>
+
+              <!-- Per-key Usage Stats -->
+              <div v-if="apiKeyStats.keys?.length" class="mb-4">
+                <h4 class="mb-2 text-sm font-medium text-white/60">各 Key 调用统计</h4>
+                <div class="grid gap-2">
+                  <div v-for="ks in apiKeyStats.keys" :key="ks.keyId" class="flex items-center justify-between rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-xs">
+                    <div class="flex items-center gap-2">
+                      <span class="font-mono text-sky-300">{{ ks.prefix }}</span>
+                      <span class="text-white/50">{{ ks.keyName }}</span>
+                      <span class="text-white/30">({{ ks.username }})</span>
+                    </div>
+                    <div class="flex gap-3">
+                      <span class="text-white/40">总计 <span class="text-white/80">{{ ks.totalJobs }}</span></span>
+                      <span class="text-white/40">今日 <span class="text-amber-300">{{ ks.jobsToday }}</span></span>
+                      <span class="text-white/40">完成 <span class="text-emerald-300">{{ ks.completed }}</span></span>
+                      <span class="text-white/40">失败 <span class="text-rose-300">{{ ks.failed }}</span></span>
+                      <span class="text-white/40">进行中 <span class="text-sky-300">{{ ks.active }}</span></span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- API Documentation -->
+              <div class="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+                <h4 class="mb-3 text-sm font-medium text-white/70">API 调用方式</h4>
+                <div class="space-y-3 text-xs">
+                  <div>
+                    <div class="mb-1 text-white/50">① 获取模型列表</div>
+                    <pre class="overflow-x-auto rounded-lg bg-black/40 p-2 font-mono text-emerald-300/80">GET /v1/models
+Authorization: Bearer sk-xxx</pre>
+                  </div>
+                  <div>
+                    <div class="mb-1 text-white/50">② 创建视频生成任务</div>
+                    <pre class="overflow-x-auto rounded-lg bg-black/40 p-2 font-mono text-emerald-300/80">POST /v1/videos/generations
+Authorization: Bearer sk-xxx
+Content-Type: application/json
+
+{
+  "model": "kling-pro",
+  "prompt": "描述文字",
+  "duration": 5,
+  "image_url": "https://...",
+  "sound": true
+}
+
+模型: seedance-2.0 | kling-pro | kling-standard
+参数: image_url(图生视频), image_urls(多参考图),
+      video_url(参考视频), duration(5/10), sound, cfg_scale</pre>
+                  </div>
+                  <div>
+                    <div class="mb-1 text-white/50">③ 查询任务状态</div>
+                    <pre class="overflow-x-auto rounded-lg bg-black/40 p-2 font-mono text-emerald-300/80">GET /v1/videos/generations/vgen_kling_xxx
+Authorization: Bearer sk-xxx
+
+状态: pending → processing → completed / failed
+完成后 output.url 返回视频地址</pre>
+                  </div>
+                  <div>
+                    <div class="mb-1 text-white/50">④ curl 示例</div>
+                    <pre class="overflow-x-auto rounded-lg bg-black/40 p-2 font-mono text-sky-300/70"># 创建可灵视频 (Kling Pro)
+curl -X POST http://101.35.158.183/v1/videos/generations \
+  -H "Authorization: Bearer sk-xxx" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"kling-pro","prompt":"一只猫在跑","duration":5}'
+
+# 创建即梦视频 (Seedance 2.0)
+curl -X POST http://101.35.158.183/v1/videos/generations \
+  -H "Authorization: Bearer sk-xxx" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"seedance-2.0","prompt":"日落海边沙滩漫步","duration":5}'
+
+# 创建可灵标准版 (Kling Standard)
+curl -X POST http://101.35.158.183/v1/videos/generations \
+  -H "Authorization: Bearer sk-xxx" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"kling-standard","prompt":"城市夜景延时","duration":5}'
+
+# 图生视频 (任意模型均支持)
+curl -X POST http://101.35.158.183/v1/videos/generations \
+  -H "Authorization: Bearer sk-xxx" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"seedance-2.0","prompt":"让画面动起来","image_url":"https://example.com/photo.jpg","duration":5}'
+
+# 查询任务状态
+curl http://101.35.158.183/v1/videos/generations/vgen_seedance_xxx \
+  -H "Authorization: Bearer sk-xxx"</pre>
+                  </div>
+                </div>
+              </div>
+            </NTabPane>
           </NTabs>
         </div>
       </div>
     </NDrawerContent>
   </NDrawer>
+
+  <!-- Create API Key Modal -->
+  <NModal v-model:show="showCreateKeyModal" preset="card" title="创建 API Key" style="width: 480px" :bordered="true" :mask-closable="true">
+    <NForm label-placement="left" label-width="80">
+      <NFormItem label="名称">
+        <NInput v-model:value="newKeyName" placeholder="例如: 测试Key" />
+      </NFormItem>
+      <NFormItem label="用户ID">
+        <NInput v-model:value="newKeyUserId" placeholder="UUID格式的用户ID" />
+        <div class="ml-2 text-xs text-white/40">
+          <NSelect
+            :options="users.map(u => ({ label: u.username, value: u.id }))"
+            placeholder="或选择用户"
+            filterable
+            size="small"
+            style="width: 160px"
+            @update:value="(v: string) => newKeyUserId = v"
+          />
+        </div>
+      </NFormItem>
+      <NFormItem label="频率限制">
+        <NInputNumber v-model:value="newKeyRateLimit" :min="1" :max="10000" />
+        <span class="ml-2 text-xs text-white/40">次/分钟</span>
+      </NFormItem>
+    </NForm>
+    <div v-if="createdKeyValue" class="mb-4 rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3">
+      <div class="mb-1 text-xs text-emerald-400">API Key 已创建（仅显示一次，请立即复制）：</div>
+      <div class="break-all font-mono text-sm text-emerald-300">{{ createdKeyValue }}</div>
+      <NButton size="tiny" class="mt-2" @click="navigator.clipboard.writeText(createdKeyValue); ms.success('已复制')">复制</NButton>
+    </div>
+    <div class="flex justify-end gap-2">
+      <NButton @click="showCreateKeyModal = false; createdKeyValue = ''">关闭</NButton>
+      <NButton type="primary" @click="createApiKey">创建</NButton>
+    </div>
+  </NModal>
 
   <!-- User create/edit modal -->
   <NModal v-model:show="showUserModal" preset="card" :title="editingUser ? '编辑用户' : '新建用户'" style="width: min(92vw, 480px)" class="admin-modal">

@@ -111,7 +111,7 @@ new Worker('runway-poll', async (job: Job) => {
         where: { id: jobId },
         data: {
           status: 'failed',
-          errorMessage: '远程任务不存在(404)，可能已被平台删除',
+          errorMessage: '系统任务不存在(404)，可能已被平台删除',
           finishedAt: new Date(),
         },
       });
@@ -160,7 +160,7 @@ new Worker('runway-poll', async (job: Job) => {
         data: {
           status: 'pending',
           remoteTaskId: null,
-          errorMessage: `远程任务被取消，切换账号重试`,
+          errorMessage: `系统任务被取消，切换账号重试`,
           retryCount: retryCount + 1,
           startedAt: null,
           accountId: null,
@@ -176,7 +176,7 @@ new Worker('runway-poll', async (job: Job) => {
       // Exhausted retries — mark as cancelled
       await prisma.runwayJob.update({
         where: { id: jobId },
-        data: { status: 'cancelled', errorMessage: `远程任务被取消（已重试 ${retryCount} 次）`, finishedAt: new Date() },
+        data: { status: 'cancelled', errorMessage: `系统任务被取消（已重试 ${retryCount} 次）`, finishedAt: new Date() },
       });
       if (accountId) {
         await accountPool.release(accountId, jobId);
@@ -186,7 +186,10 @@ new Worker('runway-poll', async (job: Job) => {
     }
   } else if (result.status === 'failed') {
     const retryCount = (dbJob.retryCount || 0);
-    if (retryCount < MAX_REMOTE_RETRIES) {
+    // Content moderation and risk control failures are not retryable
+    const errMsg = result.errorMessage || '';
+    const isNonRetryable = /moderation|SAFETY|risk control|SEXUALLY_EXPLICIT|VIOLENCE|prohibited/i.test(errMsg);
+    if (!isNonRetryable && retryCount < MAX_REMOTE_RETRIES) {
       console.warn(`[poll-worker] job ${jobId.slice(0,8)} failed, auto-retry ${retryCount + 1}/${MAX_REMOTE_RETRIES}`);
       await prisma.runwayJob.update({
         where: { id: jobId },
@@ -209,7 +212,7 @@ new Worker('runway-poll', async (job: Job) => {
         where: { id: jobId },
         data: {
           status: 'failed',
-          errorMessage: `${result.errorMessage || '远程任务失败'}（已重试 ${retryCount} 次，不再重试）`,
+          errorMessage: `${result.errorMessage || '系统任务失败'}（已重试 ${retryCount} 次，不再重试）`,
           finishedAt: new Date(),
         },
       });
@@ -356,3 +359,62 @@ new Worker('runway-poll', async (job: Job) => {
 }, { connection, concurrency: 1 });
 
 console.log('[poll-worker] listening on runway-poll (single-trigger mode)');
+
+// ============================================================
+// Stuck job recovery: periodically re-enqueue poll for jobs
+// stuck in processing/submitted/queued that have no active poll
+// ============================================================
+const RECOVERY_INTERVAL = 5 * 60 * 1000; // 5 minutes
+const STUCK_THRESHOLD_MINUTES = 15;
+
+async function recoverStuckJobs() {
+  try {
+    const stuckJobs = await prisma.$queryRawUnsafe(`
+      SELECT id, remote_task_id, account_id, status, started_at
+      FROM runway_jobs
+      WHERE status IN ('processing', 'submitted', 'queued')
+        AND remote_task_id IS NOT NULL
+        AND updated_at < NOW() - INTERVAL '${STUCK_THRESHOLD_MINUTES} minutes'
+      ORDER BY created_at ASC
+      LIMIT 20
+    `) as any[];
+
+    if (stuckJobs.length === 0) return;
+
+    console.log(`[recovery] found ${stuckJobs.length} potentially stuck jobs`);
+
+    for (const job of stuckJobs) {
+      // Check if there's already an active/delayed poll for this job
+      const existingKey = `recovery:poll-active:${job.id}`;
+      const exists = await connection.get(existingKey);
+      if (exists) continue;
+
+      console.log(`[recovery] re-enqueueing poll for job ${job.id.slice(0, 8)} (status=${job.status})`);
+
+      // Mark as active to avoid duplicate recovery
+      await connection.set(existingKey, '1', 'EX', 600);
+
+      await pollQueue.add('poll', {
+        jobId: job.id,
+        remoteTaskId: job.remote_task_id,
+        accountId: job.account_id,
+      }, {
+        jobId: `poll-${job.id}-recovery-${Date.now()}`,
+        delay: 1000,
+      });
+
+      // Touch updated_at so it doesn't get picked up again immediately
+      await prisma.runwayJob.update({
+        where: { id: job.id },
+        data: { updatedAt: new Date() } as any,
+      }).catch(() => {});
+    }
+  } catch (err: any) {
+    console.error(`[recovery] error: ${err.message}`);
+  }
+}
+
+setInterval(recoverStuckJobs, RECOVERY_INTERVAL);
+// Run once on startup after a short delay
+setTimeout(recoverStuckJobs, 30000);
+console.log(`[recovery] stuck job recovery enabled (every ${RECOVERY_INTERVAL/1000}s, threshold ${STUCK_THRESHOLD_MINUTES}min)`);

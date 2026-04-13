@@ -970,4 +970,140 @@ router.post('/proxies/:id/test', async (req: Request, res: Response) => {
 });
 
 
+
+// ============== API KEY MANAGEMENT ==============
+
+// GET /api/runway/admin/api-keys — List all API keys
+router.get("/api-keys", async (_req: Request, res: Response) => {
+  try {
+    const rows = await prisma.$queryRawUnsafe(`
+      SELECT ak.id, ak.name, ak.prefix, ak.user_id, ak.rate_limit, ak.enabled,
+             ak.last_used_at, ak.expires_at, ak.created_at,
+             u.username
+      FROM api_keys ak
+      LEFT JOIN users u ON u.id = ak.user_id
+      ORDER BY ak.created_at DESC
+    `) as any[];
+    res.json(rows.map(r => ({
+      id: r.id,
+      name: r.name,
+      prefix: r.prefix,
+      userId: r.user_id,
+      username: r.username,
+      rateLimit: r.rate_limit,
+      enabled: r.enabled,
+      lastUsedAt: r.last_used_at,
+      expiresAt: r.expires_at,
+      createdAt: r.created_at,
+    })));
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/runway/admin/api-keys — Create new API key
+router.post("/api-keys", async (req: Request, res: Response) => {
+  try {
+    const { name, userId, rateLimit = 60, expiresAt } = req.body;
+    if (!name || !userId) return res.status(400).json({ error: "name \u548c userId \u5fc5\u586b" });
+
+    // Generate key: sk- + 48 random chars
+    const crypto = require("crypto");
+    const rawKey = "sk-" + crypto.randomBytes(32).toString("base64url");
+    const keyHash = crypto.createHash("sha256").update(rawKey).digest("hex");
+    const prefix = rawKey.slice(0, 8) + "...";
+
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO api_keys (id, name, key_hash, prefix, user_id, rate_limit, enabled, expires_at, created_at)
+       VALUES (gen_random_uuid()::text, $1, $2, $3, $4::uuid, $5, true, $6, NOW())`,
+      name, keyHash, prefix, userId, rateLimit,
+      expiresAt ? new Date(expiresAt) : null
+    );
+
+    // Return the raw key ONCE - it can never be retrieved again
+    res.status(201).json({ key: rawKey, prefix, name });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// PUT /api/runway/admin/api-keys/:id — Update API key
+router.put("/api-keys/:id", async (req: Request, res: Response) => {
+  try {
+    const { name, enabled, rateLimit, expiresAt } = req.body;
+    const sets: string[] = [];
+    const params: any[] = [];
+    let idx = 1;
+    if (name !== undefined) { sets.push(`name = $${idx++}`); params.push(name); }
+    if (enabled !== undefined) { sets.push(`enabled = $${idx++}`); params.push(Boolean(enabled)); }
+    if (rateLimit !== undefined) { sets.push(`rate_limit = $${idx++}`); params.push(Number(rateLimit)); }
+    if (expiresAt !== undefined) { sets.push(`expires_at = $${idx++}`); params.push(expiresAt ? new Date(expiresAt) : null); }
+    if (sets.length === 0) return res.status(400).json({ error: "\u65e0\u4fee\u6539\u5185\u5bb9" });
+    params.push(req.params.id);
+    await prisma.$executeRawUnsafe(
+      `UPDATE api_keys SET ${sets.join(", ")} WHERE id = $${idx}`,
+      ...params
+    );
+    res.json({ ok: true });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+
+// GET /api/runway/admin/api-keys/stats — API key usage statistics
+router.get("/api-keys/stats", async (_req: Request, res: Response) => {
+  try {
+    // Per-key stats: count of jobs created via API (by checking runway_jobs for API key users)
+    const keyStats = await prisma.$queryRawUnsafe(`
+      SELECT
+        ak.id AS key_id,
+        ak.name AS key_name,
+        ak.prefix,
+        u.username,
+        ak.last_used_at,
+        ak.created_at,
+        COUNT(rj.id) AS total_jobs,
+        COUNT(CASE WHEN rj.created_at > NOW() - INTERVAL '24 hours' THEN 1 END) AS jobs_today,
+        COUNT(CASE WHEN rj.status = 'completed' THEN 1 END) AS completed,
+        COUNT(CASE WHEN rj.status = 'failed' THEN 1 END) AS failed,
+        COUNT(CASE WHEN rj.status IN ('pending','queued','processing','submitted') THEN 1 END) AS active
+      FROM api_keys ak
+      LEFT JOIN users u ON u.id = ak.user_id
+      LEFT JOIN runway_jobs rj ON rj.user_id = ak.user_id AND rj.created_at >= ak.created_at
+      GROUP BY ak.id, ak.name, ak.prefix, u.username, ak.last_used_at, ak.created_at
+      ORDER BY ak.created_at DESC
+    `) as any[];
+
+    // Overall API stats
+    const overall = await prisma.$queryRawUnsafe(`
+      SELECT
+        (SELECT COUNT(*) FROM api_keys WHERE enabled = true) AS active_keys,
+        (SELECT COUNT(*) FROM api_keys) AS total_keys
+    `) as any[];
+
+    res.json({
+      keys: keyStats.map((r: any) => ({
+        keyId: r.key_id,
+        keyName: r.key_name,
+        prefix: r.prefix,
+        username: r.username,
+        lastUsedAt: r.last_used_at,
+        createdAt: r.created_at,
+        totalJobs: Number(r.total_jobs),
+        jobsToday: Number(r.jobs_today),
+        completed: Number(r.completed),
+        failed: Number(r.failed),
+        active: Number(r.active),
+      })),
+      overall: overall[0] ? {
+        activeKeys: Number(overall[0].active_keys),
+        totalKeys: Number(overall[0].total_keys),
+      } : { activeKeys: 0, totalKeys: 0 },
+    });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// DELETE /api/runway/admin/api-keys/:id — Delete API key
+router.delete("/api-keys/:id", async (req: Request, res: Response) => {
+  try {
+    await prisma.$executeRawUnsafe(`DELETE FROM api_keys WHERE id = $1`, req.params.id);
+    res.json({ ok: true });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
 export { router as adminRouter };
