@@ -121,6 +121,13 @@ videosRouter.get(
         });
       }
 
+      const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (!UUID_RE.test(jobId)) {
+        return res.status(404).json({
+          error: { message: "Generation not found.", type: "not_found_error" },
+        });
+      }
+
       const rows: any[] = await prisma.$queryRawUnsafe(
         "SELECT id, status, result_url, thumbnail_url, error_message, duration, created_at, progress, model_name FROM runway_jobs WHERE id = $1::uuid AND user_id = $2::uuid",
         jobId,

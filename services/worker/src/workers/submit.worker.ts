@@ -2,6 +2,7 @@ import { Worker, Job, Queue } from "bullmq";
 import { RunwayDirectClient } from "../services/runway.direct";
 import { prisma, redis as connection, accountPool } from "../services/shared";
 import type { AccountEntry } from "../services/account-pool";
+import { translateRunwayError } from '../utils/errorTranslator';
 
 const pollQueue = new Queue("runway-poll", { connection });
 const submitQueue = new Queue("runway-submit", { connection });
@@ -433,7 +434,7 @@ async function trySubmitOneOnAccount(account: AccountEntry): Promise<SubmitResul
     await accountPool.recordError(account.id, msg);
     await prisma.runwayJob.update({
       where: { id: jobId },
-      data: { status: "failed", errorMessage: msg.slice(0, 500), finishedAt: new Date() },
+      data: { status: "failed", errorMessage: translateRunwayError(msg).slice(0, 500), finishedAt: new Date() },
     });
     return "job_failed";
   }

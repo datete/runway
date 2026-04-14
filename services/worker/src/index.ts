@@ -8,6 +8,7 @@ import { triggerSubmit } from "./workers/submit.worker";
 import { RunwayDirectClient } from "./services/runway.direct";
 import fs from "fs";
 import path from "path";
+import { translateRunwayError } from './utils/errorTranslator';
 
 console.log("[runway-worker] started (single-trigger FIFO mode)");
 
@@ -54,7 +55,7 @@ async function recoverStuckJobs() {
               where: { id: job.id },
               data: {
                 status: 'failed',
-                errorMessage: remote.errorMessage || '远程任务已失败',
+                errorMessage: translateRunwayError(remote.errorMessage) || '远程任务已失败',
                 finishedAt: new Date(),
               },
             });

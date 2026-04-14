@@ -1045,6 +1045,78 @@ router.put("/api-keys/:id", async (req: Request, res: Response) => {
 });
 
 
+
+// GET /api/runway/admin/api-keys/logs — recent API call logs
+router.get("/api-keys/logs", async (req: Request, res: Response) => {
+  try {
+    const limit = Math.min(parseInt((req.query.limit as string) || "100", 10), 500);
+    const keyId = (req.query.keyId as string) || null;
+    const status = (req.query.status as string) || null; // "success"|"error"|null
+
+    const where: string[] = [];
+    const params: any[] = [];
+    if (keyId) { where.push(`api_key_id = $${params.length + 1}`); params.push(keyId); }
+    if (status === "success") where.push("status_code < 400");
+    else if (status === "error") where.push("status_code >= 400");
+
+    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+
+    const rows = await prisma.$queryRawUnsafe(`
+      SELECT
+        l.id, l.api_key_id, l.user_id, l.method, l.path, l.model,
+        l.status_code, l.duration_ms, l.ip_address, l.user_agent,
+        l.generation_id, l.error_message, l.created_at,
+        ak.name AS key_name, ak.prefix AS key_prefix,
+        u.username
+      FROM api_call_logs l
+      LEFT JOIN api_keys ak ON ak.id = l.api_key_id
+      LEFT JOIN users u ON u.id = l.user_id
+      ${whereSql}
+      ORDER BY l.created_at DESC
+      LIMIT ${limit}
+    `, ...params) as any[];
+
+    // Summary: calls in last 24h, success/error split
+    const summary = await prisma.$queryRawUnsafe(`
+      SELECT
+        COUNT(*) AS total,
+        COUNT(CASE WHEN status_code < 400 THEN 1 END) AS success,
+        COUNT(CASE WHEN status_code >= 400 THEN 1 END) AS errors,
+        AVG(duration_ms)::int AS avg_duration,
+        COUNT(CASE WHEN created_at > NOW() - INTERVAL '1 hour' THEN 1 END) AS last_hour
+      FROM api_call_logs
+      WHERE created_at > NOW() - INTERVAL '24 hours'
+    `) as any[];
+
+    res.json({
+      logs: rows.map((r: any) => ({
+        id: Number(r.id),
+        apiKeyId: r.api_key_id,
+        keyName: r.key_name,
+        keyPrefix: r.key_prefix,
+        username: r.username,
+        method: r.method,
+        path: r.path,
+        model: r.model,
+        statusCode: r.status_code,
+        durationMs: r.duration_ms,
+        ipAddress: r.ip_address,
+        userAgent: r.user_agent,
+        generationId: r.generation_id,
+        errorMessage: r.error_message,
+        createdAt: r.created_at,
+      })),
+      summary: summary[0] ? {
+        total: Number(summary[0].total),
+        success: Number(summary[0].success),
+        errors: Number(summary[0].errors),
+        avgDuration: Number(summary[0].avg_duration || 0),
+        lastHour: Number(summary[0].last_hour),
+      } : { total: 0, success: 0, errors: 0, avgDuration: 0, lastHour: 0 },
+    });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
 // GET /api/runway/admin/api-keys/stats — API key usage statistics
 router.get("/api-keys/stats", async (_req: Request, res: Response) => {
   try {

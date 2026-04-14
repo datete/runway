@@ -5,6 +5,7 @@ import fetch from 'node-fetch';
 import { RunwayDirectClient } from '../services/runway.direct';
 import { prisma, redis as connection, accountPool } from '../services/shared';
 import { triggerSubmit } from './submit.worker';
+import { translateRunwayError } from '../utils/errorTranslator';
 
 
 // Human-like delay before triggering next submit (45-120s after slot freed)
@@ -196,7 +197,7 @@ new Worker('runway-poll', async (job: Job) => {
         data: {
           status: 'pending',
           remoteTaskId: null,
-          errorMessage: result.errorMessage,
+          errorMessage: translateRunwayError(result.errorMessage),
           retryCount: retryCount + 1,
           startedAt: null,
           accountId: null,
@@ -212,7 +213,7 @@ new Worker('runway-poll', async (job: Job) => {
         where: { id: jobId },
         data: {
           status: 'failed',
-          errorMessage: `${result.errorMessage || '系统任务失败'}（已重试 ${retryCount} 次，不再重试）`,
+          errorMessage: `${translateRunwayError(result.errorMessage)}（已重试 ${retryCount} 次，不再重试）`,
           finishedAt: new Date(),
         },
       });

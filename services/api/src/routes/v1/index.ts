@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { apiKeyAuthMiddleware } from "../../middleware/apiKeyAuth";
 import { apiKeyRateLimitMiddleware } from "../../middleware/apiKeyRateLimit";
+import { apiCallLoggerMiddleware } from "../../middleware/apiCallLogger";
 import { videosRouter } from "./videos";
 
 const v1Router = Router();
@@ -8,6 +9,7 @@ const v1Router = Router();
 // Apply API key auth to all /v1 routes
 v1Router.use(apiKeyAuthMiddleware);
 v1Router.use(apiKeyRateLimitMiddleware);
+v1Router.use(apiCallLoggerMiddleware);
 
 // Mount sub-routers
 v1Router.use(videosRouter);

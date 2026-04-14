@@ -407,10 +407,7 @@ export class RunwayDirectClient implements RunwayProvider {
     const progress = typeof t.progress === "number" ? t.progress : (t.progressRatio !== undefined && t.progressRatio !== null ? parseFloat(t.progressRatio) : undefined);
     console.log(`[runway:poll] taskId=${remoteTaskId} status=${t.status}->${status} progress=${progress ?? "?"}${resultUrl ? " resultUrl="+resultUrl.split("?")[0] : ""}`);
 
-    const errStr = (t.error && typeof t.error === 'object')
-      ? [t.error.reason, t.error.errorMessage, t.error.moderation_category].filter(Boolean).join(' | ')
-      : (typeof t.error === 'string' ? t.error : undefined);
-    return { remoteTaskId, status, resultUrl, thumbnailUrl, errorMessage: errStr, progress };
+    return { remoteTaskId, status, resultUrl, thumbnailUrl, errorMessage: t.error || undefined, progress };
   }
 
   /** Download a video artifact to a Buffer */

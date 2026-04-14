@@ -202,6 +202,9 @@ const newKeyUserId = ref('')
 const newKeyRateLimit = ref(60)
 const createdKeyValue = ref('')
 const apiKeyStats = ref<any>({ keys: [], overall: { activeKeys: 0, totalKeys: 0 } })
+const apiCallLogs = ref<any[]>([])
+const apiCallSummary = ref<any>({ total: 0, success: 0, errors: 0, avgDuration: 0, lastHour: 0 })
+const apiLogsFilter = ref<'all' | 'success' | 'error'>('all')
 type AdminTab = 'accounts' | 'proxies' | 'users' | 'jobs' | 'logs' | 'devices' | 'apikeys'
 interface ProxyInfo { id: string; label: string; url: string; isActive: boolean; lastTestedAt: string | null; lastOk: boolean | null; latencyMs: number | null; lastError: string | null; accountCount: number }
 type AccountFilter = 'all' | 'active' | 'disabled' | 'cooldown'
@@ -571,6 +574,16 @@ async function fetchApiKeyStats() {
   } catch (e) { console.error('fetchApiKeyStats error', e) }
 }
 
+async function fetchApiCallLogs() {
+  try {
+    const q = apiLogsFilter.value === 'all' ? '' : `?status=${apiLogsFilter.value}`
+    const res = await fetch(`/api/runway/admin/api-keys/logs${q}`, { headers: { Authorization: `Bearer ${jwt.value}` } })
+    const data = await res.json()
+    apiCallLogs.value = data.logs || []
+    apiCallSummary.value = data.summary || { total: 0, success: 0, errors: 0, avgDuration: 0, lastHour: 0 }
+  } catch (e) { console.error('fetchApiCallLogs error', e) }
+}
+
 async function createApiKey() {
   if (!newKeyName.value || !newKeyUserId.value) { ms.warning('请填写名称和用户ID'); return }
   try {
@@ -644,7 +657,7 @@ const refreshCurrentTab = () => {
     fetchAdminJobs()
   } else if (activeTab.value === 'logs') {
     fetchLogs()
-  } else if (activeTab.value === 'apikeys') { fetchApiKeys(); fetchApiKeyStats(); return }
+  } else if (activeTab.value === 'apikeys') { fetchApiKeys(); fetchApiKeyStats(); fetchApiCallLogs(); return }
   if (activeTab.value === 'devices') {
     fetchDevices()
     fetchSuspiciousSessions()
@@ -1513,6 +1526,57 @@ onUnmounted(() => { if (autoRefreshTimer) clearInterval(autoRefreshTimer) })
                       <span class="text-white/40">完成 <span class="text-emerald-300">{{ ks.completed }}</span></span>
                       <span class="text-white/40">失败 <span class="text-rose-300">{{ ks.failed }}</span></span>
                       <span class="text-white/40">进行中 <span class="text-sky-300">{{ ks.active }}</span></span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- API Call Logs -->
+              <div class="mb-4 rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+                <div class="mb-3 flex items-center justify-between">
+                  <h4 class="text-sm font-medium text-white/70">API 调用日志 (最近 24h)</h4>
+                  <div class="flex items-center gap-2">
+                    <NButton size="tiny" :type="apiLogsFilter === 'all' ? 'primary' : 'default'" @click="apiLogsFilter = 'all'; fetchApiCallLogs()">全部</NButton>
+                    <NButton size="tiny" :type="apiLogsFilter === 'success' ? 'primary' : 'default'" @click="apiLogsFilter = 'success'; fetchApiCallLogs()">成功</NButton>
+                    <NButton size="tiny" :type="apiLogsFilter === 'error' ? 'primary' : 'default'" @click="apiLogsFilter = 'error'; fetchApiCallLogs()">错误</NButton>
+                    <NButton size="tiny" @click="fetchApiCallLogs()">刷新</NButton>
+                  </div>
+                </div>
+                <div class="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-5">
+                  <div class="rounded-lg bg-white/[0.03] p-2 text-center">
+                    <div class="text-lg font-bold text-white/80">{{ apiCallSummary.total }}</div>
+                    <div class="text-[10px] text-white/40">24h 总调用</div>
+                  </div>
+                  <div class="rounded-lg bg-white/[0.03] p-2 text-center">
+                    <div class="text-lg font-bold text-emerald-400">{{ apiCallSummary.success }}</div>
+                    <div class="text-[10px] text-white/40">成功</div>
+                  </div>
+                  <div class="rounded-lg bg-white/[0.03] p-2 text-center">
+                    <div class="text-lg font-bold text-rose-400">{{ apiCallSummary.errors }}</div>
+                    <div class="text-[10px] text-white/40">错误</div>
+                  </div>
+                  <div class="rounded-lg bg-white/[0.03] p-2 text-center">
+                    <div class="text-lg font-bold text-sky-400">{{ apiCallSummary.avgDuration }}ms</div>
+                    <div class="text-[10px] text-white/40">平均耗时</div>
+                  </div>
+                  <div class="rounded-lg bg-white/[0.03] p-2 text-center">
+                    <div class="text-lg font-bold text-amber-400">{{ apiCallSummary.lastHour }}</div>
+                    <div class="text-[10px] text-white/40">最近 1h</div>
+                  </div>
+                </div>
+                <div class="max-h-96 overflow-y-auto">
+                  <div v-if="!apiCallLogs.length" class="py-8 text-center text-xs text-white/30">暂无调用记录</div>
+                  <div v-else class="space-y-1">
+                    <div v-for="log in apiCallLogs" :key="log.id"
+                         class="flex items-center gap-3 rounded-lg border border-white/[0.04] bg-white/[0.02] px-3 py-2 font-mono text-[11px]">
+                      <span :class="log.statusCode < 400 ? 'text-emerald-400' : 'text-rose-400'" class="w-10 font-bold">{{ log.statusCode }}</span>
+                      <span class="w-12 text-white/50">{{ log.method }}</span>
+                      <span class="flex-1 truncate text-white/70">{{ log.path }}</span>
+                      <span v-if="log.model" class="rounded bg-sky-500/20 px-1.5 py-0.5 text-sky-300">{{ log.model }}</span>
+                      <span class="w-16 text-right text-white/40">{{ log.durationMs }}ms</span>
+                      <span v-if="log.keyPrefix" class="w-24 truncate text-white/40">{{ log.keyPrefix }}</span>
+                      <span class="w-28 truncate text-white/30">{{ log.ipAddress }}</span>
+                      <span class="w-32 text-right text-white/30">{{ new Date(log.createdAt).toLocaleString('zh-CN', { hour12: false }) }}</span>
                     </div>
                   </div>
                 </div>
