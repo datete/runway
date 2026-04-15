@@ -18,12 +18,18 @@ const WEB_BASE = 'http://127.0.0.1:3002';
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-// #12: Response time logger — log slow requests (>1s)
+// #12: Response time logger — log slow requests (>1s) and all non-2xx
 app.use((req, res, next) => {
   const start = Date.now();
+  let capturedBody: any = null;
+  const origJson = res.json.bind(res);
+  (res as any).json = (body: any) => { capturedBody = body; return origJson(body); };
   res.on('finish', () => {
     const duration = Date.now() - start;
-    if (duration > 1000) {
+    if (res.statusCode >= 400) {
+      const bodyStr = capturedBody ? JSON.stringify(capturedBody).slice(0, 300) : '';
+      console.log(`[err] ${req.method} ${req.url} ${res.statusCode} ${duration}ms ${bodyStr}`);
+    } else if (duration > 1000) {
       console.log(`[slow] ${req.method} ${req.url} ${res.statusCode} ${duration}ms`);
     }
   });

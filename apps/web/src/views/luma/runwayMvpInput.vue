@@ -321,7 +321,7 @@ const handleVideoSelect = async (e: Event) => {
       headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify({ data: base64, filename: file.name }),
     })
-    if (!res.ok) throw new Error('上传失败')
+    if (!res.ok) { let m = ''; try { const j = await res.json(); m = j?.error || j?.message || '' } catch {} ; throw new Error(m || `上传失败（${res.status}）`) }
     const data = await res.json()
     refVideoUrl.value = data.url
     message.success('参考视频上传成功')
@@ -1105,7 +1105,7 @@ const submit = async () => {
       headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify(payload),
     })
-    if (!res.ok) throw new Error(`任务提交失败（${res.status}）`)
+    if (!res.ok) { let m = ''; try { const j = await res.json(); m = j?.error || j?.message || '' } catch {} ; throw new Error(m || `任务提交失败（${res.status}）`) }
     message.success('任务已提交，正在排队处理')
     submitSuccess.value = true
     setTimeout(() => { submitSuccess.value = false }, 3000)
@@ -1131,6 +1131,7 @@ const batchSubmit = async () => {
   }
   batchSubmitting.value = true
   batchProgress.value = { current: 0, total: urls.length, success: 0, fail: 0 }
+  let lastBatchErrorMsg = ''
   const isSeedance = selectedModel.value === 'seedance'
   const basePayload = {
     prompt: prompt.value.trim(),
@@ -1153,10 +1154,11 @@ const batchSubmit = async () => {
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({ ...basePayload, imageUrls: [urls[i]] }),
       })
-      if (!res.ok) throw new Error('fail')
+      if (!res.ok) { let m = ''; try { const j = await res.json(); m = j?.error || j?.message || '' } catch {} ; throw new Error(m || `提交失败（${res.status}）`) }
       batchProgress.value.success++
-    } catch {
+    } catch (e: any) {
       batchProgress.value.fail++
+      lastBatchErrorMsg = e?.message || '提交失败'
     }
   }
   const { success, fail } = batchProgress.value
@@ -1171,7 +1173,7 @@ const batchSubmit = async () => {
     homeStore.setMyData({ act: 'RunwayMvpRefresh' })
     fetchTokenStatus()
   } else {
-    message.error('批量提交全部失败')
+    message.error(lastBatchErrorMsg ? `批量提交全部失败：${lastBatchErrorMsg}` : '批量提交全部失败')
   }
   batchSubmitting.value = false
 }
