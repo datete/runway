@@ -78,7 +78,7 @@ const INTERVAL_ERROR      = 30000;
 new Worker('runway-poll', async (job: Job) => {
   const { jobId, remoteTaskId, accountId } = job.data;
   const dbJob = await prisma.runwayJob.findUnique({ where: { id: jobId } }) as any;
-  if (!dbJob || ['completed', 'failed', 'cancelled', 'deleted'].includes(dbJob.status)) {
+  if (!dbJob || ['completed', 'failed', 'cancelled'].includes(dbJob.status)) {
     if (accountId) await accountPool.release(accountId, jobId);
     return;
   }
@@ -104,16 +104,15 @@ new Worker('runway-poll', async (job: Job) => {
   } catch (err: any) {
     const errMsg = err.message || String(err);
     const is404 = errMsg.includes('404') || errMsg.includes('Could not find');
-    const isTokenRevoked = errMsg.includes('401') && /revoked|invalid|expired/i.test(errMsg);
 
-    if (is404 || isTokenRevoked) {
-      const reason = is404 ? '系统任务不存在(404)，可能已被平台删除' : 'Token 已失效(401)，无法继续查询';
-      console.warn(`[poll-worker] job ${jobId.slice(0,8)} ${is404 ? 'remote task 404' : 'token revoked'}, marking failed`);
+    if (is404) {
+      // Remote task does not exist - mark failed, stop retrying
+      console.warn(`[poll-worker] job ${jobId.slice(0,8)} remote task 404, marking failed`);
       await prisma.runwayJob.update({
         where: { id: jobId },
         data: {
           status: 'failed',
-          errorMessage: reason,
+          errorMessage: '系统任务不存在(404)，可能已被平台删除',
           finishedAt: new Date(),
         },
       });
@@ -309,7 +308,7 @@ new Worker('runway-poll', async (job: Job) => {
 
     // Re-check DB status before re-queuing (user may have cancelled during API call)
     const freshJob = await prisma.runwayJob.findUnique({ where: { id: jobId }, select: { status: true } });
-    if (!freshJob || ['completed', 'failed', 'cancelled', 'deleted'].includes(freshJob.status)) {
+    if (!freshJob || ['completed', 'failed', 'cancelled'].includes(freshJob.status)) {
       console.log(`[poll-worker] job ${jobId.slice(0,8)} status changed to ${freshJob?.status || 'deleted'}, stopping poll`);
       if (accountId) await accountPool.release(accountId, jobId);
       if (freshJob?.status === 'cancelled') await triggerSubmit(humanSubmitDelay());
