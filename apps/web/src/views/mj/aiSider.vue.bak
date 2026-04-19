@@ -111,19 +111,6 @@ const chatId= computed(()=>chatStore.active??'1002' );
                 </n-tooltip>
             </a>
 
-            <a href="http://101.35.158.183:8088" target="_blank"
-                class=" router-link-exact-active h-12 w-12 cursor-pointer rounded-xl bg-white duration-300 dark:bg-[#34373c] hover:bg-[#bbb] dark:hover:bg-[#555]">
-                <n-tooltip placement="right" trigger="hover">
-                  <template #trigger>
-                    <div class="flex h-full justify-center items-center py-1 flex-col">
-                      <SvgIcon icon="ri:shopping-bag-3-line" class="text-3xl flex-1"></SvgIcon>
-                      <span class="text-[10px]">TK 选品</span>
-                    </div>
-                  </template>
-                    TK 选品 · TikTok Shop 商品跟踪
-                </n-tooltip>
-            </a>
-
 
             <a  v-if="!isDisableMenu ( 'gpts')"   @click="homeStore.setMyData({act:'showgpts'}) " class=" router-link-exact-active h-12 w-12 cursor-pointer rounded-xl bg-white duration-300 dark:bg-[#34373c] hover:bg-[#bbb] dark:hover:bg-[#555]">
                 <n-tooltip placement="right" trigger="hover">
