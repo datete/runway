@@ -117,7 +117,7 @@ export class RunwayService {
           mode: input.mode,
           imageUrl: input.imageUrl,
           referenceImages: input.imageUrls ? JSON.stringify(input.imageUrls) : undefined,
-          exploreMode: input.exploreMode ?? true,
+          exploreMode: input.exploreMode ?? false,
           modelName: input.model || "kling_3_0_pro",
           status: "pending",
           provider: "direct",

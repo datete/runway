@@ -373,7 +373,7 @@ async function trySubmitOneOnAccount(account: AccountEntry): Promise<SubmitResul
       imageUrl:    dbJob.imageUrl || undefined,
       imageUrls,
       duration:    dbJob.duration || 5,
-      exploreMode: dbJob.exploreMode ?? true,
+      exploreMode: dbJob.exploreMode ?? false,
       modelName:   dbJob.modelName || "kling_3_0_pro",
       resolution:  dbJob.resolution,
       quality:     dbJob.quality,

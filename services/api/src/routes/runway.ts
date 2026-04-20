@@ -458,7 +458,7 @@ runwayRouter.post("/seedream", authMiddleware, async (req: any, res: any) => {
       aspectRatio: ar,
       resolution: rs,
       numImages: n,
-      exploreMode: exploreMode !== false,
+      exploreMode: exploreMode === true,
       creationSource: "tool-mode",
     };
     if (Array.isArray(referenceImages) && referenceImages.length > 0) {
@@ -718,7 +718,7 @@ runwayRouter.post("/video", authMiddleware, async (req: any, res: any) => {
       height,
       seed,
       watermark: !!watermark,
-      exploreMode: exploreMode !== false,
+      exploreMode: exploreMode === true,
       assetGroupId: randomUUID(),
       creationSource: "tool-mode",
       route: mode === "image_to_video" ? "i2v" : "t2v",

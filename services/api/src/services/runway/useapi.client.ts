@@ -18,7 +18,7 @@ export class UseApiClient implements RunwayProvider {
     const body: any = {
       prompt: input.prompt,
       model: input.modelName || 'gen4',
-      exploreMode: input.exploreMode ?? true,
+      exploreMode: input.exploreMode ?? false,
     };
     if (input.mode === 'image_to_video' && input.imageUrl) {
       body.firstImage = input.imageUrl;

@@ -61,7 +61,7 @@ videosRouter.post(
         quality: mapping.quality,
         duration: duration ?? 5,
         sound: sound ?? false,
-        exploreMode: explore_mode ?? true,
+        exploreMode: explore_mode ?? false,
         cfgScale: cfg_scale,
         ...(image_url ? { imageUrl: image_url } : {}),
         ...(Array.isArray(image_urls) ? { imageUrls: image_urls } : {}),

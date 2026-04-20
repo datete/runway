@@ -254,7 +254,7 @@ export class RunwayDirectClient implements RunwayProvider {
     const isPro = !isStandard && !isSeedance;
     console.log(`[runway:task] creating ${taskType} (model=${input.modelName}, quality=${input.quality || "std"})`);
     console.log(`[runway:task] prompt: "${input.prompt.slice(0, 80)}"`);
-    console.log(`[runway:task] duration=${input.duration || 5}s, exploreMode=${input.exploreMode ?? true}`);
+    console.log(`[runway:task] duration=${input.duration || 5}s, exploreMode=${input.exploreMode ?? false}`);
 
     // Collect all source image URLs
     const sourceUrls: string[] = [
@@ -311,7 +311,7 @@ export class RunwayDirectClient implements RunwayProvider {
           resolution:     effectiveResolution,
           aspectRatio:    "9:16",
           generateAudio:  input.sound !== false,
-          exploreMode:    input.exploreMode ?? true,
+          exploreMode:    input.exploreMode ?? false,
           creationSource: "tool-mode",
           ...(referenceImages.length > 0 && { referenceImages }),
         },
@@ -330,7 +330,7 @@ export class RunwayDirectClient implements RunwayProvider {
           cfgScale:       input.cfgScale ?? 0.5,
           ...((referenceImages.length === 0 && !referenceVideoAsset) && { resolution: effectiveResolution }),
           providerSettings: { sound: input.sound !== false },
-          exploreMode:    input.exploreMode ?? true,
+          exploreMode:    input.exploreMode ?? false,
           creationSource: "tool-mode",
           ...(referenceImages.length > 0 && { referenceImages }),
           ...(referenceVideoAsset && { referenceVideos: [{ assetId: referenceVideoAsset.assetId, url: referenceVideoAsset.url, durationSeconds: input.duration || 5 }] }),

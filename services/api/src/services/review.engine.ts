@@ -61,7 +61,7 @@ export async function createSeedreamJobForReview(opts: {
     aspectRatio: opts.aspectRatio,
     resolution: opts.resolution,
     numImages: 1,
-    exploreMode: true,
+    exploreMode: false,
     creationSource: "tool-mode",
   };
   if (Array.isArray(opts.referenceImages) && opts.referenceImages.length > 0) {
@@ -128,7 +128,7 @@ export async function createSeedreamJobForReview(opts: {
         aspectRatio: opts.aspectRatio,
         resolution: opts.resolution,
         numImages: 1,
-        exploreMode: true,
+        exploreMode: false,
         referenceImages: options.referenceImages || null,
       },
     });
