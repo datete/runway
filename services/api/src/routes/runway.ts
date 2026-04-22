@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { RunwayController } from "../controllers/runway.controller";
-import { authMiddleware } from "../middleware/auth";
+import { authMiddleware, adminMiddleware } from "../middleware/auth";
 import { prisma } from "../services/prisma";
 import { redisConnection } from "../queues/runway.queue";
 import fs from "fs";
@@ -181,43 +181,21 @@ runwayRouter.post("/jobs/:id/prioritize", authMiddleware, async (req: any, res: 
   }
 });
 
-runwayRouter.post("/capture", async (req, res) => {
-  const data = req.body;
-  const filename = `capture_${Date.now()}.json`;
-  const filepath = path.join(captureDir, filename);
-  fs.writeFileSync(filepath, JSON.stringify(data, null, 2));
-  console.log(`[capture] saved ${filename}: ${data.url}`);
-
-  // Auto-sync token to DB account if Authorization header present
+// Capture: admin-only. Auto-sync-token was removed — token rotation must go through admin UI.
+runwayRouter.post("/capture", adminMiddleware, async (req, res) => {
   try {
-    const headers = data.requestHeaders || {};
-    const auth = headers["Authorization"] || headers["authorization"] || "";
-    const workspace = headers["X-Runway-Workspace"] || headers["x-runway-workspace"] || "";
-    if (auth.startsWith("Bearer ") && workspace) {
-      const token = auth.replace("Bearer ", "").trim();
-      const teamId = String(workspace).trim();
-      const tokenShort = token.slice(-12);
-      // Find account by teamId
-      const account = await prisma.runwayAccount.findFirst({ where: { teamId } });
-      if (account && account.tokenShort !== tokenShort) {
-        await prisma.runwayAccount.update({
-          where: { id: account.id },
-          data: { token, tokenShort, isActive: true },
-        });
-        console.log(`[capture:auto-sync] updated token for ${account.label} (teamId=${teamId}, new=...${tokenShort})`);
-      } else if (!account) {
-        // No matching account — optionally create one
-        console.log(`[capture:auto-sync] no account for teamId=${teamId}, skipping (token=...${tokenShort})`);
-      }
-    }
-  } catch (e) {
-    console.warn("[capture:auto-sync] error:", (e as any).message);
+    const data = req.body;
+    const filename = `capture_${Date.now()}.json`;
+    const filepath = path.join(captureDir, filename);
+    fs.writeFileSync(filepath, JSON.stringify(data, null, 2));
+    console.log(`[capture] saved ${filename} by ${req.user!.username}`);
+    res.json({ ok: true, saved: filename });
+  } catch (e: any) {
+    res.status(500).json({ error: "capture save failed" });
   }
-
-  res.json({ ok: true, saved: filename });
 });
 
-runwayRouter.get("/capture", (req, res) => {
+runwayRouter.get("/capture", adminMiddleware, (req, res) => {
   try {
     const files = fs.readdirSync(captureDir)
       .filter(f => f.endsWith(".json"))

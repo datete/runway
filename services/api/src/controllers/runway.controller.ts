@@ -1,8 +1,10 @@
 import { Request, Response } from "express";
 import { RunwayService } from "../services/runway/runway.service";
 import { prisma } from "../services/prisma";
+import { ValidationError, ForbiddenError, NotFoundError, sendError } from "../errors";
 
-const svc = new RunwayService();
+export const runwayService = new RunwayService();
+const svc = runwayService;
 
 const ACTIVE_STATUSES = ["pending", "queued", "submitted", "processing"];
 
@@ -11,34 +13,42 @@ async function logAction(userId: string | undefined, action: string, detail?: st
   await prisma.userLog.create({ data: { userId, action, detail, ip } }).catch(() => {});
 }
 
+// Map legacy string error messages ("forbidden") from the service layer to typed errors.
+// Temporary shim until the service layer is refactored to throw HttpError directly.
+function mapServiceError(e: unknown): unknown {
+  if (e instanceof Error && e.message === "forbidden") {
+    return new ForbiddenError("无权操作");
+  }
+  return e;
+}
+
 export class RunwayController {
   async createJob(req: Request, res: Response) {
     try {
       const { prompt, mode, imageUrl, imageUrls, duration, exploreMode, model, remark, resolution, quality, cfgScale, sound, videoUrl } = req.body;
-      if (!prompt || !mode) return res.status(400).json({ error: "prompt and mode required" });
-      if (typeof prompt === "string" && prompt.length > 2000) return res.status(400).json({ error: `提示词超出2000字上限（当前${prompt.length}字），请精简后再提交` });
+      if (!prompt || !mode) throw new ValidationError("prompt and mode required");
+      if (typeof prompt === "string" && prompt.length > 2000) {
+        throw new ValidationError(`提示词超出2000字上限（当前${prompt.length}字），请精简后再提交`);
+      }
       const userId = req.user?.id;
       const job = await svc.createJob({ prompt, mode, imageUrl, imageUrls, duration, exploreMode, model, remark, userId, resolution, quality, cfgScale, sound, videoUrl });
       logAction(userId, "create_job", `jobId=${job.id} mode=${mode}`, req.socket.remoteAddress);
       res.status(201).json(job);
-    } catch (e: any) {
-      const msg = e.message || "";
-      const isValidation = msg.includes("同质化") || msg.includes("配额") || msg.includes("上限");
-      res.status(isValidation ? 400 : 500).json({ error: msg });
+    } catch (e) {
+      sendError(res, mapServiceError(e), "createJob");
     }
   }
 
   async getJob(req: Request, res: Response) {
     try {
       const job = await svc.getJob(req.params.id, req.user?.id, req.user?.role);
-      if (!job) return res.status(404).json({ error: "not found" });
+      if (!job) throw new NotFoundError("not found");
       res.json(job);
-    } catch (e: any) {
-      res.status(500).json({ error: e.message });
+    } catch (e) {
+      sendError(res, mapServiceError(e), "getJob");
     }
   }
 
-  // #2: Single query with ROW_NUMBER for queue positions instead of double query
   async listJobs(req: Request, res: Response) {
     try {
       const page = parseInt(req.query.page as string) || 1;
@@ -71,8 +81,8 @@ export class RunwayController {
       }));
 
       res.json({ jobs: enriched, total: result.total, page: result.page, pageSize: result.pageSize, counts: result.counts });
-    } catch (e: any) {
-      res.status(500).json({ error: e.message });
+    } catch (e) {
+      sendError(res, e, "listJobs");
     }
   }
 
@@ -81,9 +91,8 @@ export class RunwayController {
       const job = await svc.retryJob(req.params.id, req.user?.id, req.user?.role);
       logAction(req.user?.id, "retry_job", `jobId=${req.params.id}`, req.socket.remoteAddress);
       res.json(job);
-    } catch (e: any) {
-      if (e.message === "forbidden") return res.status(403).json({ error: "无权操作" });
-      res.status(500).json({ error: e.message });
+    } catch (e) {
+      sendError(res, mapServiceError(e), "retryJob");
     }
   }
 
@@ -92,9 +101,8 @@ export class RunwayController {
       await svc.deleteJob(req.params.id, req.user?.id, req.user?.role);
       logAction(req.user?.id, "delete_job", `jobId=${req.params.id}`, req.socket.remoteAddress);
       res.json({ ok: true });
-    } catch (e: any) {
-      if (e.message === "forbidden") return res.status(403).json({ error: "无权操作" });
-      res.status(500).json({ error: e.message });
+    } catch (e) {
+      sendError(res, mapServiceError(e), "deleteJob");
     }
   }
 
@@ -103,25 +111,23 @@ export class RunwayController {
       const job = await svc.cancelJob(req.params.id, req.user?.id, req.user?.role);
       logAction(req.user?.id, "cancel_job", `jobId=${req.params.id}`, req.socket.remoteAddress);
       res.json(job);
-    } catch (e: any) {
-      if (e.message === "forbidden") return res.status(403).json({ error: "无权操作" });
-      res.status(500).json({ error: e.message });
+    } catch (e) {
+      sendError(res, mapServiceError(e), "cancelJob");
     }
   }
 
-  // #5: Parallel batch creation with Promise.allSettled
   async batchCreateJobs(req: Request, res: Response) {
     try {
       const { prompts, mode, imageUrl, duration, resolution, quality, cfgScale, sound, videoUrl } = req.body;
 
       if (!Array.isArray(prompts) || prompts.length === 0) {
-        return res.status(400).json({ error: "prompts must be a non-empty array" });
+        throw new ValidationError("prompts must be a non-empty array");
       }
       if (prompts.length > 15) {
-        return res.status(400).json({ error: "提示词同质化严重，请修改提示词" });
+        throw new ValidationError("单次最多提交 15 条提示词");
       }
       if (!mode) {
-        return res.status(400).json({ error: "mode is required" });
+        throw new ValidationError("mode is required");
       }
 
       const userId = req.user?.id;
@@ -156,8 +162,8 @@ export class RunwayController {
         req.socket.remoteAddress);
 
       return res.status(201).json({ total: prompts.length, created, errors });
-    } catch (e: any) {
-      return res.status(500).json({ error: e.message });
+    } catch (e) {
+      return sendError(res, e, "batchCreateJobs");
     }
   }
 }

@@ -28,18 +28,28 @@ const JWT_SECRET = process.env.RUNWAY_JWT_SECRET;
 
 const AUTH_CACHE_TTL = 30; // seconds
 
-async function checkUserActive(userId: string): Promise<boolean | null> {
-  try {
-    const cacheKey = `auth:active:${userId}`;
-    const cached = await authRedis.get(cacheKey);
-    if (cached !== null) return cached === "1";
+type ActiveCheck =
+  | { kind: "active" }
+  | { kind: "inactive" }
+  | { kind: "missing" }
+  | { kind: "error"; err: unknown };
 
+async function checkUserActive(userId: string): Promise<ActiveCheck> {
+  const cacheKey = `auth:active:${userId}`;
+  try {
+    const cached = await authRedis.get(cacheKey);
+    if (cached === "1") return { kind: "active" };
+    if (cached === "0") return { kind: "inactive" };
+  } catch (err) {
+    console.warn("[auth] redis get failed:", (err as any)?.message ?? err);
+  }
+  try {
     const user = await prisma.user.findUnique({ where: { id: userId }, select: { isActive: true } });
-    if (!user) return null;
-    await authRedis.setex(cacheKey, AUTH_CACHE_TTL, user.isActive ? "1" : "0").catch(() => {});
-    return user.isActive;
-  } catch {
-    return undefined as any; // DB/Redis error — fall through
+    if (!user) return { kind: "missing" };
+    authRedis.setex(cacheKey, AUTH_CACHE_TTL, user.isActive ? "1" : "0").catch(() => {});
+    return user.isActive ? { kind: "active" } : { kind: "inactive" };
+  } catch (err) {
+    return { kind: "error", err };
   }
 }
 
@@ -68,21 +78,26 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
     const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     if (typeof payload.id === "string" && uuidRe.test(payload.id)) {
       checkUserActive(payload.id)
-        .then((isActive) => {
-          if (isActive === null) return res.status(403).json({ error: "账号不存在" });
-          if (isActive === false) return res.status(403).json({ error: "账号已被禁用" });
-          // isActive === true OR undefined (error fallback) — allow through
-          req.user = payload;
-          next();
+        .then((result) => {
+          switch (result.kind) {
+            case "active":
+              req.user = payload;
+              return next();
+            case "missing":
+              return res.status(403).json({ error: "账号不存在" });
+            case "inactive":
+              return res.status(403).json({ error: "账号已被禁用" });
+            case "error":
+              console.error("[auth] DB check failed, rejecting:", (result.err as any)?.message ?? result.err);
+              return res.status(503).json({ error: "鉴权服务暂时不可用，请稍后再试" });
+          }
         })
-        .catch(() => {
-          // Redis + DB both failed — trust JWT
-          req.user = payload;
-          next();
+        .catch((err) => {
+          console.error("[auth] unexpected error, rejecting:", err?.message ?? err);
+          return res.status(503).json({ error: "鉴权服务暂时不可用，请稍后再试" });
         });
     } else {
-      req.user = payload;
-      next();
+      return res.status(401).json({ error: "token 无效" });
     }
   } catch {
     return res.status(401).json({ error: "token 无效或已过期" });

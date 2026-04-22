@@ -260,12 +260,7 @@ async function trySubmitOneOnAccount(account: AccountEntry): Promise<SubmitResul
   // ── 已有远程任务？恢复轮询 ──
   if (dbJob.remoteTaskId) {
     console.log(`[submit-worker] job ${jobId.slice(0,8)} already has remote ${(dbJob.remoteTaskId as string).slice(0,8)}, resuming poll`);
-    const _r1 = await prisma.runwayJob.updateMany({ where: { id: jobId, status: { in: ["pending","queued"] } }, data: { status: "processing" } });
-    if (_r1.count === 0) {
-      console.log(`[submit-worker] job ${jobId.slice(0,8)} already transitioned by another worker, releasing account (resume-poll CAS miss)`);
-      await accountPool.releaseNoJob(account.id);
-      return "no_pending";
-    }
+    await prisma.runwayJob.update({ where: { id: jobId }, data: { status: "processing" } });
     await pollQueue.add("poll", {
       jobId, remoteTaskId: dbJob.remoteTaskId,
       accountId: dbJob.accountId || account.id,
@@ -275,16 +270,11 @@ async function trySubmitOneOnAccount(account: AccountEntry): Promise<SubmitResul
 
   console.log(`[submit-worker] picked jobId=${jobId.slice(0,8)} -> account=${account.label}`);
 
-  // 锁定任务，防止重复选取 (CAS: 只从 pending/queued 推到 submitted)
-  const _lock = await prisma.runwayJob.updateMany({
-    where: { id: jobId, status: { in: ["pending","queued"] } },
+  // 锁定任务，防止重复选取
+  await prisma.runwayJob.update({
+    where: { id: jobId },
     data: { status: "submitted" },
   });
-  if (_lock.count === 0) {
-    console.log(`[submit-worker] job ${jobId.slice(0,8)} already transitioned by another worker, releasing account (lock CAS miss)`);
-    await accountPool.releaseNoJob(account.id);
-    return "no_pending";
-  }
 
   // 解析参考图片
   let imageUrls: string[] | undefined;
@@ -337,7 +327,7 @@ async function trySubmitOneOnAccount(account: AccountEntry): Promise<SubmitResul
     if (acctCooldown) {
       console.log(`[submit-worker] account ${account.label} entered cooldown during delay, aborting ${jobId.slice(0,8)}`);
       await accountPool.release(account.id);
-      await prisma.runwayJob.updateMany({ where: { id: jobId, status: "submitted" }, data: { status: "pending", accountId: null, startedAt: null } as any });
+      await prisma.runwayJob.update({ where: { id: jobId }, data: { status: "pending", accountId: null, startedAt: null } as any });
       return "rate_limited";
     }
 
@@ -354,7 +344,7 @@ async function trySubmitOneOnAccount(account: AccountEntry): Promise<SubmitResul
     if (acctActiveCount >= account.maxConcurrency) {
       console.log(`[submit-worker] account ${account.label} already has ${acctActiveCount}/${account.maxConcurrency} active tasks (DB), aborting ${jobId.slice(0,8)}`);
       await accountPool.release(account.id);
-      await prisma.runwayJob.updateMany({ where: { id: jobId, status: "submitted" }, data: { status: "pending", accountId: null, startedAt: null } as any });
+      await prisma.runwayJob.update({ where: { id: jobId }, data: { status: "pending", accountId: null, startedAt: null } as any });
       return "no_account";
     }
 
@@ -364,7 +354,7 @@ async function trySubmitOneOnAccount(account: AccountEntry): Promise<SubmitResul
       if (realActive >= account.maxConcurrency) {
         console.log(`[submit-worker] Platform reports ${realActive} active for ${account.label} (max ${account.maxConcurrency}), aborting ${jobId.slice(0,8)}`);
         await accountPool.release(account.id);
-        await prisma.runwayJob.updateMany({ where: { id: jobId, status: "submitted" }, data: { status: "pending", accountId: null, startedAt: null } as any });
+        await prisma.runwayJob.update({ where: { id: jobId }, data: { status: "pending", accountId: null, startedAt: null } as any });
         return "no_account";
       }
       console.log(`[submit-worker] Platform real concurrency: ${realActive}/${account.maxConcurrency} for ${account.label}`);
@@ -392,13 +382,10 @@ async function trySubmitOneOnAccount(account: AccountEntry): Promise<SubmitResul
       videoUrl:    dbJob.videoUrl,
     });
 
-    const _proc = await prisma.runwayJob.updateMany({
-      where: { id: jobId, status: "submitted" },
+    await prisma.runwayJob.update({
+      where: { id: jobId },
       data: { remoteTaskId, status: "processing" },
     });
-    if (_proc.count === 0) {
-      console.warn(`[submit-worker] jobId=${jobId.slice(0,8)} status changed during submit, remote ${remoteTaskId.slice(0,8)} orphaned on platform`);
-    }
     console.log(`[submit-worker] ✓ jobId=${jobId.slice(0,8)} -> processing, remote=${remoteTaskId.slice(0,8)}, account=${account.label}`);
 
     // 加入轮询队列（带重试）
@@ -431,7 +418,7 @@ async function trySubmitOneOnAccount(account: AccountEntry): Promise<SubmitResul
       await accountPool.release(account.id);
       await accountPool.recordError(account.id, "429 Rate Limited");
       await accountPool.setCooldown(account.id, 420);
-      await prisma.runwayJob.updateMany({ where: { id: jobId, status: "submitted" }, data: { status: "pending", accountId: null, startedAt: null } as any });
+      await prisma.runwayJob.update({ where: { id: jobId }, data: { status: "pending", accountId: null, startedAt: null } as any });
       return "rate_limited";
     }
 

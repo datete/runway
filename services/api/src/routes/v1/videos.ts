@@ -1,6 +1,6 @@
 import { Router, Request, Response } from "express";
 import { prisma } from "../../services/prisma";
-import { RunwayService } from "../../services/runway/runway.service";
+import { runwayService } from "../../controllers/runway.controller";
 
 export const videosRouter = Router();
 
@@ -51,8 +51,6 @@ videosRouter.post(
           error: { message: "Authentication required.", type: "authentication_error" },
         });
       }
-
-      const runwayService = new RunwayService();
 
       const job = await runwayService.createJob({
         prompt,

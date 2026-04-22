@@ -6,6 +6,7 @@ import fetch from 'node-fetch';
 import { runwayRouter } from './routes/runway';
 import { klingRouter } from './routes/kling';
 import { prisma } from './services/prisma';
+import { redisConnection } from './queues/runway.queue';
 import { authRouter } from './routes/auth';
 import { adminRouter } from './routes/admin';
 import { reviewRouter } from './routes/review';
@@ -13,12 +14,32 @@ import { v1Router } from './routes/v1';
 
 const app = express();
 const PORT = Number(process.env.API_PORT) || 5102;
-const WEB_BASE = 'http://127.0.0.1:3002';
+const WEB_BASE = process.env.WEB_BASE || 'http://127.0.0.1:3002';
+const MEDIA_CACHE_BASE = process.env.MEDIA_CACHE_BASE || 'http://127.0.0.1:3101';
 
 app.use(cors());
-app.use(express.json({ limit: '50mb' }));
 
-// #12: Response time logger — log slow requests (>1s) and all non-2xx
+// Let proxies that need raw bodies (multipart, arbitrary content-types) bypass the JSON parser.
+// We only parse JSON for runway-local routes; upstream proxies stream the raw request.
+const proxyPrefixes = [
+  '/api/cache-video', '/videos',
+  '/luma', '/mjapi', '/openapi', '/suno', '/sunoapi', '/viggle', '/pro', '/uploads', '/openai',
+];
+const proxyApiFallthrough = (url: string) =>
+  url.startsWith('/api/') &&
+  !url.startsWith('/api/runway') &&
+  !url.startsWith('/api/kling') &&
+  !url.startsWith('/api/review');
+
+const jsonParser = express.json({ limit: '50mb' });
+app.use((req, res, next) => {
+  if (proxyPrefixes.some(p => req.url.startsWith(p)) || proxyApiFallthrough(req.url)) {
+    return next();
+  }
+  return jsonParser(req, res, next);
+});
+
+// Response time logger — log slow requests (>1s) and all non-2xx
 app.use((req, res, next) => {
   const start = Date.now();
   let capturedBody: any = null;
@@ -43,7 +64,32 @@ app.use((req, _res, next) => {
   next();
 });
 
+// Liveness: cheap check (service alive, event loop responsive)
 app.get('/health', (_, res) => res.json({ ok: true, ts: Date.now() }));
+
+// Readiness: verify DB + Redis
+app.get('/ready', async (_req, res) => {
+  const start = Date.now();
+  const report: any = { ok: true, ts: Date.now(), checks: {} };
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    report.checks.db = { ok: true };
+  } catch (e: any) {
+    report.ok = false;
+    report.checks.db = { ok: false, error: e?.message ?? String(e) };
+  }
+  try {
+    const pong = await redisConnection.ping();
+    report.checks.redis = { ok: pong === 'PONG' };
+    if (pong !== 'PONG') report.ok = false;
+  } catch (e: any) {
+    report.ok = false;
+    report.checks.redis = { ok: false, error: e?.message ?? String(e) };
+  }
+  report.durationMs = Date.now() - start;
+  res.status(report.ok ? 200 : 503).json(report);
+});
+
 app.use('/img', express.static('/root/runway/uploads'));
 
 // Runway API routes
@@ -56,61 +102,64 @@ app.use('/api/review', reviewRouter);
 // V1 OpenAI-compatible API (API key auth)
 app.use('/v1', v1Router);
 
-async function proxyTo3002(targetPath: string, req: express.Request, res: express.Response) {
+// ── Proxy helpers ──────────────────────────────────────────────────────────
+const HOP_BY_HOP = new Set([
+  'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
+  'te', 'trailers', 'transfer-encoding', 'upgrade', 'host', 'content-length',
+]);
+
+function buildProxyHeaders(req: express.Request, extraPassThrough: string[] = []): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(req.headers)) {
+    if (v === undefined) continue;
+    const lower = k.toLowerCase();
+    if (HOP_BY_HOP.has(lower)) continue;
+    out[lower] = Array.isArray(v) ? v.join(', ') : String(v);
+  }
+  const xff = (req.headers['x-forwarded-for'] as string | undefined);
+  const clientIp = req.socket.remoteAddress || '';
+  out['x-forwarded-for'] = xff ? `${xff}, ${clientIp}` : clientIp;
+  out['x-forwarded-proto'] = (req.headers['x-forwarded-proto'] as string) || (req.secure ? 'https' : 'http');
+  out['x-forwarded-host'] = (req.headers['x-forwarded-host'] as string) || (req.headers['host'] as string) || '';
+  for (const h of extraPassThrough) {
+    const v = req.headers[h.toLowerCase()];
+    if (typeof v === 'string') out[h.toLowerCase()] = v;
+  }
+  return out;
+}
+
+async function proxyStream(baseUrl: string, targetPath: string, req: express.Request, res: express.Response, logTag: string) {
   try {
-    const body = req.body && Object.keys(req.body).length > 0
-      ? JSON.stringify(req.body)
-      : undefined;
-
-    const headers: Record<string, string> = {
-      'content-type': (req.headers['content-type'] as string) || 'application/json',
-    };
-    if (req.headers['authorization'])
-      headers['authorization'] = req.headers['authorization'] as string;
-
-    const upstream = await fetch(`${WEB_BASE}${targetPath}`, {
-      method: req.method,
+    const headers = buildProxyHeaders(req);
+    const method = req.method.toUpperCase();
+    const hasBody = !['GET', 'HEAD'].includes(method);
+    const upstream = await fetch(`${baseUrl}${targetPath}`, {
+      method,
       headers,
-      body,
+      body: hasBody ? (req as any) : undefined,
     });
-
-    // #4: Stream response instead of buffering entire body
     const ct = upstream.headers.get('content-type') || 'application/json';
     res.status(upstream.status).set('content-type', ct);
-    if (upstream.body) {
-      (upstream.body as any).pipe(res);
-    } else {
-      res.end();
-    }
+    const len = upstream.headers.get('content-length');
+    if (len) res.set('content-length', len);
+    if (upstream.body) (upstream.body as any).pipe(res);
+    else res.end();
   } catch (err: any) {
-    console.error('[proxy] error:', err.message);
-    res.status(502).json({ error: 'web service unavailable' });
+    console.error(`[${logTag}] error:`, err.message);
+    res.status(502).json({ error: `${logTag} upstream unavailable` });
   }
 }
 
+const proxyTo3002 = (targetPath: string, req: express.Request, res: express.Response) =>
+  proxyStream(WEB_BASE, targetPath, req, res, 'proxy');
 
-// Proxy media-cache (download caching for legacy luma/pika videos)
-const MEDIA_CACHE_BASE = process.env.MEDIA_CACHE_BASE || "http://127.0.0.1:3101";
-async function proxyToMediaCache(targetPath: string, req: express.Request, res: express.Response) {
-  try {
-    const body = req.body && Object.keys(req.body).length > 0 ? JSON.stringify(req.body) : undefined;
-    const headers: Record<string, string> = {
-      "content-type": (req.headers["content-type"] as string) || "application/json",
-    };
-    if (req.headers["x-ptoken"]) headers["x-ptoken"] = req.headers["x-ptoken"] as string;
-    const upstream = await fetch(`${MEDIA_CACHE_BASE}${targetPath}`, { method: req.method, headers, body });
-    const ct = upstream.headers.get("content-type") || "application/json";
-    res.status(upstream.status).set("content-type", ct);
-    if (upstream.body) (upstream.body as any).pipe(res); else res.end();
-  } catch (err: any) {
-    console.error("[media-cache proxy] error:", err.message);
-    res.status(502).json({ error: "media cache unavailable" });
-  }
-}
-app.use("/api/cache-video", (req, res) => proxyToMediaCache(`/api/cache-video${req.url}`, req, res));
-app.use("/videos", (req, res) => proxyToMediaCache(`/videos${req.url}`, req, res));
+const proxyToMediaCache = (targetPath: string, req: express.Request, res: express.Response) =>
+  proxyStream(MEDIA_CACHE_BASE, targetPath, req, res, 'media-cache proxy');
 
-// Proxy /api/* (except /api/runway) to web service on port 3002
+app.use('/api/cache-video', (req, res) => proxyToMediaCache(`/api/cache-video${req.url}`, req, res));
+app.use('/videos', (req, res) => proxyToMediaCache(`/videos${req.url}`, req, res));
+
+// Proxy /api/* (except /api/runway, /api/kling, /api/review) to web service on port 3002
 app.use('/api', (req, res) => proxyTo3002(`/api${req.url}`, req, res));
 
 // Proxy other chatgpt-web paths to 3002
@@ -128,7 +177,13 @@ app.get('*', (_, res) => {
 
 
 // ── 7-day auto cleanup ──
+let cleanupRunning = false;
 async function runCleanup() {
+  if (cleanupRunning) {
+    console.log('[cleanup] previous run still in progress, skipping');
+    return;
+  }
+  cleanupRunning = true;
   try {
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
     const deleted = await prisma.runwayJob.deleteMany({
@@ -138,26 +193,15 @@ async function runCleanup() {
       },
     });
     if (deleted.count > 0) console.log(`[cleanup] deleted ${deleted.count} old jobs (>7 days)`);
-  } catch (e: any) { console.warn('[cleanup] error:', e.message); }
+  } catch (e: any) {
+    console.warn('[cleanup] error:', e.message);
+  } finally {
+    cleanupRunning = false;
+  }
 }
 setInterval(runCleanup, 6 * 60 * 60 * 1000); // every 6 hours
 setTimeout(runCleanup, 5000); // run once after startup
 
-app.listen(PORT, async () => {
+app.listen(PORT, () => {
   console.log(`[runway-api] listening on :${PORT}`);
-  // Upgrade queued std jobs to pro resolution
-  try {
-    await prisma.$executeRawUnsafe(`
-      UPDATE runway_jobs SET
-        resolution = CASE
-          WHEN resolution = '720x1280' OR resolution IS NULL THEN '1076x1920'
-          WHEN resolution = '1280x720' THEN '1920x1080'
-          WHEN resolution = '960x960'  THEN '1440x1440'
-          ELSE resolution
-        END
-      WHERE quality = 'std'
-        AND status IN ('pending', 'queued')
-    `);
-    console.log('[startup] upgraded queued std jobs to pro resolution');
-  } catch (e) { console.warn('[startup] migration skipped:', e.message); }
 });

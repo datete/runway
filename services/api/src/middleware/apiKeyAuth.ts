@@ -8,6 +8,9 @@ interface ApiKeyRow {
   rate_limit: number;
   enabled: boolean;
   expires_at: Date | null;
+  username: string;
+  role: string;
+  is_active: boolean;
 }
 
 export async function apiKeyAuthMiddleware(
@@ -34,9 +37,11 @@ export async function apiKeyAuthMiddleware(
     const keyHash = crypto.createHash("sha256").update(token).digest("hex");
 
     const rows = await prisma.$queryRaw<ApiKeyRow[]>`
-      SELECT id, user_id, rate_limit, enabled, expires_at
-      FROM api_keys
-      WHERE key_hash = ${keyHash} AND enabled = true
+      SELECT k.id, k.user_id, k.rate_limit, k.enabled, k.expires_at,
+             u.username, u.role, u.is_active
+      FROM api_keys k
+      JOIN users u ON u.id = k.user_id
+      WHERE k.key_hash = ${keyHash} AND k.enabled = true
     `;
 
     if (!rows || rows.length === 0) {
@@ -51,7 +56,12 @@ export async function apiKeyAuthMiddleware(
       return;
     }
 
-    req.user = { id: row.user_id, username: "apikey", role: "user" };
+    if (!row.is_active) {
+      res.status(403).json({ error: "账号已被禁用" });
+      return;
+    }
+
+    req.user = { id: row.user_id, username: row.username, role: row.role };
     (req as any).apiKeyId = row.id;
     (req as any).rateLimit = row.rate_limit;
 
