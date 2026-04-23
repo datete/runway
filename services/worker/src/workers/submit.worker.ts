@@ -557,8 +557,25 @@ async function accountSubmitLoop(accountId: string): Promise<void> {
         continue;
       }
 
-      // Submit on this account (internally does pre-delay + API call + post-checks)
-      const result = await trySubmitOneOnAccount(acquired);
+      // Submit on this account (internally does pre-delay + API call + post-checks).
+      // Watchdog: even with per-fetch timeouts, belt-and-suspenders ensures the loop
+      // never gets stuck. trySubmitOneOnAccount includes a 20-65s pre-submit delay
+      // plus several Runway API calls; 6 min covers the worst realistic case.
+      const WATCHDOG_MS = 6 * 60_000;
+      let watchdogTimer: any;
+      const watchdog = new Promise<SubmitResult>(resolve => {
+        watchdogTimer = setTimeout(() => {
+          console.error(`[loop:${account.label}] watchdog fired — trySubmitOneOnAccount exceeded ${WATCHDOG_MS/1000}s, forcing release`);
+          accountPool.release(account.id).catch(() => {});
+          resolve("network_error");
+        }, WATCHDOG_MS);
+      });
+      let result: SubmitResult;
+      try {
+        result = await Promise.race([trySubmitOneOnAccount(acquired), watchdog]);
+      } finally {
+        clearTimeout(watchdogTimer);
+      }
 
       switch (result) {
         case "submitted": {
@@ -625,7 +642,29 @@ async function refreshAccountLoops(): Promise<void> {
   }
 }
 
+/** Put a 24h TTL on batch-count/limit keys that have no expiry.
+ *  They are normally cleared by startBatchRest(), but a hung loop can leave
+ *  them permanently. A TTL bound ensures they self-heal after a day. */
+async function reconcileOrphanBatchKeys(): Promise<void> {
+  try {
+    const patterns = ["submit:batch-count:*", "submit:batch-limit:*"];
+    for (const pat of patterns) {
+      const keys = await connection.keys(pat);
+      for (const k of keys) {
+        const ttl = await connection.ttl(k);
+        if (ttl === -1) {
+          await connection.expire(k, 24 * 3600);
+          console.log(`[startup] bounded TTL (24h) on orphan key ${k}`);
+        }
+      }
+    }
+  } catch (e: any) {
+    console.warn("[startup] reconcileOrphanBatchKeys error:", e.message);
+  }
+}
+
 (async () => {
+  await reconcileOrphanBatchKeys();
   await refreshAccountLoops();
   setInterval(refreshAccountLoops, 30_000);
 })();

@@ -5,6 +5,31 @@ import { RunwayProvider, CreateRunwayTaskInput, RunwayTaskStatus } from "./runwa
 
 const API_BASE = "https://api.runwayml.com";
 
+// Default per-request timeouts. node-fetch has no default, so without these a proxy
+// outage hangs the awaiting loop forever.
+const TIMEOUT_SRC_DOWNLOAD = 60_000;    // downloading user-supplied images/videos
+const TIMEOUT_UPLOAD_INIT  = 20_000;    // /v1/uploads init + complete
+const TIMEOUT_S3_PUT       = 120_000;   // raw S3 PUT (large files)
+const TIMEOUT_CREATE_TASK  = 30_000;    // POST /v1/tasks
+const TIMEOUT_GET_TASK     = 20_000;    // GET /v1/tasks/:id + /v1/tasks list
+const TIMEOUT_ARTIFACT     = 60_000;    // fetch result artifact
+const TIMEOUT_CANCEL       = 15_000;
+
+async function timedFetch(url: string, opts: any, timeoutMs: number, label: string): Promise<any> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...opts, signal: controller.signal as any });
+  } catch (e: any) {
+    if (e?.name === "AbortError" || /aborted/i.test(e?.message ?? "")) {
+      throw new Error(`${label} timeout after ${timeoutMs}ms`);
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export class RunwayDirectClient implements RunwayProvider {
   private token: string;
   private teamId: number;
@@ -105,7 +130,7 @@ export class RunwayDirectClient implements RunwayProvider {
     console.log(`[runway:upload] source: ${sourceUrl}`);
 
     // Step 1 – download source image (no proxy needed for local/external image download)
-    const imgRes = await fetch(sourceUrl);
+    const imgRes = await timedFetch(sourceUrl, {}, TIMEOUT_SRC_DOWNLOAD, "source download");
     if (!imgRes.ok) throw new Error(`Failed to download image ${imgRes.status}: ${sourceUrl}`);
     const imgBuf = Buffer.from(await imgRes.arrayBuffer());
     const ct = imgRes.headers.get("content-type") || "image/png";
@@ -131,12 +156,12 @@ export class RunwayDirectClient implements RunwayProvider {
     const proxyOpts = await this.getFetchOptions();
 
     // Step 2 – initiate upload
-    const initRes = await fetch(`${API_BASE}/v1/uploads`, {
+    const initRes = await timedFetch(`${API_BASE}/v1/uploads`, {
       method: "POST",
       headers: this.headers,
       body: JSON.stringify({ filename, numberOfParts: 1, type: "DATASET", asTeamId: this.teamId }),
       ...proxyOpts,
-    });
+    }, TIMEOUT_UPLOAD_INIT, "upload init");
     if (!initRes.ok) throw new Error(`Upload init ${initRes.status}: ${await initRes.text()}`);
     const init = await initRes.json() as any;
     const uploadId: string = init.id;
@@ -148,11 +173,11 @@ export class RunwayDirectClient implements RunwayProvider {
     let etag = '';
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        putRes = await fetch(s3Url, {
+        putRes = await timedFetch(s3Url, {
           method: "PUT",
           headers: { "Content-Type": finalCt },
           body: finalBuf,
-        });
+        }, TIMEOUT_S3_PUT, "S3 PUT");
         if (putRes.ok) {
           etag = (putRes.headers.get("ETag") || "").replace(/"/g, "");
           console.log(`[runway:upload] S3 PUT ok (attempt ${attempt}), ETag=${etag}`);
@@ -169,12 +194,12 @@ export class RunwayDirectClient implements RunwayProvider {
     if (!putRes || !putRes.ok) throw new Error(`S3 PUT failed after 3 attempts`);
 
     // Step 4 – complete upload
-    const completeRes = await fetch(`${API_BASE}/v1/uploads/${uploadId}/complete`, {
+    const completeRes = await timedFetch(`${API_BASE}/v1/uploads/${uploadId}/complete`, {
       method: "POST",
       headers: this.headers,
       body: JSON.stringify({ parts: [{ PartNumber: 1, ETag: etag }], asTeamId: this.teamId }),
       ...proxyOpts,
-    });
+    }, TIMEOUT_UPLOAD_INIT, "upload complete");
     if (!completeRes.ok) throw new Error(`Upload complete ${completeRes.status}: ${await completeRes.text()}`);
     const complete = await completeRes.json() as any;
     const runwayUrl: string = complete.url;
@@ -188,7 +213,7 @@ export class RunwayDirectClient implements RunwayProvider {
     if (sourceUrl.startsWith("/")) sourceUrl = `http://localhost:5102${sourceUrl}`;
     console.log(`[runway:upload:video] source: ${sourceUrl}`);
 
-    const imgRes = await fetch(sourceUrl);
+    const imgRes = await timedFetch(sourceUrl, {}, TIMEOUT_SRC_DOWNLOAD, "source video download");
     if (!imgRes.ok) throw new Error(`Failed to download file ${imgRes.status}: ${sourceUrl}`);
     const buf = Buffer.from(await imgRes.arrayBuffer());
     const ct = imgRes.headers.get("content-type") || "video/mp4";
@@ -198,31 +223,31 @@ export class RunwayDirectClient implements RunwayProvider {
 
     const proxyOpts = await this.getFetchOptions();
 
-    const initRes = await fetch(`${API_BASE}/v1/uploads`, {
+    const initRes = await timedFetch(`${API_BASE}/v1/uploads`, {
       method: "POST",
       headers: this.headers,
       body: JSON.stringify({ filename, numberOfParts: 1, type: "DATASET", asTeamId: this.teamId }),
       ...proxyOpts,
-    });
+    }, TIMEOUT_UPLOAD_INIT, "video upload init");
     if (!initRes.ok) throw new Error(`Upload init ${initRes.status}: ${await initRes.text()}`);
     const init = await initRes.json() as any;
     const uploadId: string = init.id;
     const s3Url: string = init.uploadUrls[0];
 
-    const putRes = await fetch(s3Url, {
+    const putRes = await timedFetch(s3Url, {
       method: "PUT",
       headers: { "Content-Type": ct },
       body: buf,
-    });
+    }, TIMEOUT_S3_PUT, "video S3 PUT");
     if (!putRes.ok) throw new Error(`S3 PUT ${putRes.status}`);
     const etag = (putRes.headers.get("ETag") || "").replace(/"/g, "");
 
-    const completeRes = await fetch(`${API_BASE}/v1/uploads/${uploadId}/complete`, {
+    const completeRes = await timedFetch(`${API_BASE}/v1/uploads/${uploadId}/complete`, {
       method: "POST",
       headers: this.headers,
       body: JSON.stringify({ parts: [{ PartNumber: 1, ETag: etag }], asTeamId: this.teamId }),
       ...proxyOpts,
-    });
+    }, TIMEOUT_UPLOAD_INIT, "video upload complete");
     if (!completeRes.ok) throw new Error(`Upload complete ${completeRes.status}: ${await completeRes.text()}`);
     const complete = await completeRes.json() as any;
     console.log(`[runway:upload:video] complete, assetId=${uploadId}, url=${(complete.url || "").split("?")[0]}`);
@@ -416,7 +441,7 @@ export class RunwayDirectClient implements RunwayProvider {
   /** Download a video artifact to a Buffer */
   async downloadVideo(artifactUrl: string): Promise<Buffer> {
     console.log(`[runway:download] fetching ${artifactUrl.split("?")[0]}`);
-    const res = await fetch(artifactUrl);
+    const res = await timedFetch(artifactUrl, {}, TIMEOUT_ARTIFACT, "artifact download");
     if (!res.ok) throw new Error(`Download failed ${res.status}`);
     const buf = Buffer.from(await res.arrayBuffer());
     console.log(`[runway:download] ${buf.length} bytes received`);
@@ -426,9 +451,10 @@ export class RunwayDirectClient implements RunwayProvider {
   /** Check how many tasks are currently RUNNING or THROTTLED (counts toward concurrency limit) */
   async getActiveConcurrency(): Promise<number> {
     const proxyOpts = await this.getFetchOptions();
-    const res = await fetch(
+    const res = await timedFetch(
       `${API_BASE}/v1/tasks?asTeamId=${this.teamId}&limit=50`,
-      { headers: this.headers, ...proxyOpts }
+      { headers: this.headers, ...proxyOpts },
+      TIMEOUT_GET_TASK, "list tasks"
     );
     if (!res.ok) return 0; // On error, assume slot is available
     const data = await res.json() as any;
@@ -442,11 +468,11 @@ export class RunwayDirectClient implements RunwayProvider {
   async cancelTask(remoteTaskId: string): Promise<void> {
     console.log(`[runway:cancel] taskId=${remoteTaskId}`);
     const proxyOpts = await this.getFetchOptions();
-    await fetch(`${API_BASE}/v1/tasks/${remoteTaskId}/cancel?asTeamId=${this.teamId}`, {
+    await timedFetch(`${API_BASE}/v1/tasks/${remoteTaskId}/cancel?asTeamId=${this.teamId}`, {
       method: "POST",
       headers: this.headers,
       ...proxyOpts,
-    });
+    }, TIMEOUT_CANCEL, "cancel task");
   }
 }
 
