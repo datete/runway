@@ -18,7 +18,7 @@ model User {
   isActive       Boolean          @default(true) @map("is_active")
   maxConcurrency Int?             @map("max_concurrency")
   totalQuota     Int?             @map("total_quota")
-  maxDevices    Int?        @default(3) @map("max_devices")
+  maxDevices    Int?        @default(0) @map("max_devices")
   sessions      LoginSession[]
   jobs           RunwayJob[]
   devices       UserDevice[]

@@ -138,7 +138,7 @@ const promptHint = computed(() => {
 const canSubmit = computed(() => {
   if (!jwtToken.value) return false
   if (!prompt.value.trim()) return false
-  if (uploadedUrls.value.length === 0 && !(selectedModel.value === 'seedance' && refVideoUrl.value)) return false
+  if (batchMode.value && uploadedUrls.value.length === 0) return false
   if (loading.value || isUploading.value || batchSubmitting.value) return false
   if (quotaExceeded.value) return false
   if (promptLength.value > PROMPT_MAX_LENGTH) return false
@@ -152,7 +152,7 @@ const canSubmitReason = computed(() => {
   if (quotaExceeded.value) return quotaExceeded.value
   if (promptLength.value > PROMPT_MAX_LENGTH) return `提示词超出${PROMPT_MAX_LENGTH}字上限（当前${promptLength.value}字），请精简后再提交`
   if (!prompt.value.trim()) return '请输入提示词'
-  if (uploadedUrls.value.length === 0 && !(selectedModel.value === 'seedance' && refVideoUrl.value)) return '请上传参考图片或视频'
+  if (batchMode.value && uploadedUrls.value.length === 0) return '批量模式下请至少上传一张参考图（每张图 = 一个任务）'
   return ''
 })
 
@@ -1086,9 +1086,10 @@ const submit = async () => {
   loading.value = true
   try {
     const isSeedance = selectedModel.value === 'seedance'
+    const hasImage = uploadedUrls.value.length > 0
     const payload = {
       prompt: prompt.value.trim(),
-      mode: 'image_to_video',
+      mode: hasImage ? 'image_to_video' : 'text_to_video',
       model: isSeedance ? 'seedance_2' : undefined,
       exploreMode: creditMode.value ? false : exploreMode.value,
       duration: duration.value,
