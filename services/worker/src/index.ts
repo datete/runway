@@ -12,7 +12,10 @@ import { translateRunwayError } from './utils/errorTranslator';
 
 console.log("[runway-worker] started (single-trigger FIFO mode)");
 
-const pollQueue = new Queue("runway-poll", { connection: redis });
+const JOB_HISTORY_LIMIT = Number(process.env.BULLMQ_HISTORY_LIMIT) || 1000;
+const defaultJobOptions = { removeOnComplete: true, removeOnFail: JOB_HISTORY_LIMIT };
+const NO_REMOTE_RESET_MINUTES = Number(process.env.NO_REMOTE_RESET_MINUTES) || 10;
+const pollQueue = new Queue("runway-poll", { connection: redis, defaultJobOptions });
 
 /** Create a RunwayDirectClient for a specific account by ID */
 async function makeClientForAccount(accountId: string): Promise<RunwayDirectClient | null> {
@@ -122,12 +125,21 @@ async function recoverStuckJobs() {
           jobId: job.id,
           remoteTaskId: j.remoteTaskId,
           accountId: j.accountId || undefined,
-        }, { delay: 5000 });
+        }, { delay: 5000, removeOnComplete: true, removeOnFail: JOB_HISTORY_LIMIT });
         console.log(`[startup-recovery] ${job.id.slice(0,8)} ${j.status} -> poll queue`);
         continue;
       }
 
       // submitted/processing WITHOUT remoteTaskId -> reset to pending
+      const updatedAt = j.updatedAt ? new Date(j.updatedAt).getTime() : 0;
+      const startedAt = j.startedAt ? new Date(j.startedAt).getTime() : 0;
+      const lastTouch = Math.max(updatedAt, startedAt);
+      const ageMinutes = lastTouch ? (Date.now() - lastTouch) / 60000 : Infinity;
+      if (ageMinutes < NO_REMOTE_RESET_MINUTES) {
+        console.log(`[startup-recovery] ${job.id.slice(0,8)} ${j.status} has no remoteTaskId but is fresh (${ageMinutes.toFixed(1)}min), leaving as-is`);
+        continue;
+      }
+
       await prisma.runwayJob.update({
         where: { id: job.id },
         data: { status: "pending", errorMessage: null, accountId: null },
@@ -202,7 +214,7 @@ function startStuckSweep() {
             jobId: job.id,
             remoteTaskId: job.remoteTaskId,
             accountId: job.accountId || undefined,
-          }, { delay: 2000 });
+          }, { delay: 2000, removeOnComplete: true, removeOnFail: JOB_HISTORY_LIMIT });
           console.log(`[stuck-sweep] ${String(job.id).slice(0,8)} ${job.status} stale ${staleMin}min -> re-enqueued poll`);
         } else {
           await prisma.runwayJob.update({

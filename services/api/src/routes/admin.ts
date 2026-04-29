@@ -593,21 +593,29 @@ router.get("/dashboard", async (_req: Request, res: Response) => {
       prisma.user.count(),
       prisma.user.count({ where: { isActive: true } }),
       prisma.runwayJob.count({ where: { status: notDeleted } }),
-      prisma.runwayJob.count({ where: { createdAt: { gte: todayStart }, status: notDeleted } }),
+      prisma.runwayJob.count({ where: { createdAt: { gte: todayStart } } }),
       prisma.runwayJob.count({ where: { status: { in: ["pending", "queued"] } } }),
       prisma.runwayJob.count({ where: { status: { in: ["submitted", "processing"] } } }),
       prisma.runwayJob.count({ where: { status: "completed" } }),
       prisma.runwayJob.count({ where: { status: "failed" } }),
-      prisma.runwayJob.count({ where: { status: "completed", createdAt: { gte: todayStart } } }),
-      prisma.runwayJob.count({ where: { status: "failed", createdAt: { gte: todayStart } } }),
+      prisma.runwayJob.count({
+        where: {
+          finishedAt: { gte: todayStart },
+          OR: [
+            { status: "completed" },
+            { status: "deleted", OR: [{ resultUrl: { not: null } }, { videoUrl: { not: null } }] },
+          ],
+        },
+      }),
+      prisma.runwayJob.count({ where: { status: "failed", finishedAt: { gte: todayStart } } }),
       prisma.runwayJob.findMany({
         where: {
           OR: [
-            { createdAt: { gte: todayStart }, status: notDeleted },
-            { finishedAt: { gte: todayStart }, status: { in: ["completed", "failed"] } },
+            { createdAt: { gte: todayStart } },
+            { finishedAt: { gte: todayStart }, status: { in: ["completed", "failed", "deleted"] } },
           ],
         },
-        select: { userId: true, status: true, createdAt: true, finishedAt: true },
+        select: { userId: true, status: true, createdAt: true, finishedAt: true, resultUrl: true, videoUrl: true },
       }),
       prisma.runwayJob.count({ where: { status: "completed", finishedAt: { gte: hourAgo } } }),
       prisma.runwayJob.groupBy({ by: ["accountId"], where: { status: "completed", finishedAt: { gte: hourAgo }, accountId: { not: null } }, _count: { _all: true } }),
@@ -618,7 +626,7 @@ router.get("/dashboard", async (_req: Request, res: Response) => {
     const hourlyByUserMap: Record<string, number> = {};
     for (const e of hourlyByUser) { if (e.userId) hourlyByUserMap[e.userId] = e._count._all; }
 
-    // Per-user today stats: total = created today, completed/failed = finished today (finishedAt-based)
+    // Per-user today stats: total = created today including deleted; completion/failure are terminal visible states.
     const userTodayMap: Record<string, { total: number; completed: number; failed: number }> = {};
     for (const j of recentJobs as any[]) {
       const uid = j.userId || "__none__";
@@ -626,8 +634,9 @@ router.get("/dashboard", async (_req: Request, res: Response) => {
       const createdToday = j.createdAt && new Date(j.createdAt).getTime() >= todayStart.getTime();
       const finishedToday = j.finishedAt && new Date(j.finishedAt).getTime() >= todayStart.getTime();
       if (createdToday) userTodayMap[uid].total++;
-      if (createdToday && j.status === "completed") userTodayMap[uid].completed++;
-      if (createdToday && j.status === "failed") userTodayMap[uid].failed++;
+      const hasResult = !!(j.resultUrl || j.videoUrl);
+      if (finishedToday && (j.status === "completed" || (j.status === "deleted" && hasResult))) userTodayMap[uid].completed++;
+      if (finishedToday && j.status === "failed") userTodayMap[uid].failed++;
     }
 
     // Per-user total job counts (exclude deleted)

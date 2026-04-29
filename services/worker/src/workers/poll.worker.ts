@@ -13,7 +13,20 @@ function humanSubmitDelay(): number {
   return 45000 + Math.floor(Math.random() * 75000);
 }
 
-const pollQueue = new Queue('runway-poll', { connection });
+const JOB_HISTORY_LIMIT = Number(process.env.BULLMQ_HISTORY_LIMIT) || 1000;
+const pollQueue = new Queue('runway-poll', {
+  connection,
+  defaultJobOptions: { removeOnComplete: true, removeOnFail: JOB_HISTORY_LIMIT },
+});
+
+function pollJobOptions(jobId: string, delay: number, suffix = `${Date.now()}`) {
+  return {
+    jobId: `poll-${jobId}-${suffix}`,
+    delay,
+    removeOnComplete: true,
+    removeOnFail: JOB_HISTORY_LIMIT,
+  };
+}
 
 // Max auto-retries when remote task fails (prevents infinite loop)
 const MAX_REMOTE_RETRIES = 10;
@@ -127,7 +140,7 @@ new Worker('runway-poll', async (job: Job) => {
     console.warn(`[poll-worker] getTask error for job ${jobId.slice(0,8)}: ${errMsg}, retry in ${INTERVAL_ERROR/1000}s`);
     await pollQueue.add('poll', {
       jobId, remoteTaskId, accountId,
-    }, { jobId: `poll-${jobId}-${Date.now()}`, delay: INTERVAL_ERROR });
+    }, pollJobOptions(jobId, INTERVAL_ERROR));
     return;
   }
 
@@ -356,7 +369,7 @@ new Worker('runway-poll', async (job: Job) => {
     const delay = result.status === 'queued' ? INTERVAL_QUEUED : INTERVAL_PROCESSING;
     await pollQueue.add('poll', {
       jobId, remoteTaskId, accountId,
-    }, { jobId: `poll-${jobId}-${Date.now()}`, delay });
+    }, pollJobOptions(jobId, delay));
   }
 }, { connection, concurrency: 1 });
 
@@ -401,8 +414,7 @@ async function recoverStuckJobs() {
         remoteTaskId: job.remote_task_id,
         accountId: job.account_id,
       }, {
-        jobId: `poll-${job.id}-recovery-${Date.now()}`,
-        delay: 1000,
+        ...pollJobOptions(job.id, 1000, `recovery-${Date.now()}`),
       });
 
       // Touch updated_at so it doesn't get picked up again immediately

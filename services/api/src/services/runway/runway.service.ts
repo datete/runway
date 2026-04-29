@@ -291,11 +291,15 @@ export class RunwayService {
     await this._cancelRemote(job as any);
     // Clean up BullMQ jobs
     await this._cleanupQueues(id);
+    // Release account concurrency if deleting an active job.
+    if ((job as any).accountId) {
+      await this._releaseAccount((job as any).accountId, id);
+    }
     // Soft delete: mark as deleted instead of removing from DB
     // This preserves the record for accurate dashboard statistics
     return prisma.runwayJob.update({
       where: { id },
-      data: { status: "deleted", finishedAt: new Date() },
+      data: { status: "deleted", finishedAt: (job as any).finishedAt || new Date() },
     });
   }
 

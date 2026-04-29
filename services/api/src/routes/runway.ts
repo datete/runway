@@ -50,9 +50,15 @@ runwayRouter.delete("/tags/:tag", authMiddleware, async (req, res) => {
     const count = await prisma.runwayJob.count({ where });
     if (count === 0) return res.status(404).json({ error: "no jobs with this tag" });
     // Soft delete all
+    // Preserve finishedAt for completed tasks so deletion does not change generated stats.
+    const deleteTime = new Date();
+    await prisma.runwayJob.updateMany({
+      where: { ...where, finishedAt: null },
+      data: { finishedAt: deleteTime },
+    });
     const result = await prisma.runwayJob.updateMany({
       where,
-      data: { status: "deleted", finishedAt: new Date() },
+      data: { status: "deleted" },
     });
     res.json({ deleted: result.count, tag });
   } catch (e: any) {
@@ -226,7 +232,7 @@ runwayRouter.get("/token-status", authMiddleware, async (req, res) => {
       : null;
     const userMaxConcurrency = userRecord?.maxConcurrency ?? 2;
 
-    // Daily total (includes deleted — deletion does not decrement)
+    // Daily total (includes deleted - deletion does not decrement)
     let dailyUsed = 0;
     let dailyQuotaUsed = 0;
     let systemDailyTotal = 0;
@@ -238,7 +244,15 @@ runwayRouter.get("/token-status", authMiddleware, async (req, res) => {
         dailyUsed = await prisma.runwayJob.count({ where: { userId, createdAt: { gte: todayStart } } }).catch(() => 0);
         dailyQuotaUsed = await prisma.runwayJob.count({ where: { userId, createdAt: { gte: todayStart }, status: { notIn: ["deleted", "failed", "cancelled"] } } }).catch(() => 0);
       }
-      systemDailyTotal = await prisma.runwayJob.count({ where: { status: "completed", finishedAt: { gte: todayStart } } }).catch(() => 0);
+      systemDailyTotal = await prisma.runwayJob.count({
+        where: {
+          finishedAt: { gte: todayStart },
+          OR: [
+            { status: "completed" },
+            { status: "deleted", OR: [{ resultUrl: { not: null } }, { videoUrl: { not: null } }] },
+          ],
+        },
+      }).catch(() => 0);
     }
 
     // Total quota info

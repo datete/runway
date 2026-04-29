@@ -4,8 +4,19 @@ import { prisma, redis as connection, accountPool } from "../services/shared";
 import type { AccountEntry } from "../services/account-pool";
 import { translateRunwayError } from '../utils/errorTranslator';
 
-const pollQueue = new Queue("runway-poll", { connection });
-const submitQueue = new Queue("runway-submit", { connection });
+const JOB_HISTORY_LIMIT = Number(process.env.BULLMQ_HISTORY_LIMIT) || 1000;
+const defaultJobOptions = { removeOnComplete: true, removeOnFail: JOB_HISTORY_LIMIT };
+const pollQueue = new Queue("runway-poll", { connection, defaultJobOptions });
+const submitQueue = new Queue("runway-submit", { connection, defaultJobOptions });
+
+function pollJobOptions(jobId: string, delay: number) {
+  return {
+    jobId: `poll-${jobId}-${Date.now()}`,
+    delay,
+    removeOnComplete: true,
+    removeOnFail: JOB_HISTORY_LIMIT,
+  };
+}
 
 // ═══════════════════════════════════════════════════════════════
 // 人工行为模拟参数（所有延迟都在这里配置）
@@ -269,7 +280,7 @@ async function trySubmitOneOnAccount(account: AccountEntry): Promise<SubmitResul
     await pollQueue.add("poll", {
       jobId, remoteTaskId: dbJob.remoteTaskId,
       accountId: dbJob.accountId || account.id,
-    }, { jobId: `poll-${jobId}-${Date.now()}`, delay: 5000 });
+    }, pollJobOptions(jobId, 5000));
     return "submitted";
   }
 
@@ -332,6 +343,20 @@ async function trySubmitOneOnAccount(account: AccountEntry): Promise<SubmitResul
     // API 调用前三重检查（延迟期间情况可能已变）
     // ══════════════════════════════════════════════════════════
 
+    // Ensure this delayed submit still owns the job before calling the upstream API.
+    const ownedJob = await prisma.runwayJob.findUnique({
+      where: { id: jobId },
+      select: { status: true, accountId: true },
+    });
+    if (!ownedJob || ownedJob.status !== "submitted" || ownedJob.accountId !== account.id) {
+      console.warn(
+        `[submit-worker] job ${jobId.slice(0,8)} ownership changed before submit ` +
+        `(status=${ownedJob?.status || "missing"}, account=${ownedJob?.accountId || "none"}), aborting ${account.label}`
+      );
+      await accountPool.releaseNoJob(account.id);
+      return "no_pending";
+    }
+
     // 检查1: 账号冷却
     const acctCooldown = await connection.get(`account:cooldown:${account.id}`);
     if (acctCooldown) {
@@ -393,7 +418,7 @@ async function trySubmitOneOnAccount(account: AccountEntry): Promise<SubmitResul
     });
 
     const _proc = await prisma.runwayJob.updateMany({
-      where: { id: jobId, status: "submitted" },
+      where: { id: jobId, status: "submitted", accountId: account.id },
       data: { remoteTaskId, status: "processing" },
     });
     if (_proc.count === 0) {
@@ -407,7 +432,7 @@ async function trySubmitOneOnAccount(account: AccountEntry): Promise<SubmitResul
       try {
         await pollQueue.add("poll", {
           jobId, remoteTaskId, accountId: account.id,
-        }, { jobId: `poll-${jobId}-${Date.now()}`, delay: 15000 });
+        }, pollJobOptions(jobId, 15000));
         pollAdded = true;
         break;
       } catch (pollErr: any) {
