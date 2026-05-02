@@ -17,6 +17,7 @@ interface AdminUser {
 }
 interface AdminJob {
   id: string; status: string; prompt: string; duration: number | null
+  resultUrl?: string | null; videoUrl?: string | null
   createdAt: string; user?: { id: string; username: string }
   account?: { id: string; label: string; tokenShort: string }
 }
@@ -316,6 +317,12 @@ const dashCards = computed(() => [
 ])
 
 const formatTime = (v: string) => new Date(v).toLocaleString('zh-CN', { hour12: false })
+const adminRunwayUrl = (row: AdminJob) => row.videoUrl || (row.resultUrl?.startsWith('http') ? row.resultUrl : '')
+const adminCacheUrl = (row: AdminJob) => row.resultUrl?.startsWith('/img/') ? row.resultUrl : ''
+const openExternalUrl = (url: string) => {
+  if (!url) return
+  window.open(url, '_blank', 'noopener,noreferrer')
+}
 
 /* ── Fetch ── */
 const fetchDashboard = async () => {
@@ -874,6 +881,15 @@ const jobColumns = [
   { title: '状态', key: 'status', width: 100, render: (row: AdminJob) => h(NTag, { type: statusType[row.status] ?? 'default', size: 'small', round: true, bordered: false }, () => statusLabel[row.status] || row.status) },
   { title: '时长', key: 'duration', width: 70, render: (row: AdminJob) => row.duration ? `${row.duration}s` : '—' },
   { title: '提示词', key: 'prompt', ellipsis: { tooltip: true } },
+  { title: '视频链接', key: 'links', width: 150, render: (row: AdminJob) => {
+    const runwayUrl = adminRunwayUrl(row)
+    const cacheUrl = adminCacheUrl(row)
+    if (!runwayUrl && !cacheUrl) return '—'
+    return h('div', { class: 'flex gap-1' }, [
+      cacheUrl ? h(NButton, { size: 'tiny', tertiary: true, onClick: () => openExternalUrl(cacheUrl) }, () => '缓存') : null,
+      runwayUrl ? h(NButton, { size: 'tiny', tertiary: true, type: 'success', onClick: () => openExternalUrl(runwayUrl) }, () => 'Runway') : null,
+    ])
+  } },
   { title: '时间', key: 'createdAt', width: 170, render: (row: AdminJob) => formatTime(row.createdAt) },
 ]
 
@@ -1426,7 +1442,7 @@ onUnmounted(() => { if (autoRefreshTimer) clearInterval(autoRefreshTimer) })
                 <span class="ml-auto text-xs text-white/30">当前页 {{ jobsPage }} / {{ Math.ceil(adminJobsTotal / 20) || 1 }}</span>
               </div>
               <div class="table-shell overflow-hidden rounded-xl border border-white/[0.08]">
-                <NDataTable :columns="jobColumns" :data="adminJobs" :loading="jobsLoading" :scroll-x="800" size="small" />
+                <NDataTable :columns="jobColumns" :data="adminJobs" :loading="jobsLoading" :scroll-x="950" size="small" />
               </div>
               <div class="mt-4 flex justify-center">
                 <NPagination v-model:page="jobsPage" :page-count="Math.ceil(adminJobsTotal / 20) || 1" />

@@ -66,6 +66,12 @@ export class RunwayController {
         FROM runway_jobs
         WHERE status IN ('pending', 'queued', 'submitted', 'processing')
       `) as any[];
+      const hourlyCompleted = await prisma.runwayJob.count({
+        where: {
+          status: "completed",
+          finishedAt: { gte: new Date(Date.now() - 3600_000) },
+        },
+      }).catch(() => 0);
 
       const positionMap = new Map<string, number>();
       let queueTotal = 0;
@@ -74,11 +80,18 @@ export class RunwayController {
         queueTotal = Number(row.total);
       }
 
-      const enriched = result.jobs.map((job: any) => ({
-        ...job,
-        queuePosition: ACTIVE_STATUSES.includes(job.status) ? (positionMap.get(job.id) || null) : null,
-        queueTotal,
-      }));
+      const enriched = result.jobs.map((job: any) => {
+        const queuePosition = ACTIVE_STATUSES.includes(job.status) ? (positionMap.get(job.id) || null) : null;
+        return {
+          ...job,
+          queuePosition,
+          queueTotal,
+          hourlyCompleted,
+          etaMinutes: queuePosition && hourlyCompleted > 0
+            ? Math.max(1, Math.ceil((queuePosition / hourlyCompleted) * 60))
+            : null,
+        };
+      });
 
       res.json({ jobs: enriched, total: result.total, page: result.page, pageSize: result.pageSize, counts: result.counts });
     } catch (e) {

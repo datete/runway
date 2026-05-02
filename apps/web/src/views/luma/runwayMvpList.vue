@@ -29,6 +29,8 @@ interface RunwayJob {
   finishedAt: string | null
   queuePosition: number | null
   queueTotal: number | null
+  hourlyCompleted?: number | null
+  etaMinutes?: number | null
   progress: number
   priority?: number | null
   username?: string | null
@@ -304,6 +306,26 @@ const formatElapsed = (job: RunwayJob) => {
   const seconds = Math.max(0, Math.round((new Date(job.finishedAt).getTime() - new Date(job.startedAt).getTime()) / 1000))
   if (seconds < 60) return `${seconds} 秒`
   return `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`
+}
+
+const formatEtaMinutes = (minutes?: number | null) => {
+  if (!minutes || minutes <= 0) return ''
+  if (minutes < 60) return `约 ${minutes} 分钟`
+  const hours = Math.floor(minutes / 60)
+  const rest = minutes % 60
+  return rest > 0 ? `约 ${hours} 小时 ${rest} 分钟` : `约 ${hours} 小时`
+}
+
+const etaLabel = (job: RunwayJob) => {
+  if (!isActive(job.status)) return ''
+  const eta = formatEtaMinutes(job.etaMinutes)
+  if (eta) return eta
+  return job.hourlyCompleted === 0 ? '近1小时暂无完成任务' : '等待速度数据'
+}
+
+const etaHint = (job: RunwayJob) => {
+  const speed = job.hourlyCompleted ?? 0
+  return speed > 0 ? `按近1小时 ${speed} 个/小时估算` : '近1小时完成速度不足，暂按排队位置展示'
 }
 
 const stopPolling = () => {
@@ -1076,6 +1098,16 @@ onUnmounted(() => stopPolling())
                 <span v-if="formatElapsed(job)" class="text-slate-500">耗时 {{ formatElapsed(job) }}</span>
               </div>
 
+              <div
+                v-if="isActive(job.status)"
+                class="mb-2.5 flex flex-wrap items-center gap-1.5 rounded-lg border border-cyan-400/12 bg-cyan-500/[0.06] px-2.5 py-1.5 text-[11px] text-cyan-200/80"
+              >
+                <SvgIcon icon="ri:timer-flash-line" class="text-sm text-cyan-300/80" />
+                <span class="font-medium">预计 {{ etaLabel(job) }}</span>
+                <span v-if="queuePosition(job) !== null" class="text-cyan-100/45">第 {{ queuePosition(job) }}/{{ job.queueTotal || '?' }} 位</span>
+                <span class="text-cyan-100/35">{{ etaHint(job) }}</span>
+              </div>
+
               <!-- Error message -->
               <div
                 v-if="job.errorMessage"
@@ -1497,8 +1529,8 @@ onUnmounted(() => stopPolling())
           <SvgIcon icon="ri:cloud-line" class="text-base text-emerald-400" />
         </div>
         <div>
-          <p class="text-[13px] font-medium text-white/80">直连下载</p>
-          <p class="text-[11px] text-white/30">从源站直接下载，可能较慢</p>
+          <p class="text-[13px] font-medium text-white/80">Runway 原链下载</p>
+          <p class="text-[11px] text-white/30">从 Runway 生成链接直接下载，可能较慢</p>
         </div>
       </button>
       <p v-if="!directUrl" class="text-center text-[10px] text-white/20">暂无直连地址</p>
