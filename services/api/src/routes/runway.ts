@@ -9,10 +9,91 @@ import path from "path";
 const ctrl = new RunwayController();
 export const runwayRouter = Router();
 
+const UPLOAD_ROOT = "/root/runway/uploads";
+
+function safeDownloadName(id: string) {
+  return `runway-${id.slice(0, 8)}.mp4`;
+}
+
+function localUploadPathFromUrl(url?: string | null) {
+  if (!url || !url.startsWith("/img/")) return null;
+  try {
+    const relative = decodeURIComponent(url.slice("/img/".length)).replace(/^[/\\]+/, "");
+    const resolvedRoot = path.resolve(UPLOAD_ROOT);
+    const resolvedPath = path.resolve(resolvedRoot, relative);
+    if (resolvedPath !== resolvedRoot && !resolvedPath.startsWith(resolvedRoot + path.sep)) return null;
+    return resolvedPath;
+  } catch {
+    return null;
+  }
+}
+
+async function streamRemoteDownload(remoteUrl: string, filename: string, res: any) {
+  let parsed: URL;
+  try {
+    parsed = new URL(remoteUrl);
+  } catch {
+    return res.status(400).json({ error: "invalid download url" });
+  }
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    return res.status(400).json({ error: "invalid download url" });
+  }
+
+  const fetchMod = await import("node-fetch");
+  const fetchFn = fetchMod.default;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 120000);
+  try {
+    const upstream = await fetchFn(remoteUrl, { signal: controller.signal as any });
+    if (!upstream.ok) {
+      const text = await upstream.text().catch(() => "");
+      return res.status(upstream.status).json({ error: `remote download failed ${upstream.status}`, detail: text.slice(0, 200) });
+    }
+    res.setHeader("Content-Type", upstream.headers.get("content-type") || "video/mp4");
+    const len = upstream.headers.get("content-length");
+    if (len) res.setHeader("Content-Length", len);
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    upstream.body.pipe(res);
+    upstream.body.on("end", () => clearTimeout(timer));
+    upstream.body.on("error", () => clearTimeout(timer));
+  } catch (e: any) {
+    clearTimeout(timer);
+    if (!res.headersSent) {
+      const msg = e?.name === "AbortError" ? "remote download timeout" : (e?.message || "remote download failed");
+      res.status(502).json({ error: msg });
+    } else {
+      res.end();
+    }
+  }
+}
+
 // Jobs routes — require auth
 runwayRouter.post("/jobs", authMiddleware, (req, res) => ctrl.createJob(req, res));
 runwayRouter.post("/jobs/batch", authMiddleware, (req, res) => ctrl.batchCreateJobs(req, res));
 runwayRouter.get("/jobs", authMiddleware, (req, res) => ctrl.listJobs(req, res));
+runwayRouter.get("/jobs/:id/download", authMiddleware, async (req, res) => {
+  try {
+    const job = await prisma.runwayJob.findUnique({ where: { id: req.params.id } }) as any;
+    if (!job || job.status === "deleted") return res.status(404).json({ error: "任务不存在" });
+    if (req.user?.role !== "admin" && req.user?.id && job.userId !== req.user.id) {
+      return res.status(403).json({ error: "无权下载该任务" });
+    }
+
+    const filename = safeDownloadName(job.id);
+    const localPath = localUploadPathFromUrl(job.resultUrl);
+    if (localPath && fs.existsSync(localPath) && fs.statSync(localPath).isFile()) {
+      return res.download(localPath, filename);
+    }
+
+    const remoteUrl = job.videoUrl || (typeof job.resultUrl === "string" && job.resultUrl.startsWith("http") ? job.resultUrl : "");
+    if (!remoteUrl) {
+      return res.status(404).json({ error: "暂无可下载的视频文件" });
+    }
+    return streamRemoteDownload(remoteUrl, filename, res);
+  } catch (e: any) {
+    if (!res.headersSent) res.status(500).json({ error: e.message || "download failed" });
+  }
+});
 runwayRouter.get("/jobs/:id", authMiddleware, (req, res) => ctrl.getJob(req, res));
 runwayRouter.post("/jobs/:id/cancel", authMiddleware, (req, res) => ctrl.cancelJob(req, res));
 runwayRouter.post("/jobs/:id/retry", authMiddleware, (req, res) => ctrl.retryJob(req, res));

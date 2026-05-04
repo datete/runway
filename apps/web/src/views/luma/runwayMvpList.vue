@@ -508,6 +508,24 @@ const directUrl = computed(() => {
   return ''
 })
 
+const hasServerCache = computed(() => {
+  const url = downloadJob.value?.resultUrl || ''
+  return url.startsWith('/img/')
+})
+
+const hasServerDownload = computed(() => {
+  const job = downloadJob.value
+  return !!(job?.resultUrl || job?.videoUrl)
+})
+
+const serverDownloadUrl = computed(() => {
+  const job = downloadJob.value
+  return job ? `/api/runway/jobs/${job.id}/download?source=server` : ''
+})
+
+const serverDownloadTitle = computed(() => hasServerCache.value ? '服务器缓存下载' : '服务器中转下载')
+const serverDownloadHint = computed(() => hasServerCache.value ? '从服务器缓存文件下载，稳定快速' : '由服务器转发源文件，避免浏览器拦截')
+
 const prioritizeJob = async (jobId: string) => {
   try {
     const res = await fetch('/api/runway/jobs/' + jobId + '/prioritize', {
@@ -553,26 +571,52 @@ const deprioritizeJob = async (jobId: string) => {
 
 const downloadLoading = ref(false)
 
-const doDownload = async (url: string, filename: string) => {
+const saveBlob = (blob: Blob, filename: string) => {
+  const objectUrl = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = objectUrl
+  anchor.download = filename
+  document.body.appendChild(anchor)
+  anchor.click()
+  document.body.removeChild(anchor)
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 1000)
+}
+
+const openDirectDownload = (url: string, filename: string) => {
+  if (!url) return
+  showDownloadPicker.value = false
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  anchor.target = '_blank'
+  anchor.rel = 'noopener'
+  document.body.appendChild(anchor)
+  anchor.click()
+  document.body.removeChild(anchor)
+  message.success('已打开直连下载')
+}
+
+const doDownload = async (url: string, filename: string, withAuth = false, fallbackUrl = '') => {
   showDownloadPicker.value = false
   downloadLoading.value = true
   message.info('开始下载...')
   try {
-    const res = await fetch(url)
+    const res = await fetch(url, withAuth ? { headers: authHeaders() } : undefined)
     if (!res.ok) throw new Error('下载失败')
     const blob = await res.blob()
-    const objectUrl = URL.createObjectURL(blob)
-    const anchor = document.createElement('a')
-    anchor.href = objectUrl
-    anchor.download = filename
-    anchor.click()
-    URL.revokeObjectURL(objectUrl)
+    saveBlob(blob, filename)
     message.success('下载完成')
   } catch {
-    message.warning('浏览器下载失败，将在新窗口打开')
-    window.open(url, '_blank')
+    if (fallbackUrl) {
+      message.warning('服务器下载失败，已尝试直连下载')
+      openDirectDownload(fallbackUrl, filename)
+    } else {
+      message.warning('浏览器下载失败，将在新窗口打开')
+      window.open(url, '_blank', 'noopener')
+    }
+  } finally {
+    downloadLoading.value = false
   }
-  downloadLoading.value = false
 }
 
 // Legacy single download for backward compat
@@ -625,7 +669,7 @@ const downloadStatus = ref<{ active: boolean; phase: 'fetching' | 'zipping' | 'd
 const MAX_BATCH_DOWNLOAD = 20
 
 const downloadableJobs = computed(() => {
-  return allJobs.value.filter((j) => selected.value.has(j.id) && j.status === 'completed' && j.resultUrl)
+  return allJobs.value.filter((j) => selected.value.has(j.id) && j.status === 'completed' && (j.resultUrl || j.videoUrl))
 })
 
 const batchDownloadDisabled = computed(() => {
@@ -654,7 +698,7 @@ const handleBatchDownload = async () => {
     const job = targets[i]
     downloadStatus.value = { ...downloadStatus.value!, current: i + 1 }
     try {
-      const blob = await fetch(job.resultUrl!).then((r) => {
+      const blob = await fetch(`/api/runway/jobs/${job.id}/download?source=server`, { headers: authHeaders() }).then((r) => {
         if (!r.ok) throw new Error('fetch failed')
         return r.blob()
       })
@@ -1508,22 +1552,22 @@ onUnmounted(() => stopPolling())
   <NModal v-model:show="showDownloadPicker" preset="card" :title="'下载视频'" style="width: 340px; background: rgba(15,15,25,0.98); border: 1px solid rgba(255,255,255,0.06); border-radius: 16px;" :segmented="{ content: true }">
     <div v-if="downloadJob" class="space-y-3 py-1">
       <button
-        v-if="downloadJob.resultUrl && downloadJob.resultUrl.startsWith('/img/')"
+        v-if="hasServerDownload"
         class="flex w-full items-center gap-3 rounded-xl border border-sky-400/15 bg-sky-500/[0.06] px-4 py-3 text-left transition-all hover:border-sky-400/30 hover:bg-sky-500/12 active:scale-[0.98]"
-        @click="doDownload(downloadJob.resultUrl!, `video-${downloadJob.id.slice(0,8)}.mp4`)"
+        @click="doDownload(serverDownloadUrl, `video-${downloadJob.id.slice(0,8)}.mp4`, true, directUrl)"
       >
         <div class="flex h-9 w-9 items-center justify-center rounded-lg bg-sky-500/15">
           <SvgIcon icon="ri:server-line" class="text-base text-sky-400" />
         </div>
         <div>
-          <p class="text-[13px] font-medium text-white/80">服务器缓存下载</p>
-          <p class="text-[11px] text-white/30">从本地服务器下载，速度快</p>
+          <p class="text-[13px] font-medium text-white/80">{{ serverDownloadTitle }}</p>
+          <p class="text-[11px] text-white/30">{{ serverDownloadHint }}</p>
         </div>
       </button>
       <button
         v-if="directUrl"
         class="flex w-full items-center gap-3 rounded-xl border border-emerald-400/15 bg-emerald-500/[0.06] px-4 py-3 text-left transition-all hover:border-emerald-400/30 hover:bg-emerald-500/12 active:scale-[0.98]"
-        @click="doDownload(directUrl, `video-${downloadJob.id.slice(0,8)}-hd.mp4`)"
+        @click="openDirectDownload(directUrl, `video-${downloadJob.id.slice(0,8)}-hd.mp4`)"
       >
         <div class="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-500/15">
           <SvgIcon icon="ri:cloud-line" class="text-base text-emerald-400" />
@@ -1533,7 +1577,8 @@ onUnmounted(() => stopPolling())
           <p class="text-[11px] text-white/30">从 Runway 生成链接直接下载，可能较慢</p>
         </div>
       </button>
-      <p v-if="!directUrl" class="text-center text-[10px] text-white/20">暂无直连地址</p>
+      <p v-if="!directUrl && hasServerDownload" class="text-center text-[10px] text-white/20">当前任务只有服务器下载地址</p>
+      <p v-if="!directUrl && !hasServerDownload" class="text-center text-[10px] text-white/20">暂无下载地址</p>
     </div>
   </NModal>
 
