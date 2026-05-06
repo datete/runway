@@ -22,6 +22,7 @@ interface TokenStatus {
   cooldownTtl: number
 }
 const MAX_IMAGES = 4
+const HAPPYHORSE_MAX_IMAGES = 1
 const BATCH_MAX_IMAGES = 10
 const batchMode = ref(false)
 const batchSubmitting = ref(false)
@@ -41,9 +42,14 @@ const refVideoPreview = ref('')
 const exploreMode = ref(true)
 const creditMode = ref(false)  // 积分生成模式（管理员专用，默认关闭 = 免费无限模式）
 const isAdmin = computed(() => jwtRole.value === "admin")
-const selectedModel = ref<'kling' | 'seedance'>('kling')
+type VideoModel = 'kling' | 'seedance' | 'happyhorse'
+type HappyHorseRatio = '9:16' | '16:9' | '1:1' | '4:3' | '3:4'
+
+const selectedModel = ref<VideoModel>('kling')
 const duration = ref(5)
 const resolution = ref('1076x1920')
+const happyHorseRatio = ref<HappyHorseRatio>('9:16')
+const happyHorseResolution = ref<'720p' | '1080p'>('1080p')
 const quality = ref('std')
 const sound = ref(false)
 const cfgScale = ref(0.5)
@@ -58,16 +64,44 @@ const standardResolutions = [
   { value: '720x1280', label: '9:16', desc: '竖屏 720p', iconW: 20, iconH: 34 },
   { value: '1280x720', label: '16:9', desc: '横屏 720p', iconW: 34, iconH: 20 },
 ]
+const happyHorseRatios = [
+  { value: '9:16', label: '9:16', desc: '竖屏', iconW: 20, iconH: 34 },
+  { value: '16:9', label: '16:9', desc: '横屏', iconW: 34, iconH: 20 },
+  { value: '1:1', label: '1:1', desc: '方形', iconW: 26, iconH: 26 },
+  { value: '4:3', label: '4:3', desc: '经典', iconW: 30, iconH: 23 },
+  { value: '3:4', label: '3:4', desc: '竖幅', iconW: 23, iconH: 30 },
+]
+const happyHorseResolutionOptions = [
+  { value: '720p', label: '720p' },
+  { value: '1080p', label: '1080p' },
+] as const
 const resolutionOptions = computed(() => {
   if (selectedModel.value === 'seedance') return [{ value: '720p', label: '9:16', desc: '720p', iconW: 20, iconH: 34 }]
+  if (selectedModel.value === 'happyhorse') return happyHorseRatios
   if (quality.value === 'standard') return standardResolutions
   return stdResolutions
 })
+const selectedAspectValue = computed(() => selectedModel.value === 'happyhorse' ? happyHorseRatio.value : resolution.value)
+const selectAspectOption = (value: string) => {
+  if (selectedModel.value === 'happyhorse') {
+    happyHorseRatio.value = value as HappyHorseRatio
+  } else {
+    resolution.value = value
+  }
+}
 
 watch(selectedModel, (m) => {
   if (m === 'seedance') {
     resolution.value = '720p'
     quality.value = 'std'
+  } else if (m === 'happyhorse') {
+    happyHorseRatio.value = '9:16'
+    quality.value = 'std'
+    happyHorseResolution.value = '1080p'
+    if (!batchMode.value && images.value.length > HAPPYHORSE_MAX_IMAGES) {
+      images.value = images.value.slice(0, HAPPYHORSE_MAX_IMAGES)
+    }
+    removeRefVideo()
   } else {
     resolution.value = '1076x1920'
     removeRefVideo()
@@ -75,7 +109,7 @@ watch(selectedModel, (m) => {
 })
 
 watch(quality, (q) => {
-  if (selectedModel.value === 'seedance') return
+  if (selectedModel.value !== 'kling') return
   if (q === 'standard' && !standardResolutions.find(r => r.value === resolution.value)) resolution.value = '720x1280'
   if (q !== 'standard' && resolution.value !== '1076x1920') resolution.value = '1076x1920'
 })
@@ -88,10 +122,17 @@ const durationHints: Record<number, string> = {
   15: '适合复杂场景、长镜头叙事，生成时间较长',
 }
 
-const modelHints: Record<string, string> = {
+const modelHints: Record<VideoModel, string> = {
   kling: '可灵 3.0 Pro — 高画质 1080p，支持标准/Pro模式，精确提示词控制',
   seedance: 'Seedance 2.0 — ByteDance 出品，720p，支持参考图+视频，自带音效生成',
+  happyhorse: 'HappyHorse 1.0 — 支持文生视频和起始帧图生视频，可选比例与 720p/1080p',
 }
+
+const selectedModelLabel = computed(() => {
+  if (selectedModel.value === 'seedance') return 'Seedance 2.0'
+  if (selectedModel.value === 'happyhorse') return 'HappyHorse 1.0'
+  return '可灵 3.0'
+})
 
 
 
@@ -122,7 +163,8 @@ const totalQuota = ref<number | null>(null)
 
 const isUploading = computed(() => images.value.some((item) => item.uploading))
 const uploadedUrls = computed(() => images.value.filter((item) => item.url).map((item) => item.url))
-const remainingSlots = computed(() => Math.max(0, (batchMode.value ? BATCH_MAX_IMAGES : MAX_IMAGES) - images.value.length))
+const modelMaxImages = computed(() => selectedModel.value === 'happyhorse' ? HAPPYHORSE_MAX_IMAGES : MAX_IMAGES)
+const remainingSlots = computed(() => Math.max(0, (batchMode.value ? BATCH_MAX_IMAGES : modelMaxImages.value) - images.value.length))
 
 
 const promptLength = computed(() => prompt.value.length)
@@ -1086,20 +1128,21 @@ const submit = async () => {
   loading.value = true
   try {
     const isSeedance = selectedModel.value === 'seedance'
+    const isHappyHorse = selectedModel.value === 'happyhorse'
     const hasImage = uploadedUrls.value.length > 0
     const payload = {
       prompt: prompt.value.trim(),
       mode: hasImage ? 'image_to_video' : 'text_to_video',
-      model: isSeedance ? 'seedance_2' : undefined,
+      model: isSeedance ? 'seedance_2' : isHappyHorse ? 'happyhorse_1_0' : undefined,
       exploreMode: creditMode.value ? false : exploreMode.value,
       duration: duration.value,
-      resolution: resolution.value || undefined,
-      quality: isSeedance ? 'std' : quality.value,
-      cfgScale: isSeedance ? undefined : cfgScale.value,
-      sound: sound.value,
+      resolution: isHappyHorse ? happyHorseRatio.value : (resolution.value || undefined),
+      quality: isHappyHorse ? happyHorseResolution.value : isSeedance ? 'std' : quality.value,
+      cfgScale: isSeedance || isHappyHorse ? undefined : cfgScale.value,
+      sound: isHappyHorse ? undefined : sound.value,
       remark: remark.value.trim() || undefined,
       imageUrls: uploadedUrls.value,
-      videoUrl: refVideoUrl.value || undefined,
+      videoUrl: isHappyHorse ? undefined : (refVideoUrl.value || undefined),
     }
     const res = await fetch('/api/runway/jobs', {
       method: 'POST',
@@ -1134,18 +1177,19 @@ const batchSubmit = async () => {
   batchProgress.value = { current: 0, total: urls.length, success: 0, fail: 0 }
   let lastBatchErrorMsg = ''
   const isSeedance = selectedModel.value === 'seedance'
+  const isHappyHorse = selectedModel.value === 'happyhorse'
   const basePayload = {
     prompt: prompt.value.trim(),
     mode: 'image_to_video',
-    model: isSeedance ? 'seedance_2' : undefined,
+    model: isSeedance ? 'seedance_2' : isHappyHorse ? 'happyhorse_1_0' : undefined,
     exploreMode: creditMode.value ? false : exploreMode.value,
     duration: duration.value,
-    resolution: resolution.value || undefined,
-    quality: isSeedance ? 'std' : quality.value,
-    cfgScale: isSeedance ? undefined : cfgScale.value,
-    sound: sound.value,
+    resolution: isHappyHorse ? happyHorseRatio.value : (resolution.value || undefined),
+    quality: isHappyHorse ? happyHorseResolution.value : isSeedance ? 'std' : quality.value,
+    cfgScale: isSeedance || isHappyHorse ? undefined : cfgScale.value,
+    sound: isHappyHorse ? undefined : sound.value,
     remark: remark.value.trim() || undefined,
-    videoUrl: refVideoUrl.value || undefined,
+    videoUrl: isHappyHorse ? undefined : (refVideoUrl.value || undefined),
   }
   for (let i = 0; i < urls.length; i++) {
     batchProgress.value.current = i + 1
@@ -1222,7 +1266,7 @@ onUnmounted(() => {
         </div>
         <div class="flex flex-col">
           <span class="text-sm font-semibold text-white/90 tracking-wide">视频创作</span>
-          <span class="text-[10px] text-white/35 leading-tight">{{ selectedModel === 'seedance' ? 'Seedance 2.0' : '可灵 3.0' }} · {{ batchMode ? '批量' : '单任务' }}</span>
+          <span class="text-[10px] text-white/35 leading-tight">{{ selectedModelLabel }} · {{ batchMode ? '批量' : '单任务' }}</span>
         </div>
       </div>
       <div class="flex items-center gap-2">
@@ -1259,7 +1303,7 @@ onUnmounted(() => {
             {{ batchMode ? '批量模式 — 每张图一个任务' : '单任务模式' }}
           </span>
           <span class="text-[9px]" :class="batchMode ? 'text-violet-300/40' : 'text-white/25'">
-            {{ batchMode ? `可上传最多 ${BATCH_MAX_IMAGES} 张图片` : `最多 ${MAX_IMAGES} 张参考图` }}
+            {{ batchMode ? `可上传最多 ${BATCH_MAX_IMAGES} 张图片` : selectedModel === 'happyhorse' ? `最多 ${HAPPYHORSE_MAX_IMAGES} 张起始帧` : `最多 ${MAX_IMAGES} 张参考图` }}
           </span>
         </div>
       </div>
@@ -1367,7 +1411,7 @@ onUnmounted(() => {
 
     <!-- 参考图片 - 拖拽上传 -->
     <div class="flex flex-col gap-1.5">
-      <label class="section-label">{{ batchMode ? "批量图片 *（每张图 = 一个任务）" : selectedModel === 'seedance' ? '参考图片（可选，可上传多张）' : `参考图片 *（最多 ${MAX_IMAGES} 张）` }}</label>
+      <label class="section-label">{{ batchMode ? "批量图片 *（每张图 = 一个任务）" : selectedModel === 'seedance' ? '参考图片（可选，可上传多张）' : selectedModel === 'happyhorse' ? `起始帧（可选，最多 ${HAPPYHORSE_MAX_IMAGES} 张）` : `参考图片 *（最多 ${MAX_IMAGES} 张）` }}</label>
       <div v-if="images.length > 0" class="mb-0.5 flex items-center justify-between">
         <p class="text-[10px] text-white/30">
           已上传 {{ uploadedUrls.length }}/{{ images.length }} 张
@@ -1481,7 +1525,7 @@ onUnmounted(() => {
       <label class="section-label">模型</label>
       <div class="grid grid-cols-2 gap-2">
         <button
-          class="group flex items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left transition-all duration-200"
+          class="group flex min-w-0 items-center gap-2 rounded-xl border px-2.5 py-2.5 text-left transition-all duration-200"
           :class="selectedModel === 'kling'
             ? 'border-sky-400/40 bg-gradient-to-br from-sky-500/[0.08] to-blue-500/[0.05] shadow-md shadow-sky-500/8'
             : 'border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12] hover:bg-white/[0.04]'"
@@ -1492,13 +1536,13 @@ onUnmounted(() => {
             <SvgIcon icon="ri:video-ai-line" class="text-base"
               :class="selectedModel === 'kling' ? 'text-sky-400' : 'text-white/30'" />
           </div>
-          <div class="flex flex-col min-w-0">
-            <span class="text-[11px] font-semibold" :class="selectedModel === 'kling' ? 'text-sky-300' : 'text-white/50'">可灵 3.0</span>
-            <span class="text-[9px]" :class="selectedModel === 'kling' ? 'text-sky-400/50' : 'text-white/25'">最高 1080p</span>
+          <div class="flex min-w-0 flex-col">
+            <span class="truncate whitespace-nowrap text-[11px] font-semibold" :class="selectedModel === 'kling' ? 'text-sky-300' : 'text-white/50'">可灵 3.0</span>
+            <span class="truncate whitespace-nowrap text-[9px]" :class="selectedModel === 'kling' ? 'text-sky-400/50' : 'text-white/25'">最高 1080p</span>
           </div>
         </button>
         <button
-          class="group flex items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left transition-all duration-200"
+          class="group flex min-w-0 items-center gap-2 rounded-xl border px-2.5 py-2.5 text-left transition-all duration-200"
           :class="selectedModel === 'seedance'
             ? 'border-emerald-400/40 bg-gradient-to-br from-emerald-500/[0.08] to-teal-500/[0.05] shadow-md shadow-emerald-500/8'
             : 'border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12] hover:bg-white/[0.04]'"
@@ -1509,9 +1553,26 @@ onUnmounted(() => {
             <SvgIcon icon="ri:seedling-line" class="text-base"
               :class="selectedModel === 'seedance' ? 'text-emerald-400' : 'text-white/30'" />
           </div>
-          <div class="flex flex-col min-w-0">
-            <span class="text-[11px] font-semibold" :class="selectedModel === 'seedance' ? 'text-emerald-300' : 'text-white/50'">Seedance 2.0</span>
-            <span class="text-[9px]" :class="selectedModel === 'seedance' ? 'text-emerald-400/50' : 'text-white/25'">720p · 含音效</span>
+          <div class="flex min-w-0 flex-col">
+            <span class="truncate whitespace-nowrap text-[11px] font-semibold" :class="selectedModel === 'seedance' ? 'text-emerald-300' : 'text-white/50'">Seedance 2.0</span>
+            <span class="truncate whitespace-nowrap text-[9px]" :class="selectedModel === 'seedance' ? 'text-emerald-400/50' : 'text-white/25'">720p · 含音效</span>
+          </div>
+        </button>
+        <button
+          class="group col-span-2 flex min-w-0 items-center gap-2 rounded-xl border px-2.5 py-2.5 text-left transition-all duration-200"
+          :class="selectedModel === 'happyhorse'
+            ? 'border-fuchsia-400/40 bg-gradient-to-br from-fuchsia-500/[0.08] to-rose-500/[0.05] shadow-md shadow-fuchsia-500/8'
+            : 'border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12] hover:bg-white/[0.04]'"
+          @click="selectedModel = 'happyhorse'"
+        >
+          <div class="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg transition-all"
+            :class="selectedModel === 'happyhorse' ? 'bg-fuchsia-500/20' : 'bg-white/[0.05]'">
+            <SvgIcon icon="ri:sparkling-2-line" class="text-base"
+              :class="selectedModel === 'happyhorse' ? 'text-fuchsia-400' : 'text-white/30'" />
+          </div>
+          <div class="flex min-w-0 flex-col">
+            <span class="truncate whitespace-nowrap text-[11px] font-semibold" :class="selectedModel === 'happyhorse' ? 'text-fuchsia-300' : 'text-white/50'">HappyHorse</span>
+            <span class="truncate whitespace-nowrap text-[9px]" :class="selectedModel === 'happyhorse' ? 'text-fuchsia-400/50' : 'text-white/25'">1.0 · 1080p</span>
           </div>
         </button>
       </div>
@@ -1534,22 +1595,22 @@ onUnmounted(() => {
             v-for="opt in resolutionOptions"
             :key="opt.value"
             class="res-btn group flex flex-col items-center gap-2 rounded-xl px-3 py-4"
-            :class="{ active: resolution === opt.value }"
-            @click="resolution = opt.value"
+            :class="{ active: selectedAspectValue === opt.value }"
+            @click="selectAspectOption(opt.value)"
           >
             <div class="relative">
               <div
                 class="res-icon rounded transition-all duration-200"
-                :class="{ active: resolution === opt.value }"
+                :class="{ active: selectedAspectValue === opt.value }"
                 :style="{ width: opt.iconW + 'px', height: opt.iconH + 'px' }"
               />
               <Transition name="hint-fade">
-                <SvgIcon v-if="resolution === opt.value" icon="ri:check-line" class="absolute -right-1 -top-1 text-[10px] text-sky-400" />
+                <SvgIcon v-if="selectedAspectValue === opt.value" icon="ri:check-line" class="absolute -right-1 -top-1 text-[10px] text-sky-400" />
               </Transition>
             </div>
             <div class="text-center">
-              <p class="text-xs font-bold" :class="resolution === opt.value ? 'text-sky-300' : 'text-white/50'">{{ opt.label }}</p>
-              <p class="text-[10px]" :class="resolution === opt.value ? 'text-sky-400/60' : 'text-white/25'">{{ opt.desc }}</p>
+              <p class="text-xs font-bold" :class="selectedAspectValue === opt.value ? 'text-sky-300' : 'text-white/50'">{{ opt.label }}</p>
+              <p class="text-[10px]" :class="selectedAspectValue === opt.value ? 'text-sky-400/60' : 'text-white/25'">{{ opt.desc }}</p>
             </div>
           </button>
         </div>
@@ -1602,6 +1663,23 @@ onUnmounted(() => {
         </Transition>
       </div>
 
+      <!-- 输出分辨率 (HappyHorse) -->
+      <div v-if="selectedModel === 'happyhorse'">
+        <div class="mb-1 text-[11px] text-white/40 font-medium">输出分辨率</div>
+        <div class="flex gap-2">
+          <button
+            v-for="opt in happyHorseResolutionOptions"
+            :key="opt.value"
+            type="button"
+            class="pill-btn"
+            :class="{ active: happyHorseResolution === opt.value }"
+            @click="happyHorseResolution = opt.value"
+          >
+            {{ opt.label }}
+          </button>
+        </div>
+      </div>
+
       <!-- 提示词关联度 cfgScale (仅可灵) -->
       <div v-if="selectedModel === 'kling'" class="slider-section">
         <div class="mb-1 flex items-center justify-between text-[11px] text-white/40 font-medium">
@@ -1615,7 +1693,7 @@ onUnmounted(() => {
       </div>
 
       <!-- 声音 -->
-      <div class="flex items-center justify-between">
+      <div v-if="selectedModel !== 'happyhorse'" class="flex items-center justify-between">
         <span class="text-[11px] text-white/40 font-medium">生成声音</span>
         <NSwitch v-model:value="sound" size="small" />
       </div>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, h, onUnmounted, ref, watch } from 'vue'
 
 import {
   NButton, NDataTable, NDrawer, NDrawerContent, NForm, NFormItem,
@@ -35,7 +35,7 @@ interface DashboardOverview {
   queuedJobs: number; processingJobs: number; completedJobs: number; failedJobs: number
   todayCompleted: number; todayFailed: number; hourlyCompleted: number
   totalAccounts: number; activeAccounts: number; totalMaxConcurrency: number; totalCurrentConcurrency: number
-  speedMultiplier?: number
+  speedMultiplier?: number; deepNightEnabled?: boolean
 }
 interface AccountInfo {
   id: string; label: string; tokenShort: string; teamId: string; proxyUrl: string | null; proxyId: string | null
@@ -78,21 +78,43 @@ interface LoginSessionInfo {
   country: string | null; userAgent: string; isSuspicious: boolean; suspiciousReason: string | null
   createdAt: string; user?: { username: string }
 }
+interface StorageBucket {
+  path: string; exists: boolean; bytes: number; files: number; dirs: number
+}
+interface StorageInfo {
+  disk: {
+    path: string; filesystem: string; mount: string
+    totalBytes: number; usedBytes: number; availableBytes: number; usedPercent: number
+  }
+  uploads: StorageBucket
+  videoCache: StorageBucket
+  tempUploads: StorageBucket
+  captures: StorageBucket
+  cachedJobs: { total: number; localOnly: number; withRemoteFallback: number }
+  updatedAt: string
+}
 
 /* ── Props / Emits ── */
 const props = defineProps<{ show: boolean }>()
 const emit = defineEmits<{ 'update:show': [v: boolean] }>()
 
 const message = useMessage()
-const { headers } = useRunwayJwt()
+const ms = message
+const { headers, token: jwt } = useRunwayJwt()
+const drawerWidth = computed(() => (typeof window !== 'undefined' && window.innerWidth < 768 ? '100%' : '92%'))
 
 /* ── State ── */
 const overview = ref<DashboardOverview>({ totalUsers: 0, activeUsers: 0, totalJobs: 0, todayJobs: 0, queuedJobs: 0, processingJobs: 0, completedJobs: 0, failedJobs: 0, todayCompleted: 0, todayFailed: 0, hourlyCompleted: 0, totalAccounts: 0, activeAccounts: 0, totalMaxConcurrency: 0, totalCurrentConcurrency: 0, speedMultiplier: 1.0 })
+const storageInfo = ref<StorageInfo | null>(null)
+const storageLoading = ref(false)
+const clearingCache = ref(false)
 
 /* ── Global speed multiplier ── */
 // UI value is percent (10..200); backend value is float (0.1..2.0)
 const speedPct = ref<number>(100)
 const speedSyncing = ref(false)
+const deepNightEnabled = ref(true)
+const deepNightSyncing = ref(false)
 let speedDebounceTimer: ReturnType<typeof setTimeout> | null = null
 let speedSuppressFromServer = false
 const speedColorClass = computed(() => {
@@ -142,6 +164,24 @@ const setSpeedPreset = (v: number) => {
   speedPct.value = v
   if (speedDebounceTimer) clearTimeout(speedDebounceTimer)
   pushSpeed(v)
+}
+const onDeepNightChange = async (enabled: boolean) => {
+  deepNightSyncing.value = true
+  try {
+    const res = await fetch('/api/runway/admin/deep-night', {
+      method: 'POST',
+      headers: { ...headers(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(data.error || '更新失败')
+    deepNightEnabled.value = Boolean(data.enabled)
+    message.success(deepNightEnabled.value ? '深夜模式已启用' : '深夜模式已关闭')
+  } catch (e: any) {
+    message.error(e.message || '网络错误')
+  } finally {
+    deepNightSyncing.value = false
+  }
 }
 const userStats = ref<UserStat[]>([])
 const accountStatsData = ref<AccountStat[]>([])
@@ -225,7 +265,7 @@ const userFilterOptions = computed(() => [
 ])
 const roleOptions = [{ label: '普通用户', value: 'user' }, { label: '管理员', value: 'admin' }]
 const statusOptions = [{ label: '全部状态', value: '' }, { label: '等待中', value: 'pending' }, { label: '排队中', value: 'queued' }, { label: '处理中', value: 'processing' }, { label: '已完成', value: 'completed' }, { label: '失败', value: 'failed' }, { label: '已删除', value: 'deleted' }]
-const logActionOptions = [{ label: '全部行为', value: '' }, { label: '登录', value: 'login' }, { label: '创建任务', value: 'create_job' }, { label: '删除任务', value: 'delete_job' }, { label: '重试任务', value: 'retry_job' }]
+const logActionOptions = [{ label: '全部行为', value: '' }, { label: '登录', value: 'login' }, { label: '创建任务', value: 'create_job' }, { label: '删除任务', value: 'delete_job' }, { label: '重试任务', value: 'retry_job' }, { label: '清理缓存', value: 'clear_cache' }]
 const accountFilterOptions = [
   { label: '全部账号', value: 'all' },
   { label: '活跃', value: 'active' },
@@ -241,8 +281,8 @@ const userStatusFilterOptions = [
 
 const statusType: Record<string, 'default' | 'info' | 'success' | 'warning' | 'error'> = { pending: 'default', queued: 'default', submitted: 'info', processing: 'info', completed: 'success', failed: 'error', cancelled: 'warning', deleted: 'warning' }
 const statusLabel: Record<string, string> = { pending: '等待中', queued: '排队中', submitted: '已提交', processing: '处理中', completed: '已完成', failed: '失败', cancelled: '已取消', deleted: '已删除' }
-const actionLabel: Record<string, string> = { login: '登录', create_job: '创建任务', delete_job: '删除任务', retry_job: '重试任务', cancel_job: '取消任务' }
-const actionType: Record<string, 'default' | 'info' | 'success' | 'warning' | 'error'> = { login: 'info', create_job: 'success', delete_job: 'error', retry_job: 'warning', cancel_job: 'warning' }
+const actionLabel: Record<string, string> = { login: '登录', create_job: '创建任务', delete_job: '删除任务', retry_job: '重试任务', cancel_job: '取消任务', clear_cache: '清理缓存' }
+const actionType: Record<string, 'default' | 'info' | 'success' | 'warning' | 'error'> = { login: 'info', create_job: 'success', delete_job: 'error', retry_job: 'warning', cancel_job: 'warning', clear_cache: 'warning' }
 
 const filteredAccounts = computed(() => {
   const keyword = accountKeyword.value.trim().toLowerCase()
@@ -305,6 +345,35 @@ const lastSyncLabel = computed(() => (
     ? lastSyncAt.value.toLocaleTimeString('zh-CN', { hour12: false })
     : '未同步'
 ))
+const formatBytes = (bytes?: number | null) => {
+  const n = Number(bytes || 0)
+  if (n < 1024) return `${n} B`
+  const units = ['KB', 'MB', 'GB', 'TB']
+  let value = n / 1024
+  let idx = 0
+  while (value >= 1024 && idx < units.length - 1) {
+    value /= 1024
+    idx++
+  }
+  return `${value >= 10 || idx === 0 ? value.toFixed(1) : value.toFixed(2)} ${units[idx]}`
+}
+const storageUsageRate = computed(() => Math.round(storageInfo.value?.disk.usedPercent || 0))
+const storageStatus = computed<'success' | 'warning' | 'error'>(() => {
+  const used = storageUsageRate.value
+  if (used >= 90) return 'error'
+  if (used >= 80) return 'warning'
+  return 'success'
+})
+const storageLabel = computed(() => {
+  const info = storageInfo.value
+  if (!info) return '存储未同步'
+  return `磁盘 ${formatBytes(info.disk.usedBytes)} / ${formatBytes(info.disk.totalBytes)}`
+})
+const storageHint = computed(() => {
+  const info = storageInfo.value
+  if (!info) return '点击刷新获取全局存储'
+  return `剩余 ${formatBytes(info.disk.availableBytes)} · 缓存 ${formatBytes(info.videoCache.bytes)}`
+})
 
 /* ── Dashboard cards ── */
 const dashCards = computed(() => [
@@ -343,7 +412,46 @@ const fetchDashboard = async () => {
         setTimeout(() => { speedSuppressFromServer = false }, 50)
       }
     }
+    if (typeof data.overview?.deepNightEnabled === 'boolean') {
+      deepNightEnabled.value = data.overview.deepNightEnabled
+    }
   } catch {}
+}
+
+const fetchStorage = async () => {
+  storageLoading.value = true
+  try {
+    const res = await fetch('/api/runway/admin/storage', { headers: headers() })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error || '存储信息加载失败')
+    storageInfo.value = data
+  } catch (e: any) {
+    message.error(e.message || '存储信息加载失败')
+  } finally {
+    storageLoading.value = false
+  }
+}
+
+const clearStorageCache = async () => {
+  const cacheSize = storageInfo.value?.videoCache.bytes || 0
+  if (!window.confirm(`确认清理本地视频缓存？预计释放 ${formatBytes(cacheSize)}。仅删除可回退或未关联的视频缓存，不删除起始帧上传。`)) return
+  clearingCache.value = true
+  try {
+    const res = await fetch('/api/runway/admin/storage/clear-cache', {
+      method: 'POST',
+      headers: headers(),
+    })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error || '清理失败')
+    storageInfo.value = data.storage
+    const protectedText = data.removed?.protectedFiles ? `，保留 ${data.removed.protectedFiles} 个仅本地缓存` : ''
+    message.success(`已清理 ${data.removed.files} 个缓存文件，释放 ${formatBytes(data.removed.bytes)}，回退 ${data.relinkedJobs} 条任务链接${protectedText}`)
+    fetchDashboard()
+  } catch (e: any) {
+    message.error(e.message || '清理失败')
+  } finally {
+    clearingCache.value = false
+  }
 }
 
 const fetchUsers = async () => {
@@ -555,6 +663,7 @@ const removeDevice = async (id: string) => {
 const refreshAll = async () => {
   await Promise.all([
     fetchDashboard(),
+    fetchStorage(),
     fetchUsers(),
     fetchAccounts(),
     fetchAdminJobs(),
@@ -632,6 +741,16 @@ async function deleteApiKey(id: string) {
   } catch (e) { ms.error('删除失败') }
 }
 
+const copyCreatedKey = async () => {
+  if (!createdKeyValue.value) return
+  try {
+    await window.navigator.clipboard.writeText(createdKeyValue.value)
+    message.success('已复制')
+  } catch {
+    message.warning('复制失败')
+  }
+}
+
 const apiKeyColumns = [
   { title: '名称', key: 'name', width: 100 },
   { title: '前缀', key: 'prefix', width: 100 },
@@ -653,6 +772,7 @@ const apiKeyColumns = [
 ]
 
 const refreshCurrentTab = () => {
+  fetchStorage()
   if (activeTab.value === 'proxies') { fetchProxies(); return }
   if (activeTab.value === 'accounts') {
     fetchAccounts()
@@ -935,7 +1055,7 @@ watch(activeTab, () => { if (props.show) refreshCurrentTab() })
 let autoRefreshTimer: ReturnType<typeof setInterval> | null = null
 watch(() => props.show, (v) => {
   if (v) {
-    autoRefreshTimer = setInterval(fetchDashboard, 30000)
+    autoRefreshTimer = setInterval(() => { fetchDashboard(); fetchStorage() }, 30000)
   } else {
     if (autoRefreshTimer) { clearInterval(autoRefreshTimer); autoRefreshTimer = null }
   }
@@ -944,7 +1064,7 @@ onUnmounted(() => { if (autoRefreshTimer) clearInterval(autoRefreshTimer) })
 </script>
 
 <template>
-  <NDrawer :show="props.show" placement="right" :width="typeof window !== 'undefined' && window.innerWidth < 768 ? '100%' : '92%'" @update:show="emit('update:show', $event)">
+  <NDrawer :show="props.show" placement="right" :width="drawerWidth" @update:show="emit('update:show', $event)">
     <NDrawerContent closable class="admin-drawer-content">
       <template #header>
         <div class="flex items-center gap-3">
@@ -1042,6 +1162,57 @@ onUnmounted(() => { if (autoRefreshTimer) clearInterval(autoRefreshTimer) })
               <p class="metric-hint">排队 {{ overview.queuedJobs }} · 处理中 {{ overview.processingJobs }}</p>
             </div>
           </div>
+
+          <!-- Global storage -->
+          <div class="relative mt-3 rounded-xl border border-white/[0.08] bg-black/10 p-3">
+            <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+              <div class="min-w-0 flex-1">
+                <div class="mb-2 flex items-center justify-between gap-3">
+                  <div class="flex min-w-0 items-center gap-2">
+                    <div class="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-teal-500/20 to-sky-500/20">
+                      <SvgIcon icon="ri:hard-drive-3-line" class="text-sm text-teal-300" />
+                    </div>
+                    <div class="min-w-0">
+                      <p class="truncate text-xs font-bold text-white/85">全局存储</p>
+                      <p class="truncate text-[11px] text-white/35">{{ storageLabel }} · {{ storageHint }}</p>
+                    </div>
+                  </div>
+                  <NTag :type="storageStatus" size="small" round :bordered="false">
+                    {{ storageUsageRate }}%
+                  </NTag>
+                </div>
+                <NProgress
+                  type="line"
+                  :percentage="Math.min(storageUsageRate, 100)"
+                  :status="storageStatus"
+                  :show-indicator="false"
+                  :height="5"
+                />
+                <div class="mt-2 grid grid-cols-2 gap-2 text-[11px] text-white/35 sm:grid-cols-4">
+                  <span class="rounded-lg border border-white/[0.06] bg-white/[0.03] px-2 py-1">
+                    上传目录 <b class="text-white/70">{{ formatBytes(storageInfo?.uploads.bytes) }}</b>
+                  </span>
+                  <span class="rounded-lg border border-white/[0.06] bg-white/[0.03] px-2 py-1">
+                    视频缓存 <b class="text-teal-300">{{ formatBytes(storageInfo?.videoCache.bytes) }}</b>
+                  </span>
+                  <span class="rounded-lg border border-white/[0.06] bg-white/[0.03] px-2 py-1">
+                    临时上传 <b class="text-white/70">{{ storageInfo?.tempUploads.files || 0 }}</b>
+                  </span>
+                  <span class="rounded-lg border border-white/[0.06] bg-white/[0.03] px-2 py-1">
+                    缓存任务 <b class="text-white/70">{{ storageInfo?.cachedJobs.total || 0 }}</b>
+                  </span>
+                </div>
+              </div>
+              <div class="flex shrink-0 gap-2">
+                <NButton size="small" secondary class="glass-btn" :loading="storageLoading" @click="fetchStorage">
+                  <SvgIcon icon="ri:refresh-line" class="mr-1" /> 刷新存储
+                </NButton>
+                <NButton size="small" type="warning" ghost :loading="clearingCache" :disabled="!storageInfo || (storageInfo.videoCache.files === 0 && storageInfo.cachedJobs.total === 0)" @click="clearStorageCache">
+                  <SvgIcon icon="ri:delete-bin-6-line" class="mr-1" /> 一键清缓存
+                </NButton>
+              </div>
+            </div>
+          </div>
         </div>
 
         <!-- 全局速度 card -->
@@ -1089,7 +1260,7 @@ onUnmounted(() => { if (autoRefreshTimer) clearInterval(autoRefreshTimer) })
                     </template>
                     <div style="max-width: 260px">开启后，凌晨 02-08 时段账号有 80% 概率跳过提交并休眠数分钟，模拟真实作息。关闭则全天候跑。</div>
                   </NTooltip>
-                  <span class="text-[10px]" :class="deepNightEnabled ? text-emerald-300 : text-amber-300">{{ deepNightEnabled ? "启用中" : "已关闭" }}</span>
+                  <span class="text-[10px]" :class="deepNightEnabled ? 'text-emerald-300' : 'text-amber-300'">{{ deepNightEnabled ? "启用中" : "已关闭" }}</span>
                 </div>
                 <NSwitch :value="deepNightEnabled" :loading="deepNightSyncing" @update:value="onDeepNightChange" />
               </div>
@@ -1621,9 +1792,10 @@ Content-Type: application/json
   "sound": true
 }
 
-模型: seedance-2.0 | kling-pro | kling-standard
+模型: seedance-2.0 | happyhorse-1.0 | kling-pro | kling-standard
 参数: image_url(图生视频), image_urls(多参考图),
-      video_url(参考视频), duration(5/10), sound, cfg_scale</pre>
+      video_url(参考视频), duration(5/10), sound, cfg_scale
+      HappyHorse 可传 aspect_ratio(16:9/9:16/1:1/4:3/3:4), resolution(720p/1080p)</pre>
                   </div>
                   <div>
                     <div class="mb-1 text-white/50">③ 查询任务状态</div>
@@ -1646,6 +1818,12 @@ curl -X POST http://101.35.158.183/v1/videos/generations \
   -H "Authorization: Bearer sk-xxx" \
   -H "Content-Type: application/json" \
   -d '{"model":"seedance-2.0","prompt":"日落海边沙滩漫步","duration":5}'
+
+# 创建 HappyHorse 1.0
+curl -X POST http://101.35.158.183/v1/videos/generations \
+  -H "Authorization: Bearer sk-xxx" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"happyhorse-1.0","prompt":"电影感城市街道推进镜头","duration":5,"aspect_ratio":"16:9","resolution":"1080p"}'
 
 # 创建可灵标准版 (Kling Standard)
 curl -X POST http://101.35.158.183/v1/videos/generations \
@@ -1699,7 +1877,7 @@ curl http://101.35.158.183/v1/videos/generations/vgen_seedance_xxx \
     <div v-if="createdKeyValue" class="mb-4 rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3">
       <div class="mb-1 text-xs text-emerald-400">API Key 已创建（仅显示一次，请立即复制）：</div>
       <div class="break-all font-mono text-sm text-emerald-300">{{ createdKeyValue }}</div>
-      <NButton size="tiny" class="mt-2" @click="navigator.clipboard.writeText(createdKeyValue); ms.success('已复制')">复制</NButton>
+      <NButton size="tiny" class="mt-2" @click="copyCreatedKey">复制</NButton>
     </div>
     <div class="flex justify-end gap-2">
       <NButton @click="showCreateKeyModal = false; createdKeyValue = ''">关闭</NButton>

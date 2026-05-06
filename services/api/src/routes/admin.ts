@@ -1,6 +1,10 @@
 import { Router, Request, Response } from "express";
 import bcrypt from "bcryptjs";
 import IORedis from "ioredis";
+import { execFile } from "child_process";
+import { promises as fs } from "fs";
+import path from "path";
+import { promisify } from "util";
 import { prisma } from "../services/prisma";
 import { DeviceService } from "../services/device.service";
 import { adminMiddleware } from "../middleware/auth";
@@ -9,6 +13,160 @@ const router = Router();
 const redis = new IORedis(process.env.REDIS_URL || "redis://localhost:6379", {
   maxRetriesPerRequest: null,
 });
+const execFileAsync = promisify(execFile);
+
+const RUNWAY_ROOT = process.env.RUNWAY_ROOT || "/root/runway";
+const UPLOAD_ROOT = process.env.RUNWAY_UPLOAD_ROOT || path.join(RUNWAY_ROOT, "uploads");
+const VIDEO_CACHE_DIR = process.env.MEDIA_CACHE_DIR || path.join(UPLOAD_ROOT, "videos");
+const CAPTURES_DIR = path.join(RUNWAY_ROOT, "captures");
+const VIDEO_CACHE_FILE_RE = /^(?:[a-f0-9]{40}|video_[a-f0-9]{8}_\d+)\.mp4$/;
+
+type StorageBucket = {
+  path: string;
+  exists: boolean;
+  bytes: number;
+  files: number;
+  dirs: number;
+};
+
+async function exists(p: string): Promise<boolean> {
+  try {
+    await fs.access(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function summarizeTree(root: string, includeFile?: (name: string, fullPath: string) => boolean): Promise<StorageBucket> {
+  const summary: StorageBucket = { path: root, exists: false, bytes: 0, files: 0, dirs: 0 };
+  if (!(await exists(root))) return summary;
+  summary.exists = true;
+
+  async function walk(dir: string) {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        summary.dirs++;
+        await walk(fullPath);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      if (includeFile && !includeFile(entry.name, fullPath)) continue;
+      try {
+        const stat = await fs.stat(fullPath);
+        summary.files++;
+        summary.bytes += stat.size;
+      } catch {}
+    }
+  }
+
+  await walk(root);
+  return summary;
+}
+
+async function summarizeTopLevelFiles(root: string, includeFile: (name: string) => boolean): Promise<StorageBucket> {
+  const summary: StorageBucket = { path: root, exists: false, bytes: 0, files: 0, dirs: 0 };
+  if (!(await exists(root))) return summary;
+  summary.exists = true;
+  const entries = await fs.readdir(root, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isFile() || !includeFile(entry.name)) continue;
+    try {
+      const stat = await fs.stat(path.join(root, entry.name));
+      summary.files++;
+      summary.bytes += stat.size;
+    } catch {}
+  }
+  return summary;
+}
+
+async function readDiskStats(targetPath: string) {
+  const probePath = await exists(targetPath) ? targetPath : RUNWAY_ROOT;
+  const { stdout } = await execFileAsync("df", ["-Pk", probePath]);
+  const line = stdout.trim().split("\n")[1];
+  const parts = line.trim().split(/\s+/);
+  const totalBytes = Number(parts[1]) * 1024;
+  const usedBytes = Number(parts[2]) * 1024;
+  const availableBytes = Number(parts[3]) * 1024;
+  return {
+    path: probePath,
+    filesystem: parts[0],
+    mount: parts[5],
+    totalBytes,
+    usedBytes,
+    availableBytes,
+    usedPercent: totalBytes > 0 ? Math.round((usedBytes / totalBytes) * 1000) / 10 : 0,
+  };
+}
+
+async function buildStorageReport() {
+  const [disk, uploads, videoCache, tempUploads, captures, cachedJobs, localOnlyCachedJobs] = await Promise.all([
+    readDiskStats(UPLOAD_ROOT),
+    summarizeTree(UPLOAD_ROOT),
+    summarizeTree(VIDEO_CACHE_DIR, (name) => VIDEO_CACHE_FILE_RE.test(name)),
+    summarizeTopLevelFiles(UPLOAD_ROOT, (name) => name.startsWith("upload_")),
+    summarizeTree(CAPTURES_DIR),
+    prisma.runwayJob.count({ where: { resultUrl: { startsWith: "/img/videos/" } } as any }),
+    prisma.runwayJob.count({
+      where: {
+        resultUrl: { startsWith: "/img/videos/" },
+        OR: [{ videoUrl: null }, { videoUrl: "" }],
+      } as any,
+    }),
+  ]);
+  return {
+    disk,
+    uploads,
+    videoCache,
+    tempUploads,
+    captures,
+    cachedJobs: {
+      total: cachedJobs,
+      localOnly: localOnlyCachedJobs,
+      withRemoteFallback: Math.max(0, cachedJobs - localOnlyCachedJobs),
+    },
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+async function clearVideoCacheFiles(protectedFiles = new Set<string>()) {
+  const result = { files: 0, bytes: 0, protectedFiles: protectedFiles.size, errors: [] as string[] };
+  if (!(await exists(VIDEO_CACHE_DIR))) return result;
+  const entries = await fs.readdir(VIDEO_CACHE_DIR, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isFile() || !VIDEO_CACHE_FILE_RE.test(entry.name)) continue;
+    if (protectedFiles.has(entry.name)) continue;
+    const fullPath = path.join(VIDEO_CACHE_DIR, entry.name);
+    try {
+      const stat = await fs.stat(fullPath);
+      await fs.unlink(fullPath);
+      result.files++;
+      result.bytes += stat.size;
+    } catch (e: any) {
+      result.errors.push(`${entry.name}: ${e.message}`);
+    }
+  }
+  return result;
+}
+
+async function getLocalOnlyCacheFiles() {
+  const rows = await prisma.runwayJob.findMany({
+    where: {
+      resultUrl: { startsWith: "/img/videos/" },
+      OR: [{ videoUrl: null }, { videoUrl: "" }],
+    } as any,
+    select: { resultUrl: true },
+  });
+  const protectedFiles = new Set<string>();
+  for (const row of rows) {
+    if (!row.resultUrl) continue;
+    const filename = path.basename(row.resultUrl.split("?")[0]);
+    if (VIDEO_CACHE_FILE_RE.test(filename)) protectedFiles.add(filename);
+  }
+  return protectedFiles;
+}
 
 // CORS preflight for token-submit (browser extension needs this)
 router.options("/accounts/token-submit", (_req: Request, res: Response) => {
@@ -761,6 +919,65 @@ router.get("/dashboard", async (_req: Request, res: Response) => {
       accountStats,
     });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// ============== STORAGE / CACHE ==============
+
+// GET /api/runway/admin/storage — global disk and cache usage
+router.get("/storage", async (_req: Request, res: Response) => {
+  try {
+    res.json(await buildStorageReport());
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/runway/admin/storage/clear-cache — clear local video cache only
+router.post("/storage/clear-cache", async (req: Request, res: Response) => {
+  try {
+    const before = await summarizeTree(VIDEO_CACHE_DIR, (name) => VIDEO_CACHE_FILE_RE.test(name));
+    const protectedFiles = await getLocalOnlyCacheFiles();
+    const removed = await clearVideoCacheFiles(protectedFiles);
+
+    // Keep history playable: local /img/videos/* cache URLs fall back to the original Runway URL when available.
+    const relinkedJobs = await prisma.$executeRawUnsafe(`
+      UPDATE runway_jobs
+      SET result_url = video_url
+      WHERE result_url LIKE '/img/videos/%'
+        AND video_url IS NOT NULL
+        AND video_url <> ''
+    `) as number;
+
+    const localOnlyJobs = await prisma.runwayJob.count({
+      where: {
+        resultUrl: { startsWith: "/img/videos/" },
+        OR: [{ videoUrl: null }, { videoUrl: "" }],
+      } as any,
+    });
+
+    if (req.user?.id) {
+      await prisma.userLog.create({
+        data: {
+          userId: req.user.id,
+          action: "clear_cache",
+          detail: `removed=${removed.files} bytes=${removed.bytes} relinked=${relinkedJobs}`,
+          ip: req.socket.remoteAddress,
+        },
+      }).catch(() => {});
+    }
+
+    console.log(`[admin] clear video cache by ${req.user?.username || "unknown"}: removed=${removed.files}, bytes=${removed.bytes}, relinked=${relinkedJobs}`);
+    res.json({
+      ok: true,
+      before,
+      removed,
+      relinkedJobs,
+      localOnlyJobs,
+      storage: await buildStorageReport(),
+    });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // === Device & IP Management ===

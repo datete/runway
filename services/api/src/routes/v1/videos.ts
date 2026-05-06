@@ -7,6 +7,7 @@ export const videosRouter = Router();
 // Model mapping: API model name → internal model name
 const MODEL_MAP: Record<string, { internal: string; quality?: string }> = {
   "seedance-2.0":    { internal: "seedance_2" },
+  "happyhorse-1.0":  { internal: "happyhorse_1_0" },
   "kling-standard":  { internal: "kling_3_0_standard", quality: "standard" },
   "kling-pro":       { internal: "kling_3_0_pro" },
 };
@@ -20,7 +21,7 @@ videosRouter.post(
   "/videos/generations",
   async (req: Request, res: Response) => {
     try {
-      const { model, prompt, image_url, image_urls, video_url, duration, aspect_ratio, sound, explore_mode, cfg_scale } =
+      const { model, prompt, image_url, image_urls, video_url, duration, aspect_ratio, resolution, sound, explore_mode, cfg_scale } =
         req.body ?? {};
 
       if (!model || typeof model !== "string") {
@@ -52,23 +53,31 @@ videosRouter.post(
         });
       }
 
+      const isHappyHorse = mapping.internal === "happyhorse_1_0";
+      const validHappyHorseRatios = new Set(["16:9", "9:16", "1:1", "4:3", "3:4"]);
+      const happyHorseAspectRatio = typeof aspect_ratio === "string" ? aspect_ratio.trim() : "";
+      const happyHorseResolutionInput = typeof resolution === "string" ? resolution.trim().toLowerCase() : "";
+      const happyHorseResolution = happyHorseResolutionInput === "720p" ? "720p" : "1080p";
+
       const job = await runwayService.createJob({
         prompt,
         mode: "gen3a_turbo",
         model: mapping.internal,
-        quality: mapping.quality,
+        quality: isHappyHorse ? happyHorseResolution : mapping.quality,
         duration: duration ?? 5,
-        sound: sound ?? false,
+        sound: isHappyHorse ? undefined : (sound ?? false),
         exploreMode: explore_mode ?? false,
-        cfgScale: cfg_scale,
+        cfgScale: isHappyHorse ? undefined : cfg_scale,
         ...(image_url ? { imageUrl: image_url } : {}),
         ...(Array.isArray(image_urls) ? { imageUrls: image_urls } : {}),
-        ...(video_url ? { videoUrl: video_url } : {}),
+        ...(!isHappyHorse && video_url ? { videoUrl: video_url } : {}),
         userId,
-        resolution: aspect_ratio === "16:9" ? "1920x1080" : aspect_ratio === "9:16" ? "1080x1920" : undefined,
+        resolution: isHappyHorse
+          ? (validHappyHorseRatios.has(happyHorseAspectRatio) ? happyHorseAspectRatio : "9:16")
+          : aspect_ratio === "16:9" ? "1920x1080" : aspect_ratio === "9:16" ? "1080x1920" : undefined,
       });
 
-      const prefix = model.startsWith("kling") ? "vgen_kling" : "vgen_seedance";
+      const prefix = model.startsWith("kling") ? "vgen_kling" : (model.startsWith("happyhorse") ? "vgen_happyhorse" : "vgen_seedance");
 
       return res.status(202).json({
         id: `${prefix}_${job.id}`,
@@ -104,12 +113,15 @@ videosRouter.get(
         });
       }
 
-      // Both vgen_seedance_ and vgen_kling_ are stored in runway_jobs
+      // All supported video models are stored in runway_jobs
       let jobId: string;
       let model: string;
       if (fullId.startsWith("vgen_seedance_")) {
         jobId = fullId.replace("vgen_seedance_", "");
         model = "seedance-2.0";
+      } else if (fullId.startsWith("vgen_happyhorse_")) {
+        jobId = fullId.replace("vgen_happyhorse_", "");
+        model = "happyhorse-1.0";
       } else if (fullId.startsWith("vgen_kling_")) {
         jobId = fullId.replace("vgen_kling_", "");
         model = "kling-pro"; // default, will be refined from DB
@@ -142,6 +154,7 @@ videosRouter.get(
 
       // Refine model name from DB
       if (row.model_name === "seedance_2") model = "seedance-2.0";
+      else if (row.model_name === "happyhorse_1_0") model = "happyhorse-1.0";
       else if (row.model_name === "kling_3_0_standard") model = "kling-standard";
       else if (row.model_name === "kling_3_0_pro") model = "kling-pro";
 

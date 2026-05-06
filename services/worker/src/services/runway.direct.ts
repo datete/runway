@@ -274,9 +274,10 @@ export class RunwayDirectClient implements RunwayProvider {
 
   async createTask(input: CreateRunwayTaskInput): Promise<{ remoteTaskId: string }> {
     const isSeedance = input.modelName === "seedance_2";
-    const isStandard = !isSeedance && input.quality === "standard";
-    const taskType = isSeedance ? "seedance_2" : (isStandard ? "kling_3_0_standard" : "kling_3_0_pro");
-    const isPro = !isStandard && !isSeedance;
+    const isHappyHorse = input.modelName === "happyhorse_1_0";
+    const isStandard = !isSeedance && !isHappyHorse && input.quality === "standard";
+    const taskType = isSeedance ? "seedance_2" : (isHappyHorse ? "happyhorse_1_0" : (isStandard ? "kling_3_0_standard" : "kling_3_0_pro"));
+    const isPro = !isStandard && !isSeedance && !isHappyHorse;
     console.log(`[runway:task] creating ${taskType} (model=${input.modelName}, quality=${input.quality || "std"})`);
     console.log(`[runway:task] prompt: "${input.prompt.slice(0, 80)}"`);
     console.log(`[runway:task] duration=${input.duration || 5}s, exploreMode=${input.exploreMode ?? false}`);
@@ -288,9 +289,10 @@ export class RunwayDirectClient implements RunwayProvider {
     ].filter(Boolean);
 
     console.log(`[runway:task] reference images to upload: ${sourceUrls.length}`);
-    if (sourceUrls.length > 2) {
-      console.warn(`[runway:task] user sent ${sourceUrls.length} ref images, truncating to 2 (API limit)`);
-      sourceUrls.splice(2);
+    const maxReferenceImages = isHappyHorse ? 1 : 2;
+    if (sourceUrls.length > maxReferenceImages) {
+      console.warn(`[runway:task] user sent ${sourceUrls.length} ref images, truncating to ${maxReferenceImages} (API limit)`);
+      sourceUrls.splice(maxReferenceImages);
     }
 
     // Upload images to Runway
@@ -303,7 +305,7 @@ export class RunwayDirectClient implements RunwayProvider {
     // NOTE: upstream Kling 拒绝 referenceVideos 当参考图 > 1 张时("Reference videos are not supported for this model")
     // 因此多参考图场景下跳过 ref video,只送参考图。
     let referenceVideoAsset: { url: string; assetId: string } | undefined;
-    if (input.videoUrl && referenceImages.length <= 1) {
+    if (input.videoUrl && !isHappyHorse && referenceImages.length <= 1) {
       console.log(`[runway:task] uploading reference video: ${input.videoUrl}`);
       referenceVideoAsset = await this.uploadFileWithAsset(input.videoUrl);
       console.log(`[runway:task] reference video uploaded, assetId=${referenceVideoAsset.assetId}`);
@@ -316,6 +318,8 @@ export class RunwayDirectClient implements RunwayProvider {
     if (isSeedance) {
       // Seedance uses "720p" / "480p" string format
       effectiveResolution = input.resolution || "720p";
+    } else if (isHappyHorse) {
+      effectiveResolution = (input.quality === "720p" || input.resolution === "720p") ? "720P" : "1080P";
     } else {
       const defaultRes = isStandard ? "720x1280" : "1080x1920";
       const proResolutionMap: Record<string, string> = { "1076x1920": "1080x1920", "720x1280": "1080x1920", "1280x720": "1920x1080", "960x960": "1440x1440" };
@@ -339,6 +343,27 @@ export class RunwayDirectClient implements RunwayProvider {
           exploreMode:    input.exploreMode ?? false,
           creationSource: "tool-mode",
           ...(referenceImages.length > 0 && { referenceImages }),
+        },
+        asTeamId:  this.teamId,
+        sessionId: uuidv4(),
+      };
+    } else if (isHappyHorse) {
+      const happyHorseAspectRatio = ["16:9", "9:16", "1:1", "4:3", "3:4"].includes(input.resolution || "")
+        ? input.resolution
+        : "9:16";
+      body = {
+        taskType: "happyhorse_1_0",
+        options: {
+          name:           input.prompt.slice(0, 100),
+          model:          "happyhorse_1_0",
+          textPrompt:     input.prompt,
+          duration:       input.duration || 5,
+          resolution:     effectiveResolution,
+          ...(referenceImages.length > 0
+            ? { route: "i2v", referenceImages }
+            : { route: "t2v", ratio: happyHorseAspectRatio }),
+          exploreMode:    input.exploreMode ?? false,
+          creationSource: "tool-mode",
         },
         asTeamId:  this.teamId,
         sessionId: uuidv4(),

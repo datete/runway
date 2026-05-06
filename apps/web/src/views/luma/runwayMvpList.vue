@@ -250,6 +250,38 @@ const modeLabel: Record<string, string> = {
   img2video: '图生视频',
 }
 
+const modelBadgeLabel = (modelName?: string | null) => {
+  if (modelName === 'seedance_2') return 'SD2'
+  if (modelName === 'happyhorse_1_0') return 'HH1'
+  return '可灵'
+}
+
+const modelDisplayName = (modelName?: string | null) => {
+  if (modelName === 'seedance_2') return 'Seedance 2.0'
+  if (modelName === 'happyhorse_1_0') return 'HappyHorse 1.0'
+  if (modelName === 'kling_3_0_pro') return '可灵 3.0 Pro'
+  if (modelName === 'kling_3_0_standard') return '可灵 3.0 Standard'
+  return modelName || '可灵'
+}
+
+const modelBadgeClass = (modelName?: string | null) => {
+  if (modelName === 'seedance_2') return 'bg-emerald-500/70 text-white'
+  if (modelName === 'happyhorse_1_0') return 'bg-fuchsia-500/70 text-white'
+  return 'bg-sky-500/70 text-white'
+}
+
+const modelMetaClass = (modelName?: string | null) => {
+  if (modelName === 'seedance_2') return 'border-emerald-400/20 bg-emerald-500/10 text-emerald-300'
+  if (modelName === 'happyhorse_1_0') return 'border-fuchsia-400/20 bg-fuchsia-500/10 text-fuchsia-300'
+  return 'border-sky-400/12 bg-sky-500/8 text-sky-300/70'
+}
+
+const modelDetailClass = (modelName?: string | null) => {
+  if (modelName === 'seedance_2') return 'text-emerald-400'
+  if (modelName === 'happyhorse_1_0') return 'text-fuchsia-400'
+  return 'text-sky-400'
+}
+
 const isQueued = (status: string) => ['pending', 'queued'].includes(status)
 const isProcessing = (status: string) => ['submitted', 'processing'].includes(status)
 const isActive = (status: string) => isQueued(status) || isProcessing(status)
@@ -1039,8 +1071,7 @@ onUnmounted(() => stopPolling())
 
               <!-- Duration + model badges -->
               <div v-if="playingVideoId !== job.id" class="absolute bottom-2 right-2 flex items-center gap-1">
-                <span v-if="job.modelName === 'seedance_2'" class="rounded-md bg-emerald-500/70 px-1.5 py-0.5 text-[9px] font-medium text-white backdrop-blur-sm">SD2</span>
-                <span v-else class="rounded-md bg-sky-500/70 px-1.5 py-0.5 text-[9px] font-medium text-white backdrop-blur-sm">可灵</span>
+                <span class="rounded-md px-1.5 py-0.5 text-[9px] font-medium backdrop-blur-sm" :class="modelBadgeClass(job.modelName)">{{ modelBadgeLabel(job.modelName) }}</span>
                 <span v-if="job.duration" class="rounded-md bg-black/60 px-1.5 py-0.5 text-[10px] font-medium text-white/70 backdrop-blur-sm">{{ job.duration }}s</span>
               </div>
             </div>
@@ -1088,8 +1119,8 @@ onUnmounted(() => stopPolling())
                 </span>
                 <span
                   class="rounded-md px-1.5 py-0.5 text-[9px] font-medium backdrop-blur-sm"
-                  :class="job.modelName === 'seedance_2' ? 'bg-emerald-500/70 text-white' : 'bg-sky-500/70 text-white'"
-                >{{ job.modelName === 'seedance_2' ? 'SD2' : '可灵' }}</span>
+                  :class="modelBadgeClass(job.modelName)"
+                >{{ modelBadgeLabel(job.modelName) }}</span>
               </div>
             </div>
 
@@ -1133,11 +1164,9 @@ onUnmounted(() => stopPolling())
                 </span>
                 <span
                   class="rounded-md border px-1.5 py-0.5 font-medium"
-                  :class="job.modelName === 'seedance_2'
-                    ? 'border-emerald-400/20 bg-emerald-500/10 text-emerald-300'
-                    : 'border-sky-400/12 bg-sky-500/8 text-sky-300/70'"
+                  :class="modelMetaClass(job.modelName)"
                 >
-                  {{ job.modelName === 'seedance_2' ? 'Seedance' : '可灵' }}
+                  {{ modelDisplayName(job.modelName) }}
                 </span>
                 <span v-if="formatElapsed(job)" class="text-slate-500">耗时 {{ formatElapsed(job) }}</span>
               </div>
@@ -1312,8 +1341,8 @@ onUnmounted(() => stopPolling())
           </div>
           <div v-if="detailJob.modelName" class="detail-row">
             <span class="detail-label">模型</span>
-            <span class="detail-value text-[11px]" :class="detailJob.modelName === 'seedance_2' ? 'text-emerald-400' : 'text-sky-400'">
-              {{ detailJob.modelName === 'seedance_2' ? 'Seedance 2.0' : detailJob.modelName === 'kling_3_0_pro' ? '可灵 3.0 Pro' : detailJob.modelName }}
+            <span class="detail-value text-[11px]" :class="modelDetailClass(detailJob.modelName)">
+              {{ modelDisplayName(detailJob.modelName) }}
             </span>
           </div>
           <div v-if="detailJob.username" class="detail-row">

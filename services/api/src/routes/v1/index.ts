@@ -27,6 +27,13 @@ v1Router.get("/models", (_req, res) => {
         description: "Seedance 2.0 video generation",
       },
       {
+        id: "happyhorse-1.0",
+        object: "model",
+        owned_by: "alibaba",
+        type: "video",
+        description: "HappyHorse 1.0 video generation",
+      },
+      {
         id: "kling-pro",
         object: "model",
         owned_by: "kling",
