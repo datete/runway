@@ -19,6 +19,7 @@ const RELAXED_TEMPLATE_LIMIT_PER_HOUR = Math.max(1, Number(process.env.RUNWAY_RE
 const RELAXED_GLOBAL_TEMPLATE_LIMIT_PER_HOUR = Math.max(1, Number(process.env.RUNWAY_RELAXED_GLOBAL_TEMPLATE_LIMIT_PER_HOUR) || 40);
 const PENDING_CANDIDATE_LIMIT = Math.max(10, Number(process.env.RUNWAY_PENDING_CANDIDATE_LIMIT) || 500);
 const STALE_LOCAL_SUBMIT_MINUTES = Math.max(2, Number(process.env.RUNWAY_STALE_LOCAL_SUBMIT_MINUTES) || 8);
+const BORROWED_STALE_SUBMIT_MINUTES = Math.max(1, Number(process.env.RUNWAY_BORROWED_STALE_SUBMIT_MINUTES) || 2);
 const RATE_LIMIT_WINDOW_SECONDS = Math.max(60, Number(process.env.RUNWAY_RATE_LIMIT_WINDOW_SECONDS) || 300);
 const RATE_LIMIT_GLOBAL_THRESHOLD = Math.max(2, Number(process.env.RUNWAY_RATE_LIMIT_GLOBAL_THRESHOLD) || 6);
 const RATE_LIMIT_GLOBAL_COOLDOWN_SECONDS = Math.max(30, Number(process.env.RUNWAY_RATE_LIMIT_GLOBAL_COOLDOWN_SECONDS) || 120);
@@ -324,14 +325,23 @@ async function areAllAccountsResting(): Promise<boolean> {
 
 async function recoverStaleLocalSubmits(): Promise<number> {
   const cutoff = new Date(Date.now() - STALE_LOCAL_SUBMIT_MINUTES * 60_000);
+  const borrowedCutoff = new Date(Date.now() - BORROWED_STALE_SUBMIT_MINUTES * 60_000);
   const jobs = await prisma.runwayJob.findMany({
     where: {
       status: "submitted",
       accountId: { not: null },
-      updatedAt: { lt: cutoff },
-      OR: [{ remoteTaskId: null }, { remoteTaskId: "" }],
-    },
-    select: { id: true, accountId: true },
+      OR: [
+        { remoteTaskId: null },
+        { remoteTaskId: "" },
+      ],
+      AND: [{
+        OR: [
+          { provider: "borrowed", updatedAt: { lt: borrowedCutoff } },
+          { provider: { not: "borrowed" }, updatedAt: { lt: cutoff } },
+        ],
+      }],
+    } as any,
+    select: { id: true, accountId: true, provider: true },
     orderBy: { updatedAt: "asc" },
     take: 20,
   });
@@ -348,7 +358,7 @@ async function recoverStaleLocalSubmits(): Promise<number> {
         status: "pending",
         accountId: null,
         startedAt: null,
-        errorMessage: "本地提交未拿到远程任务号，已回到队列重试",
+        errorMessage: job.provider === "borrowed" ? "借调提交未拿到远程任务号，已回到子控队列重试" : "本地提交未拿到远程任务号，已回到队列重试",
       } as any,
     });
     if (updated.count > 0) {
@@ -357,7 +367,7 @@ async function recoverStaleLocalSubmits(): Promise<number> {
         await connection.del(`poll:slot-released:${job.id}`);
       }
       recovered++;
-      console.warn(`[submit-worker] recovered stale local submit ${job.id.slice(0,8)} without remote task`);
+      console.warn(`[submit-worker] recovered stale ${job.provider === "borrowed" ? "borrowed" : "local"} submit ${job.id.slice(0,8)} without remote task`);
     }
   }
   if (recovered > 0) accountPool.invalidateDbCache();

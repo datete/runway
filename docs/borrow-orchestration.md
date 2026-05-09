@@ -29,7 +29,7 @@ Endpoints mounted on each controller:
 
 Redis keys control runtime behavior without redeploying:
 
-- `borrow:dispatch:enabled`: main controller dispatch switch. `1` enables borrowing outbound tasks.
+- `borrow:dispatch:enabled`: main controller dispatch switch. `1` enables borrowing outbound tasks. Turning it off stops new dispatches only; active borrowed jobs are still polled until they complete or fail.
 - `borrow:dispatch:max-global`: global borrowed in-flight limit across all child systems.
 - `borrow:dispatch:pending-threshold`: only borrow when the main queue has at least this many pending/queued jobs.
 - `borrow:dispatch:local-usage-threshold`: only borrow when local account usage percentage reaches this threshold.
@@ -56,7 +56,8 @@ The main controller also protects the whole system:
 - It only borrows when local backlog and local usage thresholds are met.
 - It caps global borrowed in-flight jobs with `borrow:dispatch:max-global`.
 - It caps each child with `borrow_systems.max_inflight`.
-- It returns a job to the local queue if dispatch fails, polling times out, or the child ends in a terminal non-success status.
+- It returns a job to the local queue if dispatch fails, polling times out, the child ends in a terminal non-success status, or the child stays without a remote task id for too long.
+- Child borrowed shadow jobs that enter `submitted` without a remote task id are recovered back to the child queue after a short borrowed-task timeout.
 - It enters a short global borrow cooldown after repeated child dispatch failures.
 
 ## Display Rules
@@ -79,14 +80,21 @@ Current intended topology:
 - `keling.iplcz.cn`: main controller, dispatch switch defaults off until manually enabled.
 - `81.70.250.85`: child controller, provider switch defaults on, registered in the main controller as `81-subcontrol`.
 
+Runtime concurrency semantics:
+
+- `borrow:dispatch:max-global=10` means the main controller can hold up to 10 active borrowed dispatches across all child controllers.
+- `borrow_systems.max_inflight=10` on `81-subcontrol` means that child can hold up to 10 active main-controller borrowed tasks.
+- `borrow:provider:max-concurrency=10` on the child means the child accepts up to 10 borrowed shadow jobs, reduced by current borrowed channel occupancy and local reserve slots.
+- These are submitted Runway tasks, not guaranteed active rendering slots on Runway; Runway may still keep them in platform queue with progress 0.
+
 Recommended defaults:
 
 ```bash
 # main controller
-redis-cli mset borrow:dispatch:enabled 0 borrow:provider:enabled 0 borrow:dispatch:max-global 4 borrow:dispatch:pending-threshold 20 borrow:dispatch:local-usage-threshold 70
+redis-cli mset borrow:dispatch:enabled 0 borrow:provider:enabled 0 borrow:dispatch:max-global 10 borrow:dispatch:pending-threshold 20 borrow:dispatch:local-usage-threshold 70
 
 # child controller
-redis-cli mset borrow:dispatch:enabled 0 borrow:provider:enabled 1 borrow:provider:max-concurrency 4 borrow:provider:reserve-slots 2
+redis-cli mset borrow:dispatch:enabled 0 borrow:provider:enabled 1 borrow:provider:max-concurrency 10 borrow:provider:reserve-slots 2
 ```
 
 ## Rollback

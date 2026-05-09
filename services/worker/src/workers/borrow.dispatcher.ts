@@ -11,6 +11,7 @@ const DISPATCH_FAILURE_KEY = "borrow:dispatch:failure-count";
 const DISPATCH_INTERVAL_MS = Number(process.env.BORROW_DISPATCH_INTERVAL_MS) || 15000;
 const POLL_INTERVAL_MS = Number(process.env.BORROW_POLL_INTERVAL_MS) || 20000;
 const FETCH_TIMEOUT_MS = Number(process.env.BORROW_FETCH_TIMEOUT_MS) || 15000;
+const REMOTE_NO_TASK_STALE_MINUTES = Math.max(3, Number(process.env.BORROW_REMOTE_NO_TASK_STALE_MINUTES) || 10);
 
 const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled", "deleted"]);
 
@@ -280,8 +281,7 @@ async function dispatchTick() {
 }
 
 async function pollTick() {
-  const settings = await getSettings();
-  if (!settings.enabled) return;
+  // Polling must continue when dispatch is disabled so already-borrowed jobs can finish and return to the main task cards.
   const rows: any[] = await (prisma as any).$queryRawUnsafe(`
     SELECT bd.id::text, bd.runway_job_id::text AS "jobId", bd.system_name AS "systemName",
            bs.endpoint, bd.updated_at AS "updatedAt"
@@ -298,6 +298,13 @@ async function pollTick() {
         headers: {},
       });
       const status = String(remote.status || "processing");
+      const remoteUpdatedAt = remote.updatedAt ? new Date(remote.updatedAt).getTime() : 0;
+      const remoteStaleMinutes = remoteUpdatedAt > 0 ? (Date.now() - remoteUpdatedAt) / 60000 : 0;
+      const remoteHasNoTask = !remote.remoteTaskId;
+      if (remoteHasNoTask && ["pending", "queued", "submitted", "processing"].includes(status) && remoteStaleMinutes >= REMOTE_NO_TASK_STALE_MINUTES) {
+        await releaseToLocal(row.jobId, row.id, "remote_no_task_stale", `child ${row.systemName} stayed ${status} without remote task for ${remoteStaleMinutes.toFixed(1)} minutes`);
+        continue;
+      }
       if (status === "completed") {
         await (prisma as any).$executeRawUnsafe(`
           UPDATE runway_jobs
