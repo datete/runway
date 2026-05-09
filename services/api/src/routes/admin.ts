@@ -1,5 +1,6 @@
 import { Router, Request, Response } from "express";
 import bcrypt from "bcryptjs";
+import fetch from "node-fetch";
 import IORedis from "ioredis";
 import { execFile } from "child_process";
 import { promises as fs } from "fs";
@@ -21,6 +22,96 @@ const VIDEO_CACHE_DIR = process.env.MEDIA_CACHE_DIR || path.join(UPLOAD_ROOT, "v
 const CAPTURES_DIR = path.join(RUNWAY_ROOT, "captures");
 const VIDEO_CACHE_FILE_RE = /^(?:[a-f0-9]{40}|video_[a-f0-9]{8}_\d+)\.mp4$/;
 const CONTENT_REVIEW_KEY = "runway:content-review-enabled";
+
+const BORROW_DISPATCH_ENABLED_KEY = "borrow:dispatch:enabled";
+const BORROW_DISPATCH_MAX_GLOBAL_KEY = "borrow:dispatch:max-global";
+const BORROW_DISPATCH_PENDING_THRESHOLD_KEY = "borrow:dispatch:pending-threshold";
+const BORROW_DISPATCH_USAGE_THRESHOLD_KEY = "borrow:dispatch:local-usage-threshold";
+const BORROW_PROVIDER_ENABLED_KEY = "borrow:provider:enabled";
+const BORROW_PROVIDER_MAX_KEY = "borrow:provider:max-concurrency";
+const BORROW_PROVIDER_RESERVE_KEY = "borrow:provider:reserve-slots";
+
+function clampInt(raw: any, fallback: number, min: number, max: number): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(n)));
+}
+
+async function getBorrowSettings() {
+  const [dispatchEnabled, maxGlobal, pendingThreshold, usageThreshold, providerEnabled, providerMax, providerReserve] = await Promise.all([
+    redis.get(BORROW_DISPATCH_ENABLED_KEY),
+    redis.get(BORROW_DISPATCH_MAX_GLOBAL_KEY),
+    redis.get(BORROW_DISPATCH_PENDING_THRESHOLD_KEY),
+    redis.get(BORROW_DISPATCH_USAGE_THRESHOLD_KEY),
+    redis.get(BORROW_PROVIDER_ENABLED_KEY),
+    redis.get(BORROW_PROVIDER_MAX_KEY),
+    redis.get(BORROW_PROVIDER_RESERVE_KEY),
+  ]);
+  return {
+    dispatchEnabled: dispatchEnabled === "1",
+    maxGlobal: clampInt(maxGlobal, 4, 1, 100),
+    pendingThreshold: clampInt(pendingThreshold, 20, 1, 10000),
+    localUsageThreshold: clampInt(usageThreshold, 70, 0, 100),
+    providerEnabled: providerEnabled === "1",
+    providerMaxConcurrency: clampInt(providerMax, 1, 0, 100),
+    providerReserveSlots: clampInt(providerReserve, 1, 0, 100),
+  };
+}
+
+
+
+async function upsertBorrowCapacityReport(systemId: string, cap: any) {
+  await (prisma as any).$executeRawUnsafe(`
+    INSERT INTO borrow_capacity_reports (system_id, reported_at, local_pending, local_active, free_slots, available_slots, cooldown_accounts, recent_429, failure_rate, avg_duration_seconds, raw_json)
+    VALUES ($1::uuid, now(), $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
+    ON CONFLICT (system_id) DO UPDATE SET
+      reported_at = excluded.reported_at,
+      local_pending = excluded.local_pending,
+      local_active = excluded.local_active,
+      free_slots = excluded.free_slots,
+      available_slots = excluded.available_slots,
+      cooldown_accounts = excluded.cooldown_accounts,
+      recent_429 = excluded.recent_429,
+      failure_rate = excluded.failure_rate,
+      avg_duration_seconds = excluded.avg_duration_seconds,
+      raw_json = excluded.raw_json
+  `,
+    systemId,
+    Number(cap?.localPending) || 0,
+    Number(cap?.localActive) || 0,
+    Number(cap?.freeSlots) || 0,
+    Number(cap?.availableSlots) || 0,
+    Number(cap?.cooldownAccounts) || 0,
+    Number(cap?.recent429) || 0,
+    Number(cap?.failureRate) || 0,
+    cap?.avgDurationSeconds == null ? null : Number(cap.avgDurationSeconds),
+    JSON.stringify(cap || {}),
+  );
+}
+
+async function refreshBorrowSystemCapacities() {
+  const systems: any[] = await (prisma as any).$queryRawUnsafe(`
+    SELECT id::text, name, endpoint
+    FROM borrow_systems
+    WHERE enabled = true
+    ORDER BY priority DESC, created_at ASC
+    LIMIT 50
+  `);
+  await Promise.all(systems.map(async (system) => {
+    const endpoint = String(system.endpoint || "").replace(/\/$/, "");
+    if (!endpoint) return;
+    try {
+      const response: any = await fetch(`${endpoint}/api/runway/borrow/capacity`, { method: "GET", timeout: 6000 } as any);
+      const text = await response.text();
+      let body: any = {};
+      try { body = text ? JSON.parse(text) : {}; } catch { body = { raw: text }; }
+      if (!response.ok) throw new Error(body?.error || `${response.status} ${response.statusText}`);
+      await upsertBorrowCapacityReport(system.id, body);
+    } catch (e: any) {
+      await upsertBorrowCapacityReport(system.id, { enabled: false, availableSlots: 0, freeSlots: 0, error: e?.message || String(e) });
+    }
+  }));
+}
 
 type StorageBucket = {
   path: string;
@@ -281,7 +372,7 @@ router.get("/accounts", async (_req: Request, res: Response) => {
     for (const r of hourlyRows) if (r.accountId) hourlyMap[r.accountId] = r._count._all;
     // Get recent jobs per account (max 5 per account, newest first)
     const acctJobs = await prisma.runwayJob.findMany({
-      where: { accountId: { not: null }, status: { not: "deleted" } },
+      where: { accountId: { not: null }, status: { not: "deleted" }, provider: { not: "borrowed" } } as any,
       orderBy: { updatedAt: "desc" },
       take: 50,
       select: { id: true, accountId: true, userId: true, status: true, progress: true, prompt: true, referenceImages: true, thumbnailUrl: true, videoUrl: true, createdAt: true, updatedAt: true, user: { select: { username: true } } },
@@ -636,8 +727,8 @@ router.delete("/users/:id", async (req: Request, res: Response) => {
 // GET /api/runway/admin/jobs
 router.get("/jobs", async (req: Request, res: Response) => {
   try {
-    const { userId, status, page = "1", limit = "20" } = req.query as any;
-    const where: any = {};
+    const { userId, status, page = "1", limit = "20", includeBorrowed } = req.query as any;
+    const where: any = includeBorrowed === "1" ? {} : { provider: { not: "borrowed" } };
     if (userId) where.userId = userId;
     if (status) where.status = status;
     const skip = (Number(page) - 1) * Number(limit);
@@ -852,7 +943,7 @@ router.get("/dashboard", async (_req: Request, res: Response) => {
     });
     // Get recent jobs per account (active first, then recent completed, max 5 per account)
     const accountRecentJobs = await prisma.runwayJob.findMany({
-      where: { accountId: { not: null }, status: { not: "deleted" } },
+      where: { accountId: { not: null }, status: { not: "deleted" }, provider: { not: "borrowed" } } as any,
       orderBy: { updatedAt: "desc" },
       take: 50,
       select: { id: true, accountId: true, userId: true, status: true, progress: true, prompt: true, referenceImages: true, thumbnailUrl: true, videoUrl: true, createdAt: true, updatedAt: true, user: { select: { username: true } } },
@@ -915,6 +1006,46 @@ router.get("/dashboard", async (_req: Request, res: Response) => {
       contentReviewEnabled = await getContentReviewEnabled();
     } catch {}
 
+    let borrowStats: any = null;
+    try {
+      await refreshBorrowSystemCapacities();
+      const settings = await getBorrowSettings();
+      const rows: any[] = await (prisma as any).$queryRawUnsafe(`
+        SELECT
+          COUNT(*) FILTER (WHERE status IN ('dispatching','accepted','processing')) AS active,
+          COUNT(*) FILTER (WHERE status = 'completed') AS completed,
+          COUNT(*) FILTER (WHERE status = 'failed') AS failed
+        FROM borrow_dispatches
+      `);
+      const systemsRows: any[] = await (prisma as any).$queryRawUnsafe(`
+        SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE enabled) AS enabled FROM borrow_systems
+      `);
+      const redundancyRows: any[] = await (prisma as any).$queryRawUnsafe(`
+        SELECT
+          COALESCE(SUM(bcr.available_slots) FILTER (WHERE bs.enabled), 0) AS "globalRedundantSlots",
+          COALESCE(SUM(bcr.free_slots) FILTER (WHERE bs.enabled), 0) AS "globalFreeSlots",
+          COUNT(*) FILTER (WHERE bs.enabled AND (bcr.reported_at IS NULL OR bcr.reported_at < now() - INTERVAL '2 minutes')) AS "staleSystems"
+        FROM borrow_systems bs
+        LEFT JOIN borrow_capacity_reports bcr ON bcr.system_id = bs.id
+      `);
+      const localFreeSlots = Math.max(0, totalMaxConcurrency - totalCurrentConcurrency);
+      const providerAvailableSlots = settings.providerEnabled
+        ? Math.max(0, Math.min(settings.providerMaxConcurrency, localFreeSlots - settings.providerReserveSlots))
+        : 0;
+      borrowStats = {
+        ...settings,
+        activeDispatches: Number(rows[0]?.active || 0),
+        completedDispatches: Number(rows[0]?.completed || 0),
+        failedDispatches: Number(rows[0]?.failed || 0),
+        totalSystems: Number(systemsRows[0]?.total || 0),
+        enabledSystems: Number(systemsRows[0]?.enabled || 0),
+        globalRedundantSlots: Number(redundancyRows[0]?.globalRedundantSlots || 0),
+        globalFreeSlots: Number(redundancyRows[0]?.globalFreeSlots || 0),
+        staleSystems: Number(redundancyRows[0]?.staleSystems || 0),
+        providerAvailableSlots,
+      };
+    } catch {}
+
     res.json({
       overview: {
         totalUsers, activeUsers, totalJobs, todayJobs, queuedJobs, processingJobs, completedJobs, failedJobs, todayCompleted, todayFailed,
@@ -926,6 +1057,7 @@ router.get("/dashboard", async (_req: Request, res: Response) => {
         speedMultiplier,
         deepNightEnabled,
         contentReviewEnabled,
+        borrow: borrowStats,
       },
       userStats,
       accountStats,
@@ -1056,6 +1188,148 @@ router.get("/sessions/user/:userId", async (req: Request, res: Response) => {
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }
+});
+
+
+// ============== BORROWED COMPUTE ==============
+
+router.get("/borrow/settings", async (_req: Request, res: Response) => {
+  try {
+    res.json(await getBorrowSettings());
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+router.post("/borrow/settings", async (req: Request, res: Response) => {
+  try {
+    const body = req.body || {};
+    if (body.dispatchEnabled !== undefined) await redis.set(BORROW_DISPATCH_ENABLED_KEY, body.dispatchEnabled ? "1" : "0");
+    if (body.maxGlobal !== undefined) await redis.set(BORROW_DISPATCH_MAX_GLOBAL_KEY, String(clampInt(body.maxGlobal, 4, 1, 100)));
+    if (body.pendingThreshold !== undefined) await redis.set(BORROW_DISPATCH_PENDING_THRESHOLD_KEY, String(clampInt(body.pendingThreshold, 20, 1, 10000)));
+    if (body.localUsageThreshold !== undefined) await redis.set(BORROW_DISPATCH_USAGE_THRESHOLD_KEY, String(clampInt(body.localUsageThreshold, 70, 0, 100)));
+    if (body.providerEnabled !== undefined) await redis.set(BORROW_PROVIDER_ENABLED_KEY, body.providerEnabled ? "1" : "0");
+    if (body.providerMaxConcurrency !== undefined) await redis.set(BORROW_PROVIDER_MAX_KEY, String(clampInt(body.providerMaxConcurrency, 1, 0, 100)));
+    if (body.providerReserveSlots !== undefined) await redis.set(BORROW_PROVIDER_RESERVE_KEY, String(clampInt(body.providerReserveSlots, 1, 0, 100)));
+    console.log(`[admin] borrow settings updated by ${(req as any).user?.username || "unknown"}`);
+    res.json({ ok: true, settings: await getBorrowSettings() });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+router.get("/borrow/systems", async (_req: Request, res: Response) => {
+  try {
+    await refreshBorrowSystemCapacities();
+    const rows: any[] = await (prisma as any).$queryRawUnsafe(`
+      SELECT bs.id::text, bs.name, bs.endpoint, bs.enabled, bs.priority, bs.max_inflight AS "maxInflight",
+             bs.accepted_models AS "acceptedModels", bs.notes, bs.created_at AS "createdAt", bs.updated_at AS "updatedAt",
+             bcr.reported_at AS "reportedAt", bcr.local_pending AS "localPending", bcr.local_active AS "localActive",
+             bcr.free_slots AS "freeSlots", bcr.available_slots AS "availableSlots", bcr.cooldown_accounts AS "cooldownAccounts",
+             bcr.recent_429 AS "recent429", bcr.failure_rate AS "failureRate", bcr.avg_duration_seconds AS "avgDurationSeconds",
+             COALESCE((bcr.raw_json->>'enabled')::boolean, false) AS "childProviderEnabled",
+             COALESCE((bcr.raw_json->>'channelOccupied')::int, COALESCE(ad.active_dispatches, 0)) AS "channelOccupied",
+             COALESCE((bcr.raw_json->>'borrowedShadowActive')::int, 0) AS "borrowedShadowActive",
+             COALESCE((bcr.raw_json->>'borrowedShadowPending')::int, 0) AS "borrowedShadowPending",
+             COALESCE(ad.active_dispatches, 0) AS "activeDispatches"
+      FROM borrow_systems bs
+      LEFT JOIN borrow_capacity_reports bcr ON bcr.system_id = bs.id
+      LEFT JOIN (
+        SELECT system_id, COUNT(*)::int AS active_dispatches
+        FROM borrow_dispatches
+        WHERE status IN ('dispatching','accepted','processing')
+        GROUP BY system_id
+      ) ad ON ad.system_id = bs.id
+      ORDER BY bs.priority DESC, bs.created_at ASC
+    `);
+    res.json({ systems: rows });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+router.post("/borrow/systems", async (req: Request, res: Response) => {
+  try {
+    const body = req.body || {};
+    if (!body.name || !body.endpoint) return res.status(400).json({ error: "name 和 endpoint 必填" });
+    const rows: any[] = await (prisma as any).$queryRawUnsafe(
+      `INSERT INTO borrow_systems (name, endpoint, enabled, priority, max_inflight, notes)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id::text, name, endpoint, enabled, priority, max_inflight AS "maxInflight", notes, created_at AS "createdAt"`,
+      String(body.name).trim(),
+      String(body.endpoint).trim().replace(/\/$/, ""),
+      Boolean(body.enabled),
+      clampInt(body.priority, 0, -1000, 1000),
+      clampInt(body.maxInflight, 2, 1, 100),
+      body.notes ? String(body.notes) : null,
+    );
+    res.json({ ok: true, system: rows[0] });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+router.put("/borrow/systems/:id", async (req: Request, res: Response) => {
+  try {
+    const body = req.body || {};
+    const sets: string[] = [];
+    const args: any[] = [];
+    const add = (sql: string, value: any) => { args.push(value); sets.push(`${sql} = $${args.length}`); };
+    if (body.name !== undefined) add("name", String(body.name).trim());
+    if (body.endpoint !== undefined) add("endpoint", String(body.endpoint).trim().replace(/\/$/, ""));
+    if (body.enabled !== undefined) add("enabled", Boolean(body.enabled));
+    if (body.priority !== undefined) add("priority", clampInt(body.priority, 0, -1000, 1000));
+    if (body.maxInflight !== undefined) add("max_inflight", clampInt(body.maxInflight, 2, 1, 100));
+    if (body.notes !== undefined) add("notes", body.notes ? String(body.notes) : null);
+    if (sets.length === 0) return res.json({ ok: true, changed: 0 });
+    args.push(req.params.id);
+    const rows: any[] = await (prisma as any).$queryRawUnsafe(
+      `UPDATE borrow_systems SET ${sets.join(", ")}, updated_at = now() WHERE id = $${args.length}::uuid RETURNING id::text, name, endpoint, enabled, priority, max_inflight AS "maxInflight", notes, updated_at AS "updatedAt"`,
+      ...args,
+    );
+    if (!rows[0]) return res.status(404).json({ error: "系统不存在" });
+    res.json({ ok: true, system: rows[0] });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+router.delete("/borrow/systems/:id", async (req: Request, res: Response) => {
+  try {
+    await (prisma as any).$executeRawUnsafe(`DELETE FROM borrow_systems WHERE id = $1::uuid`, req.params.id);
+    res.json({ ok: true });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+
+router.post("/borrow/systems/:id/control", async (req: Request, res: Response) => {
+  try {
+    const rows: any[] = await (prisma as any).$queryRawUnsafe(
+      `SELECT id::text, name, endpoint FROM borrow_systems WHERE id = $1::uuid`,
+      req.params.id,
+    );
+    const system = rows[0];
+    if (!system) return res.status(404).json({ error: "系统不存在" });
+    const endpoint = String(system.endpoint || "").replace(/\/$/, "");
+    const response = await fetch(`${endpoint}/api/runway/borrow/control`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(req.body || {}),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) return res.status(response.status).json({ error: body.error || "子控控制失败" });
+    if (body?.capacity) await upsertBorrowCapacityReport(system.id, body.capacity);
+    res.json({ ok: true, system: system.name, child: body });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+router.get("/borrow/dispatches", async (req: Request, res: Response) => {
+  try {
+    const limit = clampInt(req.query.limit, 50, 1, 200);
+    const rows: any[] = await (prisma as any).$queryRawUnsafe(`
+      SELECT bd.id::text, bd.runway_job_id::text AS "runwayJobId", bd.system_id::text AS "systemId",
+             bd.system_name AS "systemName", bd.shadow_job_id AS "shadowJobId", bd.status,
+             bd.result_url AS "resultUrl", bd.thumbnail_url AS "thumbnailUrl", bd.video_url AS "videoUrl",
+             bd.error_code AS "errorCode", bd.error_message AS "errorMessage", bd.attempt,
+             bd.last_heartbeat_at AS "lastHeartbeatAt", bd.created_at AS "createdAt", bd.updated_at AS "updatedAt",
+             rj.seq, rj.prompt, rj.status AS "jobStatus"
+      FROM borrow_dispatches bd
+      LEFT JOIN runway_jobs rj ON rj.id = bd.runway_job_id
+      ORDER BY bd.updated_at DESC
+      LIMIT $1
+    `, limit);
+    res.json({ dispatches: rows });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
 // ============== GLOBAL SPEED MULTIPLIER ==============

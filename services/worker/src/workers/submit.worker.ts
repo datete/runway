@@ -19,6 +19,10 @@ const RELAXED_TEMPLATE_LIMIT_PER_HOUR = Math.max(1, Number(process.env.RUNWAY_RE
 const RELAXED_GLOBAL_TEMPLATE_LIMIT_PER_HOUR = Math.max(1, Number(process.env.RUNWAY_RELAXED_GLOBAL_TEMPLATE_LIMIT_PER_HOUR) || 40);
 const PENDING_CANDIDATE_LIMIT = Math.max(10, Number(process.env.RUNWAY_PENDING_CANDIDATE_LIMIT) || 500);
 const STALE_LOCAL_SUBMIT_MINUTES = Math.max(2, Number(process.env.RUNWAY_STALE_LOCAL_SUBMIT_MINUTES) || 8);
+const RATE_LIMIT_WINDOW_SECONDS = Math.max(60, Number(process.env.RUNWAY_RATE_LIMIT_WINDOW_SECONDS) || 300);
+const RATE_LIMIT_GLOBAL_THRESHOLD = Math.max(2, Number(process.env.RUNWAY_RATE_LIMIT_GLOBAL_THRESHOLD) || 6);
+const RATE_LIMIT_GLOBAL_COOLDOWN_SECONDS = Math.max(30, Number(process.env.RUNWAY_RATE_LIMIT_GLOBAL_COOLDOWN_SECONDS) || 120);
+
 const LEGACY_GUARD_BEFORE = process.env.RUNWAY_LEGACY_PROMPT_GUARD_BEFORE
   ? Date.parse(process.env.RUNWAY_LEGACY_PROMPT_GUARD_BEFORE)
   : 0;
@@ -158,6 +162,16 @@ async function checkWorkerTemplateBurst(accountId: string, userId: string | null
     return `全站相同/相似提示词提交过于频繁，未提交 Runway（${globalCount}/${globalLimit}，${WORKER_TEMPLATE_WINDOW_SECONDS}秒窗口）`;
   }
   return null;
+}
+
+async function recordRateLimitAndMaybeGlobalCooldown(): Promise<void> {
+  const key = "risk:worker-rate-limit:global";
+  const count = await connection.incr(key);
+  if (count === 1) await connection.expire(key, RATE_LIMIT_WINDOW_SECONDS);
+  if (count >= RATE_LIMIT_GLOBAL_THRESHOLD) {
+    await connection.set("risk:worker-submit-cooldown", "1", "EX", RATE_LIMIT_GLOBAL_COOLDOWN_SECONDS).catch(() => {});
+    console.warn(`[submit-worker] global 429 threshold hit (${count}/${RATE_LIMIT_GLOBAL_THRESHOLD}), cooldown ${RATE_LIMIT_GLOBAL_COOLDOWN_SECONDS}s`);
+  }
 }
 
 async function checkGlobalSubmitBudget(): Promise<number> {
@@ -708,6 +722,7 @@ async function trySubmitOneOnAccount(account: AccountEntry): Promise<SubmitResul
       await accountPool.release(account.id);
       await accountPool.recordError(account.id, "429 Rate Limited");
       await accountPool.setCooldown(account.id, 420);
+      await recordRateLimitAndMaybeGlobalCooldown();
       await prisma.runwayJob.updateMany({ where: { id: jobId, status: "submitted" }, data: { status: "pending", accountId: null, startedAt: null } as any });
       return "rate_limited";
     }
@@ -774,21 +789,49 @@ async function humanSleep(ms: number): Promise<void> {
   await sleep(Math.round(ms / sp));
 }
 
-async function hasPlatformQueuedJob(accountId: string): Promise<boolean> {
-  const count = await prisma.runwayJob.count({
+async function getQueuedJobCount(accountId: string): Promise<number> {
+  return prisma.runwayJob.count({
     where: {
       accountId,
       status: { in: ["queued", "submitted", "processing"] },
       errorMessage: { startsWith: "平台排队中" },
     },
   });
-  return count > 0;
+}
+
+async function getActiveJobCount(accountId: string): Promise<number> {
+  return prisma.runwayJob.count({
+    where: {
+      accountId,
+      status: { in: ["submitted", "processing"] },
+    },
+  });
 }
 
 async function shouldHoldSecondSlotForQueuedJob(): Promise<boolean> {
   const raw = await connection.get("runway:hold-second-slot-on-queued").catch(() => null);
   if (raw !== null) return raw === "1";
-  return process.env.RUNWAY_HOLD_SECOND_SLOT_ON_QUEUED === "1";
+  return process.env.RUNWAY_HOLD_SECOND_SLOT_ON_QUEUED !== "0";
+}
+
+async function getMaxSlotsWhenQueued(maxConcurrency: number): Promise<number> {
+  const raw = await connection.get("runway:max-slots-when-queued").catch(() => null);
+  const configured = raw !== null ? Number(raw) : Number(process.env.RUNWAY_MAX_SLOTS_WHEN_QUEUED || 2);
+  if (!Number.isFinite(configured)) return Math.min(2, maxConcurrency);
+  return Math.max(1, Math.min(maxConcurrency, Math.floor(configured)));
+}
+
+async function shouldHoldForQueuedJob(account: AccountEntry): Promise<boolean> {
+  if (!(await shouldHoldSecondSlotForQueuedJob())) return false;
+  const queued = await getQueuedJobCount(account.id);
+  if (queued <= 0) return false;
+  const active = await getActiveJobCount(account.id);
+  const cap = await getMaxSlotsWhenQueued(account.maxConcurrency);
+  const hold = active >= cap;
+  if (hold) {
+    console.log(`[loop:${account.id.slice(0,8)}] queued hold active=${active}/${account.maxConcurrency}, queued=${queued}, cap=${cap}`);
+  }
+  return hold;
 }
 
 type AccountLoopState = { stopFlag: boolean; started?: boolean };
@@ -859,7 +902,7 @@ async function accountSubmitLoop(accountId: string, existingState?: AccountLoopS
       // Optional conservative mode: hold an account's second local slot when it
       // already has a platform-queued task. Default is off so account
       // maxConcurrency=2 can actually run as 2 local slots.
-      if ((await shouldHoldSecondSlotForQueuedJob()) && await hasPlatformQueuedJob(account.id)) {
+      if (await shouldHoldForQueuedJob(account)) {
         await humanSleep(humanDelay(18_000, 36_000));
         continue;
       }

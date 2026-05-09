@@ -9,6 +9,7 @@ import { prisma } from './services/prisma';
 import { redisConnection } from './queues/runway.queue';
 import { authRouter } from './routes/auth';
 import { adminRouter } from './routes/admin';
+import { borrowRouter } from './routes/borrow';
 import { reviewRouter } from './routes/review';
 import { v1Router } from './routes/v1';
 
@@ -95,6 +96,7 @@ app.use('/img', express.static('/root/runway/uploads'));
 // Runway API routes
 app.use('/api/runway/auth', authRouter);
 app.use('/api/runway/admin', adminRouter);
+app.use('/api/runway/borrow', borrowRouter);
 app.use('/api/runway', runwayRouter);
 app.use('/api/kling', klingRouter);
 app.use('/api/review', reviewRouter);

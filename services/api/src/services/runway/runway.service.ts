@@ -166,8 +166,8 @@ export class RunwayService {
 
     // Base filter: exclude deleted
     const baseWhere: any = role === "admin"
-      ? { status: { not: "deleted" } }
-      : { userId: userId ?? null, status: { not: "deleted" } };
+      ? { status: { not: "deleted" }, provider: { not: "borrowed" } }
+      : { userId: userId ?? null, status: { not: "deleted" }, provider: { not: "borrowed" } };
 
     // Status filter from tab
     const statusFilter = options?.status;
@@ -203,6 +203,7 @@ export class RunwayService {
     // Get counts via single raw SQL, plus paginated jobs
     const isAdmin = role === "admin";
     const userFilter = isAdmin ? "" : ` AND "user_id" = '${userId}'`;
+    const visibleFilter = ` AND provider <> 'borrowed'`;
     const countsQuery = (prisma as any).$queryRawUnsafe(`
       SELECT
         COUNT(*) FILTER (WHERE status NOT IN ('deleted')) AS all,
@@ -210,7 +211,7 @@ export class RunwayService {
         COUNT(*) FILTER (WHERE status = 'processing') AS processing,
         COUNT(*) FILTER (WHERE status = 'completed') AS completed,
         COUNT(*) FILTER (WHERE status IN ('failed','cancelled')) AS failed
-      FROM runway_jobs WHERE 1=1${userFilter}
+      FROM runway_jobs WHERE 1=1${userFilter}${visibleFilter}
     `);
 
     const [jobs, countRows] = await Promise.all([
@@ -276,7 +277,7 @@ export class RunwayService {
     if (role !== "admin" && userId && job.userId !== userId) throw new Error("forbidden");
     await prisma.runwayJob.update({
       where: { id },
-      data: { status: "pending", errorMessage: null, retryCount: { increment: 1 }, accountId: null, remoteTaskId: null, startedAt: null, finishedAt: null },
+      data: { status: "pending", errorMessage: null, retryCount: { increment: 1 }, accountId: null, remoteTaskId: null, startedAt: null, finishedAt: null, executionMode: "local", borrowDispatchId: null, borrowSystemId: null, borrowSystemName: null, borrowStatus: null, borrowErrorCode: null } as any,
     });
     // Trigger the submit worker
     await triggerSubmit();

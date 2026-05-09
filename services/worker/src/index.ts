@@ -3,6 +3,7 @@ import "dotenv/config";
 import { prisma, redis, accountPool } from "./services/shared";
 import "./workers/submit.worker";
 import "./workers/poll.worker";
+import "./workers/borrow.dispatcher";
 import { Queue } from "bullmq";
 import { triggerSubmit } from "./workers/submit.worker";
 import { RunwayDirectClient } from "./services/runway.direct";
@@ -98,9 +99,13 @@ async function recoverStuckJobs() {
     }
 
     // Step 2: Find stuck submitted/processing jobs (re-read after Step 0 may have changed some)
-    const stuckJobs = await prisma.runwayJob.findMany({
-      where: { status: { in: ["submitted", "processing"] } },
-    });
+    const stuckJobs: any[] = await (prisma as any).$queryRawUnsafe(`
+      SELECT id::text, status, remote_task_id AS "remoteTaskId", account_id AS "accountId",
+             result_url AS "resultUrl", updated_at AS "updatedAt", started_at AS "startedAt", finished_at AS "finishedAt"
+      FROM runway_jobs
+      WHERE status IN ('submitted','processing')
+        AND COALESCE(execution_mode, 'local') <> 'borrowed'
+    `);
 
     if (stuckJobs.length === 0 && queuedReset.count === 0) {
       console.log("[startup-recovery] no stuck jobs");
@@ -199,13 +204,13 @@ function startStuckSweep() {
   const sweep = async () => {
     try {
       const cutoff = new Date(Date.now() - STUCK_SWEEP_MINUTES * 60 * 1000);
-      const stuck = await prisma.runwayJob.findMany({
-        where: {
-          status: { in: ["submitted", "processing"] },
-          updatedAt: { lt: cutoff },
-        },
-        select: { id: true, status: true, remoteTaskId: true, accountId: true, updatedAt: true } as any,
-      });
+      const stuck: any[] = await (prisma as any).$queryRawUnsafe(`
+        SELECT id::text, status, remote_task_id AS "remoteTaskId", account_id AS "accountId", updated_at AS "updatedAt"
+        FROM runway_jobs
+        WHERE status IN ('submitted','processing')
+          AND updated_at < $1
+          AND COALESCE(execution_mode, 'local') <> 'borrowed'
+      `, cutoff);
       if (stuck.length === 0) return;
       for (const job of stuck as any[]) {
         const staleMin = Math.round((Date.now() - new Date(job.updatedAt).getTime()) / 60000);

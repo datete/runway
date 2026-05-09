@@ -18,6 +18,7 @@ interface AdminUser {
 interface AdminJob {
   id: string; status: string; prompt: string; duration: number | null
   resultUrl?: string | null; videoUrl?: string | null
+  executionMode?: string | null; borrowSystemName?: string | null; borrowStatus?: string | null
   createdAt: string; user?: { id: string; username: string }
   account?: { id: string; label: string; tokenShort: string }
 }
@@ -30,12 +31,30 @@ interface UserStat {
   maxConcurrency: number | null; dailyQuota: number | null; totalQuota: number | null
   totalJobs: number; todayJobs: number; todayCompleted: number; todayFailed: number; currentActive: number; hourlyCompleted: number
 }
+interface BorrowSettings {
+  dispatchEnabled: boolean; maxGlobal: number; pendingThreshold: number; localUsageThreshold: number
+  providerEnabled: boolean; providerMaxConcurrency: number; providerReserveSlots: number
+  activeDispatches?: number; completedDispatches?: number; failedDispatches?: number; totalSystems?: number; enabledSystems?: number
+  globalRedundantSlots?: number; globalFreeSlots?: number; staleSystems?: number; providerAvailableSlots?: number
+}
+interface BorrowSystemInfo {
+  id: string; name: string; endpoint: string; enabled: boolean; priority: number; maxInflight: number
+notes?: string | null; reportedAt?: string | null
+  localPending?: number | null; localActive?: number | null; freeSlots?: number | null; availableSlots?: number | null
+  cooldownAccounts?: number | null; recent429?: number | null
+  childProviderEnabled?: boolean | null; channelOccupied?: number | null; activeDispatches?: number | null
+  borrowedShadowActive?: number | null; borrowedShadowPending?: number | null
+}
+interface BorrowDispatchInfo {
+  id: string; runwayJobId: string; systemName: string | null; shadowJobId: string | null; status: string
+  errorMessage?: string | null; createdAt: string; updatedAt: string; seq?: number | null; prompt?: string | null; jobStatus?: string | null
+}
 interface DashboardOverview {
   totalUsers: number; activeUsers: number; totalJobs: number; todayJobs: number
   queuedJobs: number; processingJobs: number; completedJobs: number; failedJobs: number
   todayCompleted: number; todayFailed: number; hourlyCompleted: number
   totalAccounts: number; activeAccounts: number; totalMaxConcurrency: number; totalCurrentConcurrency: number
-  speedMultiplier?: number; deepNightEnabled?: boolean; contentReviewEnabled?: boolean
+  speedMultiplier?: number; deepNightEnabled?: boolean; contentReviewEnabled?: boolean; borrow?: BorrowSettings | null
 }
 interface AccountInfo {
   id: string; label: string; tokenShort: string; teamId: string; proxyUrl: string | null; proxyId: string | null
@@ -206,6 +225,22 @@ const onContentReviewChange = async (enabled: boolean) => {
 const userStats = ref<UserStat[]>([])
 const accountStatsData = ref<AccountStat[]>([])
 
+const defaultBorrowSettings: BorrowSettings = {
+  dispatchEnabled: false,
+  maxGlobal: 4,
+  pendingThreshold: 20,
+  localUsageThreshold: 70,
+  providerEnabled: false,
+  providerMaxConcurrency: 1,
+  providerReserveSlots: 1,
+}
+const borrowSettings = ref<BorrowSettings>({ ...defaultBorrowSettings })
+const borrowSystems = ref<BorrowSystemInfo[]>([])
+const borrowDispatches = ref<BorrowDispatchInfo[]>([])
+const borrowLoading = ref(false)
+const borrowSaving = ref(false)
+const borrowSystemForm = ref({ name: '', endpoint: '', maxInflight: 2, priority: 0, enabled: true })
+
 const users = ref<AdminUser[]>([])
 const userLoading = ref(false)
 const showUserModal = ref(false)
@@ -266,7 +301,7 @@ const apiKeyStats = ref<any>({ keys: [], overall: { activeKeys: 0, totalKeys: 0 
 const apiCallLogs = ref<any[]>([])
 const apiCallSummary = ref<any>({ total: 0, success: 0, errors: 0, avgDuration: 0, lastHour: 0 })
 const apiLogsFilter = ref<'all' | 'success' | 'error'>('all')
-type AdminTab = 'accounts' | 'proxies' | 'users' | 'jobs' | 'logs' | 'devices' | 'apikeys'
+type AdminTab = 'accounts' | 'proxies' | 'users' | 'jobs' | 'borrow' | 'logs' | 'devices' | 'apikeys'
 interface ProxyInfo { id: string; label: string; url: string; isActive: boolean; lastTestedAt: string | null; lastOk: boolean | null; latencyMs: number | null; lastError: string | null; accountCount: number }
 type AccountFilter = 'all' | 'active' | 'disabled' | 'cooldown'
 type UserFilter = 'all' | 'active' | 'disabled' | 'admin'
@@ -403,6 +438,7 @@ const dashCards = computed(() => [
   { icon: 'ri:pulse-line', label: '近1h完成', value: overview.value.hourlyCompleted, sub: '最近1小时全局', color: 'from-emerald-500 to-cyan-500' },
   { icon: 'ri:loader-4-line', label: '排队 / 处理中', value: overview.value.queuedJobs + overview.value.processingJobs, sub: `排队 ${overview.value.queuedJobs} · 处理 ${overview.value.processingJobs}`, color: 'from-emerald-500 to-teal-600' },
   { icon: 'ri:key-2-line', label: '账号', value: `${overview.value.activeAccounts}/${overview.value.totalAccounts}`, sub: `并发 ${overview.value.totalCurrentConcurrency}/${overview.value.totalMaxConcurrency}`, color: 'from-pink-500 to-rose-600' },
+  { icon: 'ri:stackshare-line', label: '全局冗余', value: overview.value.borrow?.globalRedundantSlots ?? 0, sub: `空闲 ${overview.value.borrow?.globalFreeSlots ?? 0} · 子系统 ${overview.value.borrow?.enabledSystems ?? 0}/${overview.value.borrow?.totalSystems ?? 0}`, color: 'from-cyan-500 to-blue-600' },
 ])
 
 const formatTime = (v: string) => new Date(v).toLocaleString('zh-CN', { hour12: false })
@@ -438,8 +474,125 @@ const fetchDashboard = async () => {
     if (typeof data.overview?.contentReviewEnabled === 'boolean') {
       contentReviewEnabled.value = data.overview.contentReviewEnabled
     }
+    syncBorrowSettings(data.overview?.borrow)
   } catch {}
 }
+
+
+const syncBorrowSettings = (settings?: BorrowSettings | null) => {
+  if (!settings) return
+  borrowSettings.value = { ...defaultBorrowSettings, ...settings }
+}
+
+const fetchBorrow = async () => {
+  borrowLoading.value = true
+  try {
+    const [settingsRes, systemsRes, dispatchRes] = await Promise.all([
+      fetch('/api/runway/admin/borrow/settings', { headers: headers() }),
+      fetch('/api/runway/admin/borrow/systems', { headers: headers() }),
+      fetch('/api/runway/admin/borrow/dispatches?limit=50', { headers: headers() }),
+    ])
+    if (settingsRes.ok) syncBorrowSettings(await settingsRes.json())
+    if (systemsRes.ok) borrowSystems.value = (await systemsRes.json()).systems || []
+    if (dispatchRes.ok) borrowDispatches.value = (await dispatchRes.json()).dispatches || []
+  } catch (e: any) {
+    message.error(e.message || '借调配置加载失败')
+  } finally {
+    borrowLoading.value = false
+  }
+}
+
+const saveBorrowSettings = async (patch: Partial<BorrowSettings>) => {
+  borrowSaving.value = true
+  try {
+    const res = await fetch('/api/runway/admin/borrow/settings', {
+      method: 'POST',
+      headers: { ...headers(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(data.error || '更新失败')
+    syncBorrowSettings(data.settings)
+    message.success('借调配置已更新')
+  } catch (e: any) {
+    message.error(e.message || '更新失败')
+  } finally {
+    borrowSaving.value = false
+  }
+}
+
+const createBorrowSystem = async () => {
+  if (!borrowSystemForm.value.name.trim() || !borrowSystemForm.value.endpoint.trim()) {
+    message.warning('系统名称和入口地址必填')
+    return
+  }
+  borrowSaving.value = true
+  try {
+    const res = await fetch('/api/runway/admin/borrow/systems', {
+      method: 'POST',
+      headers: { ...headers(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(borrowSystemForm.value),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(data.error || '添加失败')
+    borrowSystemForm.value = { name: '', endpoint: '', maxInflight: 2, priority: 0, enabled: true }
+    message.success('子系统已添加')
+    fetchBorrow()
+  } catch (e: any) {
+    message.error(e.message || '添加失败')
+  } finally {
+    borrowSaving.value = false
+  }
+}
+
+const updateBorrowSystem = async (row: BorrowSystemInfo, patch: Partial<BorrowSystemInfo>) => {
+  try {
+    const res = await fetch(`/api/runway/admin/borrow/systems/${row.id}`, {
+      method: 'PUT',
+      headers: { ...headers(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(data.error || '更新失败')
+    fetchBorrow()
+  } catch (e: any) {
+    message.error(e.message || '更新失败')
+  }
+}
+
+
+const controlBorrowSystem = async (row: BorrowSystemInfo, patch: { providerEnabled?: boolean; providerMaxConcurrency?: number; providerReserveSlots?: number }) => {
+  borrowSaving.value = true
+  try {
+    const res = await fetch(`/api/runway/admin/borrow/systems/${row.id}/control`, {
+      method: 'POST',
+      headers: { ...headers(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(data.error || '子控控制失败')
+    message.success('子控通道已更新')
+    fetchBorrow()
+  } catch (e: any) {
+    message.error(e.message || '子控控制失败')
+  } finally {
+    borrowSaving.value = false
+  }
+}
+
+const deleteBorrowSystem = async (row: BorrowSystemInfo) => {
+  if (!window.confirm(`确认删除借调系统 ${row.name}？`)) return
+  try {
+    const res = await fetch(`/api/runway/admin/borrow/systems/${row.id}`, { method: 'DELETE', headers: headers() })
+    if (!res.ok) throw new Error('删除失败')
+    message.success('已删除')
+    fetchBorrow()
+  } catch (e: any) {
+    message.error(e.message || '删除失败')
+  }
+}
+
+const isBorrowedAdminJob = (row: AdminJob) => row.executionMode === 'borrowed'
 
 const fetchStorage = async () => {
   storageLoading.value = true
@@ -701,6 +854,7 @@ const refreshAll = async () => {
     fetchAccounts(),
     fetchProxies(),
     fetchAdminJobs(),
+    fetchBorrow(),
     fetchLogs(),
     fetchDevices(),
     fetchSuspiciousSessions(),
@@ -817,6 +971,8 @@ const refreshCurrentTab = () => {
     fetchDashboard()
   } else if (activeTab.value === 'jobs') {
     fetchAdminJobs()
+  } else if (activeTab.value === 'borrow') {
+    fetchBorrow()
   } else if (activeTab.value === 'logs') {
     fetchLogs()
   } else if (activeTab.value === 'apikeys') { fetchApiKeys(); fetchApiKeyStats(); fetchApiCallLogs(); return }
@@ -1035,7 +1191,7 @@ const userColumns = [
 const jobColumns = [
   { title: '用户', key: 'user', width: 100, render: (row: AdminJob) => h(NTag, { size: 'small', round: true, bordered: false, type: 'info' }, () => row.user?.username ?? '—') },
   { title: '账号', key: 'account', width: 100, render: (row: AdminJob) => row.account ? h(NTag, { size: 'small', round: true, bordered: false, type: 'default' }, () => row.account!.label) : '—' },
-  { title: '状态', key: 'status', width: 100, render: (row: AdminJob) => h(NTag, { type: statusType[row.status] ?? 'default', size: 'small', round: true, bordered: false }, () => statusLabel[row.status] || row.status) },
+  { title: '状态', key: 'status', width: 100, render: (row: AdminJob) => h('div', { class: 'flex flex-col gap-1' }, [h(NTag, { type: statusType[row.status] ?? 'default', size: 'small', round: true, bordered: false }, () => statusLabel[row.status] || row.status), isBorrowedAdminJob(row) ? h(NTag, { type: 'info', size: 'small', round: true, bordered: false }, () => '借调算力') : null]) },
   { title: '时长', key: 'duration', width: 70, render: (row: AdminJob) => row.duration ? `${row.duration}s` : '—' },
   { title: '提示词', key: 'prompt', ellipsis: { tooltip: true } },
   { title: '视频链接', key: 'links', width: 150, render: (row: AdminJob) => {
@@ -1048,6 +1204,34 @@ const jobColumns = [
     ])
   } },
   { title: '时间', key: 'createdAt', width: 170, render: (row: AdminJob) => formatTime(row.createdAt) },
+]
+
+
+const borrowSystemColumns = [
+  { title: '注册', key: 'enabled', width: 78, render: (row: BorrowSystemInfo) => h(NSwitch, { value: row.enabled, 'onUpdate:value': (v: boolean) => updateBorrowSystem(row, { enabled: v }) }) },
+  { title: '子控通道', key: 'childProviderEnabled', width: 98, render: (row: BorrowSystemInfo) => h(NSwitch, { value: Boolean(row.childProviderEnabled), loading: borrowSaving.value, 'onUpdate:value': (v: boolean) => controlBorrowSystem(row, { providerEnabled: v }) }) },
+  { title: '系统', key: 'name', width: 130, render: (row: BorrowSystemInfo) => h('div', {}, [
+    h('div', { class: 'text-white/85 font-medium' }, row.name),
+    h('div', { class: 'text-[10px] text-white/35 truncate' }, row.endpoint),
+  ]) },
+  { title: '容量', key: 'capacity', width: 120, render: (row: BorrowSystemInfo) => h('div', { class: 'text-xs text-white/65' }, `${row.availableSlots ?? 0}/${row.freeSlots ?? 0} 可借`) },
+  { title: '通道占用', key: 'channelOccupied', width: 120, render: (row: BorrowSystemInfo) => {
+    const occupied = Number(row.channelOccupied ?? row.activeDispatches ?? 0)
+    return h('div', { class: 'borrow-channel-cell' }, [h('span', { class: 'text-xs text-cyan-200' }, `${occupied}/${row.maxInflight}`), h('div', { class: 'borrow-channel-track' }, h('div', { class: 'borrow-channel-fill', style: { width: `${Math.min(100, Math.round((occupied / Math.max(1, row.maxInflight)) * 100))}%` } }))])
+  } },
+  { title: '本地队列', key: 'local', width: 120, render: (row: BorrowSystemInfo) => h('span', { class: 'text-xs text-white/55' }, `排队 ${row.localPending ?? 0} · 运行 ${row.localActive ?? 0}`) },
+  { title: '上限', key: 'maxInflight', width: 95, render: (row: BorrowSystemInfo) => h(NInputNumber, { value: row.maxInflight, min: 1, max: 100, size: 'small', 'onUpdate:value': (v: number | null) => { row.maxInflight = Number(v) || 1 }, onBlur: () => updateBorrowSystem(row, { maxInflight: row.maxInflight }) }) },
+  { title: '优先级', key: 'priority', width: 90 },
+  { title: '上报', key: 'reportedAt', width: 160, render: (row: BorrowSystemInfo) => row.reportedAt ? formatTime(row.reportedAt) : '—' },
+  { title: '操作', key: 'actions', width: 90, render: (row: BorrowSystemInfo) => h(NButton, { size: 'tiny', tertiary: true, type: 'error', onClick: () => deleteBorrowSystem(row) }, () => '删除') },
+]
+
+const borrowDispatchColumns = [
+  { title: '任务', key: 'job', width: 115, render: (row: BorrowDispatchInfo) => h('span', { class: 'font-mono text-xs text-white/65' }, row.seq ? `#${row.seq}` : row.runwayJobId.slice(0, 8)) },
+  { title: '系统', key: 'systemName', width: 120, render: (row: BorrowDispatchInfo) => row.systemName || '—' },
+  { title: '状态', key: 'status', width: 95, render: (row: BorrowDispatchInfo) => h(NTag, { size: 'small', round: true, bordered: false, type: row.status === 'completed' ? 'success' : row.status === 'failed' ? 'error' : 'info' }, () => row.status) },
+  { title: '提示词', key: 'prompt', ellipsis: { tooltip: true }, render: (row: BorrowDispatchInfo) => row.prompt || '—' },
+  { title: '更新时间', key: 'updatedAt', width: 170, render: (row: BorrowDispatchInfo) => formatTime(row.updatedAt) },
 ]
 
 const logColumns = [
@@ -1314,6 +1498,56 @@ onUnmounted(() => { if (autoRefreshTimer) clearInterval(autoRefreshTimer) })
                   <span class="text-[10px]" :class="contentReviewEnabled ? 'text-emerald-300' : 'text-amber-300'">{{ contentReviewEnabled ? "启用中" : "已关闭" }}</span>
                 </div>
                 <NSwitch :value="contentReviewEnabled" :loading="contentReviewSyncing" @update:value="onContentReviewChange" />
+              </div>
+            </div>
+          </div>
+        </div>
+
+
+        <!-- 借调算力 card -->
+        <div class="borrow-radar relative overflow-hidden rounded-2xl border border-cyan-400/15 bg-white/[0.03] p-5 backdrop-blur-xl">
+          <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div class="space-y-1">
+              <div class="flex items-center gap-2">
+                <SvgIcon icon="ri:share-forward-box-line" class="text-lg text-cyan-300" />
+                <p class="text-sm font-bold text-white/90">借调算力</p>
+                <NTag size="small" round :bordered="false" :type="borrowSettings.dispatchEnabled ? 'success' : 'default'">
+                  主控 {{ borrowSettings.dispatchEnabled ? '开启' : '关闭' }}
+                </NTag>
+                <NTag size="small" round :bordered="false" :type="borrowSettings.providerEnabled ? 'success' : 'default'">
+                  被借 {{ borrowSettings.providerEnabled ? '开启' : '关闭' }}
+                </NTag>
+              </div>
+              <p class="text-xs text-white/40">全局冗余 {{ borrowSettings.globalRedundantSlots || 0 }} · 空闲 {{ borrowSettings.globalFreeSlots || 0 }} · 活跃借调 {{ borrowSettings.activeDispatches || 0 }} · 子系统 {{ borrowSettings.enabledSystems || 0 }}/{{ borrowSettings.totalSystems || 0 }}</p>
+            </div>
+            <div class="grid flex-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+              <div class="rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2">
+                <div class="mb-1 flex items-center justify-between gap-2">
+                  <span class="text-xs text-white/70">主控借调</span>
+                  <NSwitch :value="borrowSettings.dispatchEnabled" :loading="borrowSaving" @update:value="(v: boolean) => saveBorrowSettings({ dispatchEnabled: v })" />
+                </div>
+                <NInputNumber v-model:value="borrowSettings.maxGlobal" size="small" :min="1" :max="100" @blur="saveBorrowSettings({ maxGlobal: borrowSettings.maxGlobal })" />
+              </div>
+              <div class="rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2">
+                <div class="mb-1 flex items-center justify-between gap-2">
+                  <span class="text-xs text-white/70">允许被借</span>
+                  <NSwitch :value="borrowSettings.providerEnabled" :loading="borrowSaving" @update:value="(v: boolean) => saveBorrowSettings({ providerEnabled: v })" />
+                </div>
+                <NInputNumber v-model:value="borrowSettings.providerMaxConcurrency" size="small" :min="0" :max="100" @blur="saveBorrowSettings({ providerMaxConcurrency: borrowSettings.providerMaxConcurrency })" />
+              </div>
+              <div class="rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2">
+                <span class="text-xs text-white/70">主控借调阈值</span>
+                <div class="mt-1 grid grid-cols-2 gap-2">
+                  <NInputNumber v-model:value="borrowSettings.pendingThreshold" size="small" :min="1" :max="10000" @blur="saveBorrowSettings({ pendingThreshold: borrowSettings.pendingThreshold })" />
+                  <NInputNumber v-model:value="borrowSettings.localUsageThreshold" size="small" :min="0" :max="100" @blur="saveBorrowSettings({ localUsageThreshold: borrowSettings.localUsageThreshold })" />
+                </div>
+              </div>
+              <div class="rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2">
+                <span class="text-xs text-white/70">被借保留槽 / 本机冗余</span>
+                <div class="mt-1 grid grid-cols-[86px_1fr] items-center gap-2">
+                  <NInputNumber v-model:value="borrowSettings.providerReserveSlots" size="small" :min="0" :max="100" @blur="saveBorrowSettings({ providerReserveSlots: borrowSettings.providerReserveSlots })" />
+                  <div class="borrow-mini-meter"><span :style="{ width: Math.min(100, (borrowSettings.providerAvailableSlots || 0) * 12) + '%' }" /></div>
+                </div>
               </div>
             </div>
           </div>
@@ -1668,6 +1902,35 @@ onUnmounted(() => { if (autoRefreshTimer) clearInterval(autoRefreshTimer) })
               </div>
               <div class="mt-4 flex justify-center">
                 <NPagination v-model:page="jobsPage" :page-count="Math.ceil(adminJobsTotal / 20) || 1" />
+              </div>
+            </NTabPane>
+
+
+            <!-- Borrow Tab -->
+            <NTabPane name="borrow" :tab="`借调算力 (${borrowSystems.length})`">
+              <div class="mb-4 grid gap-3 rounded-xl border border-white/[0.08] bg-white/[0.03] p-3 lg:grid-cols-[1fr_1.4fr_120px_100px_92px]">
+                <NInput v-model:value="borrowSystemForm.name" size="small" placeholder="系统名称" />
+                <NInput v-model:value="borrowSystemForm.endpoint" size="small" placeholder="https://sub.example.com" />
+                <NInputNumber v-model:value="borrowSystemForm.maxInflight" size="small" :min="1" :max="100" />
+                <NInputNumber v-model:value="borrowSystemForm.priority" size="small" :min="-1000" :max="1000" />
+                <NButton size="small" type="primary" :loading="borrowSaving" @click="createBorrowSystem">添加</NButton>
+                <div class="flex items-center gap-2">
+                  <span class="text-xs text-white/45">创建后启用</span>
+                  <NSwitch v-model:value="borrowSystemForm.enabled" />
+                </div>
+              </div>
+              <div class="mb-5 table-shell overflow-hidden rounded-xl border border-white/[0.08]">
+                <NDataTable :columns="borrowSystemColumns" :data="borrowSystems" :loading="borrowLoading" :scroll-x="1080" size="small" />
+              </div>
+              <div class="mb-3 flex items-center justify-between">
+                <div class="flex items-center gap-2">
+                  <SvgIcon icon="ri:route-line" class="text-sm text-cyan-300" />
+                  <p class="text-xs font-bold uppercase tracking-wider text-white/50">最近借调记录</p>
+                </div>
+                <NButton size="small" secondary class="glass-btn" @click="fetchBorrow">刷新借调</NButton>
+              </div>
+              <div class="table-shell overflow-hidden rounded-xl border border-white/[0.08]">
+                <NDataTable :columns="borrowDispatchColumns" :data="borrowDispatches" :loading="borrowLoading" :scroll-x="850" size="small" />
               </div>
             </NTabPane>
 
@@ -2364,4 +2627,34 @@ curl http://101.35.158.183/v1/videos/generations/vgen_seedance_xxx \
   50% { opacity: 0.7; transform: scale(1.05); }
 }
 .speed-pulse { animation: speedPulse 1.6s ease-in-out infinite; }
+</style>
+
+
+<style scoped>
+.borrow-radar::before {
+  content: "";
+  position: absolute;
+  inset: -40%;
+  background: conic-gradient(from 0deg, transparent, rgba(34, 211, 238, 0.16), transparent 28%);
+  animation: borrowRadarSweep 5s linear infinite;
+  pointer-events: none;
+}
+.borrow-channel-cell { display: flex; flex-direction: column; gap: 5px; min-width: 86px; }
+.borrow-channel-track, .borrow-mini-meter {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.08);
+}
+.borrow-channel-fill, .borrow-mini-meter span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, rgba(6,182,212,0.35), rgba(34,211,238,0.95), rgba(16,185,129,0.8));
+  box-shadow: 0 0 14px rgba(34,211,238,0.35);
+  transition: width .35s ease;
+}
+@keyframes borrowRadarSweep {
+  to { transform: rotate(360deg); }
+}
 </style>

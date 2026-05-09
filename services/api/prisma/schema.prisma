@@ -73,6 +73,12 @@ model RunwayJob {
   videoUrl        String?          @map("video_url")
   progress        Float?           @default(0)
   priority        Int              @default(0)
+  executionMode   String           @default("local") @map("execution_mode") @db.VarChar(16)
+  borrowDispatchId String?        @map("borrow_dispatch_id") @db.Uuid
+  borrowSystemId String?          @map("borrow_system_id") @db.Uuid
+  borrowSystemName String?        @map("borrow_system_name") @db.VarChar(128)
+  borrowStatus   String?          @map("borrow_status") @db.VarChar(32)
+  borrowErrorCode String?         @map("borrow_error_code") @db.VarChar(64)
   events          RunwayJobEvent[]
   account         RunwayAccount?   @relation(fields: [accountId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   user            User?            @relation(fields: [userId], references: [id])

@@ -30,9 +30,11 @@ function pollJobOptions(jobId: string, delay: number, suffix = `${Date.now()}`) 
 
 // Max auto-retries when remote task fails (prevents infinite loop)
 const MAX_REMOTE_RETRIES = 10;
-// Max time a job can stay in processing/generating before auto-retry (queued/THROTTLED has no limit)
-const MAX_PROCESSING_MINUTES = Number(process.env.MAX_PROCESSING_MINUTES) || 30;
-const PROGRESS_STALL_MINUTES = Number(process.env.PROGRESS_STALL_MINUTES) || 10;
+// Max time a job can stay in processing/generating before auto-retry.
+const MAX_PROCESSING_MINUTES = Number(process.env.MAX_PROCESSING_MINUTES) || 120;
+const PROGRESS_STALL_MINUTES = Number(process.env.PROGRESS_STALL_MINUTES) || 120;
+const ZERO_PROGRESS_TIMEOUT_MINUTES = Number(process.env.ZERO_PROGRESS_TIMEOUT_MINUTES) || 120;
+const QUEUED_THROTTLED_TIMEOUT_MINUTES = Number(process.env.QUEUED_THROTTLED_TIMEOUT_MINUTES) || 120;
 const HIGH_PROGRESS_STALL_THRESHOLD = Number(process.env.HIGH_PROGRESS_STALL_THRESHOLD) || 0.95;
 
 /** Create a RunwayDirectClient for a specific account.
@@ -98,9 +100,17 @@ async function cacheVideo(remoteUrl: string, jobId: string): Promise<string> {
   }
 }
 
-const INTERVAL_QUEUED     = Number(process.env.POLL_INTERVAL_QUEUED_MS) || 20000;
+const INTERVAL_QUEUED     = Number(process.env.POLL_INTERVAL_QUEUED_MS) || 30000;
 const INTERVAL_PROCESSING = Number(process.env.POLL_INTERVAL_PROCESSING_MS) || 10000;
+const INTERVAL_QUEUED_MAX = Number(process.env.POLL_INTERVAL_QUEUED_MAX_MS) || 120000;
 const INTERVAL_ERROR      = 30000;
+
+function queuedPollDelay(startedAt?: Date | string | null): number {
+  if (!startedAt) return INTERVAL_QUEUED;
+  const queuedMinutes = Math.max(0, (Date.now() - new Date(startedAt).getTime()) / 60000);
+  const step = Math.floor(queuedMinutes / 10);
+  return Math.min(INTERVAL_QUEUED_MAX, INTERVAL_QUEUED + step * 15000);
+}
 
 new Worker('runway-poll', async (job: Job) => {
   const { jobId, remoteTaskId, accountId } = job.data;
@@ -276,8 +286,8 @@ new Worker('runway-poll', async (job: Job) => {
     // If remote task is queued/throttled, immediately requeue to try a different account
     if (result.status === 'queued' && dbJob.startedAt) {
       const queuedMinutes = (Date.now() - new Date(dbJob.startedAt).getTime()) / 60000;
-      // Give it 60 minutes grace period, then switch account
-      if (queuedMinutes > 60) {
+      // Give queued/throttled remote tasks a long grace period before retrying.
+      if (queuedMinutes > QUEUED_THROTTLED_TIMEOUT_MINUTES) {
         console.warn(`[poll-worker] job ${jobId.slice(0,8)} queued/throttled for ${Math.round(queuedMinutes)}min, switching account`);
         const cancelled = await cancelRemoteBeforeRetry(accountId, jobId, remoteTaskId, 'queued/throttled timeout');
         if (!cancelled) {
@@ -305,10 +315,10 @@ new Worker('runway-poll', async (job: Job) => {
       }
     }
 
-    // Stuck zero-progress recovery: processing >10min with progress still 0 → switch account
+    // Stuck zero-progress recovery: switch account only after the configured grace period.
     if (result.status !== 'queued' && dbJob.startedAt && (result.progress || 0) === 0) {
       const stuckMinutes = (Date.now() - new Date(dbJob.startedAt).getTime()) / 60000;
-      if (stuckMinutes > 10) {
+      if (stuckMinutes > ZERO_PROGRESS_TIMEOUT_MINUTES) {
         console.warn(`[poll-worker] job ${jobId.slice(0,8)} processing ${Math.round(stuckMinutes)}min with progress=0, switching account`);
         const cancelled = await cancelRemoteBeforeRetry(accountId, jobId, remoteTaskId, 'processing zero progress');
         if (!cancelled) {
@@ -367,7 +377,7 @@ new Worker('runway-poll', async (job: Job) => {
       }
     }
 
-    // Processing timeout: 30min
+    // Processing timeout.
     if (result.status !== 'queued' && dbJob.startedAt) {
       const processingMinutes = (Date.now() - new Date(dbJob.startedAt).getTime()) / 60000;
       if (processingMinutes > MAX_PROCESSING_MINUTES) {
@@ -438,7 +448,7 @@ new Worker('runway-poll', async (job: Job) => {
       console.log(`[poll-worker] job ${jobId.slice(0,8)} THROTTLED, keeping account slot occupied`);
     }
 
-    const delay = result.status === 'queued' ? INTERVAL_QUEUED : INTERVAL_PROCESSING;
+    const delay = result.status === 'queued' ? queuedPollDelay(dbJob.startedAt) : INTERVAL_PROCESSING;
     await pollQueue.add('poll', {
       jobId, remoteTaskId, accountId,
     }, pollJobOptions(jobId, delay));
