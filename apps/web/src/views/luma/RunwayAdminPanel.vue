@@ -36,6 +36,7 @@ interface BorrowSettings {
   providerEnabled: boolean; providerMaxConcurrency: number; providerReserveSlots: number
   activeDispatches?: number; completedDispatches?: number; failedDispatches?: number; totalSystems?: number; enabledSystems?: number
   globalRedundantSlots?: number; globalFreeSlots?: number; staleSystems?: number; providerAvailableSlots?: number
+  protectedSystems?: number; unhealthySystems?: number
 }
 interface BorrowSystemInfo {
   id: string; name: string; endpoint: string; enabled: boolean; priority: number; maxInflight: number
@@ -44,10 +45,13 @@ notes?: string | null; reportedAt?: string | null
   cooldownAccounts?: number | null; recent429?: number | null
   childProviderEnabled?: boolean | null; channelOccupied?: number | null; activeDispatches?: number | null
   borrowedShadowActive?: number | null; borrowedShadowPending?: number | null
+  localBacklogProtected?: boolean | null; capacityReason?: string | null; healthState?: string | null; capacityError?: string | null
 }
 interface BorrowDispatchInfo {
   id: string; runwayJobId: string; systemName: string | null; shadowJobId: string | null; status: string
   errorMessage?: string | null; createdAt: string; updatedAt: string; seq?: number | null; prompt?: string | null; jobStatus?: string | null
+  borrowStatus?: string | null; stage?: string | null; stageAgeSeconds?: number | null; remoteTaskId?: string | null; hasResult?: boolean | null
+  errorCode?: string | null; progress?: number | null
 }
 interface DashboardOverview {
   totalUsers: number; activeUsers: number; totalJobs: number; todayJobs: number
@@ -240,6 +244,82 @@ const borrowDispatches = ref<BorrowDispatchInfo[]>([])
 const borrowLoading = ref(false)
 const borrowSaving = ref(false)
 const borrowSystemForm = ref({ name: '', endpoint: '', maxInflight: 2, priority: 0, enabled: true })
+
+const asNum = (v: unknown, fallback = 0) => {
+  const n = Number(v)
+  return Number.isFinite(n) ? n : fallback
+}
+const pct = (used: number, total: number) => Math.min(100, Math.max(0, Math.round((used / Math.max(1, total)) * 100)))
+const borrowActivePct = computed(() => pct(asNum(borrowSettings.value.activeDispatches), asNum(borrowSettings.value.maxGlobal, 1)))
+const borrowTopologySystems = computed(() => borrowSystems.value.map((system) => {
+  const occupied = asNum(system.channelOccupied ?? system.activeDispatches)
+  const max = Math.max(1, asNum(system.maxInflight, 1))
+  const available = asNum(system.availableSlots)
+  const free = asNum(system.freeSlots)
+  return { ...system, occupied, max, available, free, usagePct: pct(occupied, max) }
+}))
+const borrowFlowLanes = computed(() => {
+  const defs = [
+    { key: 'dispatching', label: '派发中', icon: 'ri:send-plane-line' },
+    { key: 'child_pending', label: '子控排队', icon: 'ri:list-check-2' },
+    { key: 'child_submitted', label: '提交中', icon: 'ri:upload-cloud-line' },
+    { key: 'runway_queued', label: '平台排队', icon: 'ri:time-line' },
+    { key: 'runway_processing', label: '生成中', icon: 'ri:movie-2-line' },
+    { key: 'completed', label: '完成回传', icon: 'ri:checkbox-circle-line' },
+    { key: 'fallback_local', label: '回落本地', icon: 'ri:arrow-go-back-line' },
+    { key: 'failed', label: '异常', icon: 'ri:error-warning-line' },
+  ]
+  return defs.map(def => ({
+    ...def,
+    count: borrowDispatches.value.filter(d => borrowDispatchStage(d) === def.key).length,
+  }))
+})
+const borrowDispatchStage = (row: BorrowDispatchInfo) => {
+  if (row.stage) return row.stage
+  if (row.status === 'completed') return 'completed'
+  if (row.status === 'failed') return row.jobStatus === 'pending' ? 'fallback_local' : 'failed'
+  if (row.borrowStatus === 'submitted') return 'child_submitted'
+  if (row.borrowStatus === 'processing') return asNum(row.progress) > 0 ? 'runway_processing' : 'runway_queued'
+  if (row.borrowStatus === 'pending' || row.borrowStatus === 'queued' || row.borrowStatus === 'accepted') return 'child_pending'
+  if (row.status === 'accepted') return 'child_pending'
+  return row.status || 'dispatching'
+}
+const borrowStageMeta = (stage?: string | null) => {
+  const map: Record<string, { label: string; type: 'default' | 'info' | 'success' | 'warning' | 'error'; class: string; icon: string }> = {
+    dispatching: { label: '派发中', type: 'info', class: 'border-blue-400/20 bg-blue-500/10 text-blue-200', icon: 'ri:send-plane-line' },
+    child_pending: { label: '子控排队', type: 'default', class: 'border-slate-400/20 bg-slate-500/10 text-slate-200', icon: 'ri:list-check-2' },
+    child_submitted: { label: '提交中', type: 'warning', class: 'border-amber-400/25 bg-amber-500/10 text-amber-200', icon: 'ri:upload-cloud-line' },
+    runway_queued: { label: '平台排队', type: 'warning', class: 'border-yellow-400/25 bg-yellow-500/10 text-yellow-200', icon: 'ri:time-line' },
+    runway_processing: { label: '生成中', type: 'info', class: 'border-cyan-400/25 bg-cyan-500/10 text-cyan-200', icon: 'ri:movie-2-line' },
+    completed: { label: '完成回传', type: 'success', class: 'border-emerald-400/25 bg-emerald-500/10 text-emerald-200', icon: 'ri:checkbox-circle-line' },
+    fallback_local: { label: '回落本地', type: 'warning', class: 'border-orange-400/25 bg-orange-500/10 text-orange-200', icon: 'ri:arrow-go-back-line' },
+    failed: { label: '异常', type: 'error', class: 'border-red-400/25 bg-red-500/10 text-red-200', icon: 'ri:error-warning-line' },
+  }
+  return map[stage || ''] || { label: stage || '未知', type: 'default', class: 'border-white/10 bg-white/[0.04] text-white/60', icon: 'ri:question-line' }
+}
+const borrowSystemStateMeta = (system: BorrowSystemInfo) => {
+  const reason = system.capacityReason || 'idle'
+  const map: Record<string, { label: string; type: 'default' | 'info' | 'success' | 'warning' | 'error'; class: string; dot: string; icon: string }> = {
+    available: { label: '可借', type: 'success', class: 'borrow-node-available', dot: 'bg-emerald-400', icon: 'ri:flashlight-line' },
+    protected: { label: '本地保护', type: 'warning', class: 'borrow-node-protected', dot: 'bg-amber-400', icon: 'ri:shield-check-line' },
+    full: { label: '通道占满', type: 'info', class: 'borrow-node-full', dot: 'bg-cyan-400', icon: 'ri:dashboard-3-line' },
+    disabled: { label: '通道关闭', type: 'default', class: 'borrow-node-disabled', dot: 'bg-white/30', icon: 'ri:pause-circle-line' },
+    stale: { label: '上报过期', type: 'warning', class: 'borrow-node-stale', dot: 'bg-yellow-400', icon: 'ri:timer-flash-line' },
+    offline: { label: '离线', type: 'error', class: 'borrow-node-error', dot: 'bg-red-400', icon: 'ri:cloud-off-line' },
+    error: { label: '异常', type: 'error', class: 'borrow-node-error', dot: 'bg-red-400', icon: 'ri:error-warning-line' },
+    unregistered: { label: '未注册', type: 'default', class: 'borrow-node-disabled', dot: 'bg-white/30', icon: 'ri:link-unlink' },
+    idle: { label: '无冗余', type: 'default', class: 'borrow-node-idle', dot: 'bg-slate-400', icon: 'ri:moon-clear-line' },
+  }
+  return map[reason] || map.idle
+}
+const borrowSystemSubtitle = (system: BorrowSystemInfo) => {
+  if (system.capacityError) return system.capacityError
+  if (system.localBacklogProtected) return `本地排队 ${system.localPending || 0}，暂停共享`
+  if (system.childProviderEnabled === false) return '子控通道关闭'
+  if ((system.availableSlots || 0) > 0) return `可借 ${system.availableSlots} · 空闲 ${system.freeSlots || 0}`
+  return `占用 ${system.channelOccupied || 0}/${system.maxInflight}`
+}
+const borrowGlobalMode = computed(() => borrowSettings.value.dispatchEnabled ? '新增派发开启' : '只回收已借调')
 
 const users = ref<AdminUser[]>([])
 const userLoading = ref(false)
@@ -1210,11 +1290,18 @@ const jobColumns = [
 const borrowSystemColumns = [
   { title: '注册', key: 'enabled', width: 78, render: (row: BorrowSystemInfo) => h(NSwitch, { value: row.enabled, 'onUpdate:value': (v: boolean) => updateBorrowSystem(row, { enabled: v }) }) },
   { title: '子控通道', key: 'childProviderEnabled', width: 98, render: (row: BorrowSystemInfo) => h(NSwitch, { value: Boolean(row.childProviderEnabled), loading: borrowSaving.value, 'onUpdate:value': (v: boolean) => controlBorrowSystem(row, { providerEnabled: v }) }) },
+  { title: '状态', key: 'capacityReason', width: 105, render: (row: BorrowSystemInfo) => {
+    const meta = borrowSystemStateMeta(row)
+    return h(NTag, { size: 'small', round: true, bordered: false, type: meta.type }, () => meta.label)
+  } },
   { title: '系统', key: 'name', width: 130, render: (row: BorrowSystemInfo) => h('div', {}, [
     h('div', { class: 'text-white/85 font-medium' }, row.name),
     h('div', { class: 'text-[10px] text-white/35 truncate' }, row.endpoint),
   ]) },
-  { title: '容量', key: 'capacity', width: 120, render: (row: BorrowSystemInfo) => h('div', { class: 'text-xs text-white/65' }, `${row.availableSlots ?? 0}/${row.freeSlots ?? 0} 可借`) },
+  { title: '容量', key: 'capacity', width: 150, render: (row: BorrowSystemInfo) => h('div', { class: 'text-xs text-white/65' }, [
+    h('div', `${row.availableSlots ?? 0}/${row.freeSlots ?? 0} 可借`),
+    h('div', { class: 'mt-0.5 text-[10px] text-white/35' }, borrowSystemSubtitle(row)),
+  ]) },
   { title: '通道占用', key: 'channelOccupied', width: 120, render: (row: BorrowSystemInfo) => {
     const occupied = Number(row.channelOccupied ?? row.activeDispatches ?? 0)
     return h('div', { class: 'borrow-channel-cell' }, [h('span', { class: 'text-xs text-cyan-200' }, `${occupied}/${row.maxInflight}`), h('div', { class: 'borrow-channel-track' }, h('div', { class: 'borrow-channel-fill', style: { width: `${Math.min(100, Math.round((occupied / Math.max(1, row.maxInflight)) * 100))}%` } }))])
@@ -1229,7 +1316,14 @@ const borrowSystemColumns = [
 const borrowDispatchColumns = [
   { title: '任务', key: 'job', width: 115, render: (row: BorrowDispatchInfo) => h('span', { class: 'font-mono text-xs text-white/65' }, row.seq ? `#${row.seq}` : row.runwayJobId.slice(0, 8)) },
   { title: '系统', key: 'systemName', width: 120, render: (row: BorrowDispatchInfo) => row.systemName || '—' },
-  { title: '状态', key: 'status', width: 95, render: (row: BorrowDispatchInfo) => h(NTag, { size: 'small', round: true, bordered: false, type: row.status === 'completed' ? 'success' : row.status === 'failed' ? 'error' : 'info' }, () => row.status) },
+  { title: '阶段', key: 'stage', width: 110, render: (row: BorrowDispatchInfo) => {
+    const meta = borrowStageMeta(borrowDispatchStage(row))
+    return h(NTag, { size: 'small', round: true, bordered: false, type: meta.type }, () => meta.label)
+  } },
+  { title: '状态', key: 'status', width: 105, render: (row: BorrowDispatchInfo) => h('div', { class: 'text-xs text-white/60' }, [
+    h('div', row.status),
+    row.stageAgeSeconds != null ? h('div', { class: 'text-[10px] text-white/30' }, `${Math.max(0, Math.round(row.stageAgeSeconds / 60))}m`) : null,
+  ]) },
   { title: '提示词', key: 'prompt', ellipsis: { tooltip: true }, render: (row: BorrowDispatchInfo) => row.prompt || '—' },
   { title: '更新时间', key: 'updatedAt', width: 170, render: (row: BorrowDispatchInfo) => formatTime(row.updatedAt) },
 ]
@@ -1548,6 +1642,119 @@ onUnmounted(() => { if (autoRefreshTimer) clearInterval(autoRefreshTimer) })
                   <NInputNumber v-model:value="borrowSettings.providerReserveSlots" size="small" :min="0" :max="100" @blur="saveBorrowSettings({ providerReserveSlots: borrowSettings.providerReserveSlots })" />
                   <div class="borrow-mini-meter"><span :style="{ width: Math.min(100, (borrowSettings.providerAvailableSlots || 0) * 12) + '%' }" /></div>
                 </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="borrow-topology-panel rounded-2xl border border-white/[0.08] bg-white/[0.03] p-5 backdrop-blur-xl">
+          <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <div class="flex items-center gap-2">
+              <div class="flex h-8 w-8 items-center justify-center rounded-lg bg-cyan-500/12 text-cyan-200">
+                <SvgIcon icon="ri:node-tree" class="text-base" />
+              </div>
+              <div>
+                <p class="text-sm font-bold text-white/90">全局借调拓扑</p>
+                <p class="text-[11px] text-white/35">{{ borrowGlobalMode }} · 关闭后仍回收已借调任务</p>
+              </div>
+            </div>
+            <div class="flex flex-wrap items-center gap-2">
+              <NTag size="small" round :bordered="false" :type="borrowSettings.dispatchEnabled ? 'success' : 'default'">主控 {{ borrowSettings.dispatchEnabled ? '派发中' : '回收中' }}</NTag>
+              <NTag size="small" round :bordered="false" :type="(borrowSettings.protectedSystems || 0) > 0 ? 'warning' : 'success'">保护 {{ borrowSettings.protectedSystems || 0 }}</NTag>
+              <NTag size="small" round :bordered="false" :type="(borrowSettings.unhealthySystems || 0) > 0 ? 'error' : 'success'">异常 {{ borrowSettings.unhealthySystems || 0 }}</NTag>
+            </div>
+          </div>
+
+          <div class="borrow-topology-grid">
+            <div class="borrow-controller-node">
+              <div class="borrow-controller-ring">
+                <div class="borrow-controller-core">
+                  <SvgIcon icon="ri:server-line" class="text-2xl text-cyan-100" />
+                  <span class="mt-1 text-[11px] font-semibold text-cyan-100">SORA 主控</span>
+                </div>
+              </div>
+              <div class="mt-4 grid w-full grid-cols-3 gap-2 text-center">
+                <div class="rounded-lg border border-white/[0.06] bg-white/[0.03] px-2 py-2">
+                  <p class="text-[10px] text-white/35">活跃</p>
+                  <p class="text-lg font-bold text-cyan-200">{{ borrowSettings.activeDispatches || 0 }}</p>
+                </div>
+                <div class="rounded-lg border border-white/[0.06] bg-white/[0.03] px-2 py-2">
+                  <p class="text-[10px] text-white/35">上限</p>
+                  <p class="text-lg font-bold text-white/85">{{ borrowSettings.maxGlobal || 0 }}</p>
+                </div>
+                <div class="rounded-lg border border-white/[0.06] bg-white/[0.03] px-2 py-2">
+                  <p class="text-[10px] text-white/35">可借</p>
+                  <p class="text-lg font-bold text-emerald-200">{{ borrowSettings.globalRedundantSlots || 0 }}</p>
+                </div>
+              </div>
+              <div class="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-white/8">
+                <div class="h-full rounded-full bg-gradient-to-r from-cyan-500 via-blue-400 to-emerald-400 transition-all duration-500" :style="{ width: borrowActivePct + '%' }" />
+              </div>
+            </div>
+
+            <div class="borrow-systems-map">
+              <div
+                v-for="system in borrowTopologySystems"
+                :key="system.id"
+                class="borrow-system-node"
+                :class="borrowSystemStateMeta(system).class"
+              >
+                <div class="borrow-link-beam" :class="{ 'borrow-link-active': system.occupied > 0 }" />
+                <div class="flex items-start justify-between gap-3">
+                  <div class="min-w-0">
+                    <div class="flex items-center gap-2">
+                      <span class="relative flex h-2.5 w-2.5">
+                        <span v-if="system.occupied > 0" class="absolute inline-flex h-full w-full animate-ping rounded-full bg-cyan-300 opacity-50" />
+                        <span class="relative inline-flex h-2.5 w-2.5 rounded-full" :class="borrowSystemStateMeta(system).dot" />
+                      </span>
+                      <p class="truncate text-sm font-semibold text-white/90">{{ system.name }}</p>
+                    </div>
+                    <p class="mt-1 truncate text-[10px] text-white/30">{{ system.endpoint }}</p>
+                  </div>
+                  <NTag size="small" round :bordered="false" :type="borrowSystemStateMeta(system).type">{{ borrowSystemStateMeta(system).label }}</NTag>
+                </div>
+                <div class="mt-4 grid grid-cols-[72px_1fr] items-center gap-3">
+                  <div class="borrow-node-orbit" :style="{ '--borrow-usage': system.usagePct + '%' }">
+                    <div class="borrow-node-orbit-inner">
+                      <span class="text-base font-bold text-white/90">{{ system.occupied }}</span>
+                      <span class="text-[9px] text-white/35">/{{ system.max }}</span>
+                    </div>
+                  </div>
+                  <div class="min-w-0 space-y-2">
+                    <div class="flex items-center justify-between text-[11px] text-white/45">
+                      <span>通道占用</span>
+                      <span>{{ system.usagePct }}%</span>
+                    </div>
+                    <div class="borrow-channel-track">
+                      <div class="borrow-channel-fill" :style="{ width: system.usagePct + '%' }" />
+                    </div>
+                    <div class="grid grid-cols-3 gap-1 text-[10px] text-white/35">
+                      <span>可借 <b class="text-emerald-200">{{ system.available }}</b></span>
+                      <span>空闲 <b class="text-white/65">{{ system.free }}</b></span>
+                      <span>本地 <b :class="system.localBacklogProtected ? 'text-amber-200' : 'text-white/65'">{{ system.localPending || 0 }}</b></span>
+                    </div>
+                  </div>
+                </div>
+                <p class="mt-3 truncate text-[11px]" :class="system.localBacklogProtected ? 'text-amber-200' : 'text-white/35'">{{ borrowSystemSubtitle(system) }}</p>
+              </div>
+              <div v-if="borrowTopologySystems.length === 0" class="rounded-xl border border-white/[0.08] bg-white/[0.03] p-8 text-center text-sm text-white/25">
+                暂无子控系统
+              </div>
+            </div>
+          </div>
+
+          <div class="mt-5 grid gap-2 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-8">
+            <div
+              v-for="lane in borrowFlowLanes"
+              :key="lane.key"
+              class="borrow-flow-lane"
+              :class="borrowStageMeta(lane.key).class"
+            >
+              <div class="flex items-center justify-between gap-2">
+                <span class="inline-flex items-center gap-1 text-[11px] font-medium">
+                  <SvgIcon :icon="lane.icon" class="text-xs" />{{ lane.label }}
+                </span>
+                <span class="text-lg font-bold">{{ lane.count }}</span>
               </div>
             </div>
           </div>
@@ -1920,7 +2127,7 @@ onUnmounted(() => { if (autoRefreshTimer) clearInterval(autoRefreshTimer) })
                 </div>
               </div>
               <div class="mb-5 table-shell overflow-hidden rounded-xl border border-white/[0.08]">
-                <NDataTable :columns="borrowSystemColumns" :data="borrowSystems" :loading="borrowLoading" :scroll-x="1080" size="small" />
+                <NDataTable :columns="borrowSystemColumns" :data="borrowSystems" :loading="borrowLoading" :scroll-x="1260" size="small" />
               </div>
               <div class="mb-3 flex items-center justify-between">
                 <div class="flex items-center gap-2">
@@ -1930,7 +2137,7 @@ onUnmounted(() => { if (autoRefreshTimer) clearInterval(autoRefreshTimer) })
                 <NButton size="small" secondary class="glass-btn" @click="fetchBorrow">刷新借调</NButton>
               </div>
               <div class="table-shell overflow-hidden rounded-xl border border-white/[0.08]">
-                <NDataTable :columns="borrowDispatchColumns" :data="borrowDispatches" :loading="borrowLoading" :scroll-x="850" size="small" />
+                <NDataTable :columns="borrowDispatchColumns" :data="borrowDispatches" :loading="borrowLoading" :scroll-x="1000" size="small" />
               </div>
             </NTabPane>
 
@@ -2656,5 +2863,171 @@ curl http://101.35.158.183/v1/videos/generations/vgen_seedance_xxx \
 }
 @keyframes borrowRadarSweep {
   to { transform: rotate(360deg); }
+}
+.borrow-topology-panel {
+  position: relative;
+  overflow: hidden;
+}
+.borrow-topology-panel::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(90deg, rgba(34,211,238,0.04), transparent 28%, rgba(16,185,129,0.035)),
+    radial-gradient(circle at 14% 18%, rgba(34,211,238,0.12), transparent 28%),
+    radial-gradient(circle at 88% 26%, rgba(16,185,129,0.08), transparent 30%);
+  pointer-events: none;
+}
+.borrow-topology-panel > * {
+  position: relative;
+  z-index: 1;
+}
+.borrow-topology-grid {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: stretch;
+}
+.borrow-controller-node {
+  display: flex;
+  min-height: 270px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border-radius: 16px;
+  border: 1px solid rgba(34,211,238,0.14);
+  background: linear-gradient(180deg, rgba(8,47,73,0.32), rgba(15,23,42,0.24));
+  padding: 18px;
+  box-shadow: inset 0 0 32px rgba(34,211,238,0.05);
+}
+.borrow-controller-ring {
+  display: grid;
+  width: 128px;
+  height: 128px;
+  place-items: center;
+  border-radius: 999px;
+  background: conic-gradient(from 0deg, rgba(34,211,238,0.95), rgba(59,130,246,0.18), rgba(16,185,129,0.75), rgba(34,211,238,0.95));
+  animation: borrowSpin 7s linear infinite;
+  box-shadow: 0 0 30px rgba(34,211,238,0.16);
+}
+.borrow-controller-core {
+  display: flex;
+  width: 104px;
+  height: 104px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.08);
+  background: rgba(2,6,23,0.88);
+  animation: borrowCounterSpin 7s linear infinite;
+}
+.borrow-systems-map {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+.borrow-system-node {
+  position: relative;
+  min-height: 174px;
+  overflow: hidden;
+  border-radius: 16px;
+  border: 1px solid rgba(255,255,255,0.08);
+  background: rgba(15,23,42,0.36);
+  padding: 14px;
+  transition: border-color .25s ease, transform .25s ease, box-shadow .25s ease;
+}
+.borrow-system-node:hover {
+  transform: translateY(-1px);
+}
+.borrow-link-beam {
+  position: absolute;
+  left: -24px;
+  top: 24px;
+  width: 72px;
+  height: 2px;
+  opacity: .35;
+  background: linear-gradient(90deg, transparent, rgba(148,163,184,0.55));
+}
+.borrow-link-beam::after {
+  content: "";
+  position: absolute;
+  inset: -3px 0;
+  background: linear-gradient(90deg, transparent, rgba(34,211,238,0.85), transparent);
+  opacity: 0;
+}
+.borrow-link-active::after {
+  opacity: 1;
+  animation: borrowFlow 1.6s linear infinite;
+}
+.borrow-node-available {
+  border-color: rgba(16,185,129,0.28);
+  box-shadow: inset 0 0 24px rgba(16,185,129,0.06);
+}
+.borrow-node-protected {
+  border-color: rgba(245,158,11,0.3);
+  box-shadow: inset 0 0 24px rgba(245,158,11,0.06);
+}
+.borrow-node-full {
+  border-color: rgba(34,211,238,0.22);
+  box-shadow: inset 0 0 24px rgba(34,211,238,0.06);
+}
+.borrow-node-error {
+  border-color: rgba(248,113,113,0.32);
+  box-shadow: inset 0 0 24px rgba(248,113,113,0.07);
+}
+.borrow-node-stale {
+  border-color: rgba(250,204,21,0.25);
+}
+.borrow-node-disabled,
+.borrow-node-idle {
+  opacity: .78;
+}
+.borrow-node-orbit {
+  display: grid;
+  width: 68px;
+  height: 68px;
+  place-items: center;
+  border-radius: 999px;
+  background: conic-gradient(rgba(34,211,238,0.95) var(--borrow-usage), rgba(255,255,255,0.08) 0);
+  box-shadow: 0 0 18px rgba(34,211,238,0.12);
+}
+.borrow-node-orbit-inner {
+  display: flex;
+  width: 52px;
+  height: 52px;
+  align-items: baseline;
+  justify-content: center;
+  border-radius: 999px;
+  background: rgba(2,6,23,0.9);
+  padding-top: 14px;
+}
+.borrow-flow-lane {
+  min-height: 46px;
+  border-radius: 12px;
+  border: 1px solid;
+  padding: 10px 12px;
+  transition: transform .2s ease, border-color .2s ease;
+}
+.borrow-flow-lane:hover {
+  transform: translateY(-1px);
+}
+@keyframes borrowSpin {
+  to { transform: rotate(360deg); }
+}
+@keyframes borrowCounterSpin {
+  to { transform: rotate(-360deg); }
+}
+@keyframes borrowFlow {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(100%); }
+}
+@media (max-width: 900px) {
+  .borrow-topology-grid {
+    grid-template-columns: 1fr;
+  }
+  .borrow-controller-node {
+    min-height: 230px;
+  }
 }
 </style>

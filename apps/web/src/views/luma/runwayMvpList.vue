@@ -376,6 +376,25 @@ const isProcessing = (status: string) => ['submitted', 'processing'].includes(st
 const isActive = (status: string) => isQueued(status) || isProcessing(status)
 const isBorrowedJob = (job: RunwayJob | null) => job?.executionMode === 'borrowed'
 const borrowedSystemLabel = (job: RunwayJob | null) => job?.borrowSystemName || '外部系统'
+const borrowedStatusLabel = (job: RunwayJob | null) => {
+  if (!isBorrowedJob(job)) return ''
+  if (job?.status === 'completed' || job?.borrowStatus === 'completed') return '借调完成'
+  if (job?.borrowErrorCode && job.status === 'pending') return '借调回落'
+  if (job?.status === 'failed' || job?.status === 'cancelled' || job?.borrowStatus === 'failed') return '借调异常'
+  if (job?.borrowStatus === 'processing') return (job.progress || 0) > 0 ? '借调生成中' : '平台排队'
+  if (job?.borrowStatus === 'submitted') return '子控提交中'
+  if (job?.borrowStatus === 'pending' || job?.borrowStatus === 'queued' || job?.borrowStatus === 'accepted') return '子控排队'
+  if (job?.borrowStatus === 'dispatching') return '派发中'
+  return '借调算力'
+}
+const borrowedStatusClass = (job: RunwayJob | null) => {
+  const label = borrowedStatusLabel(job)
+  if (label === '借调完成') return 'border-emerald-300/30 bg-emerald-500/15 text-emerald-200'
+  if (label === '借调回落') return 'border-amber-300/30 bg-amber-500/15 text-amber-200'
+  if (label === '借调异常') return 'border-rose-300/30 bg-rose-500/15 text-rose-200'
+  if (label === '平台排队') return 'border-yellow-300/30 bg-yellow-500/15 text-yellow-200'
+  return 'border-cyan-300/30 bg-cyan-500/20 text-cyan-100'
+}
 
 const tabCount = computed(() => tabCounts.value)
 
@@ -1183,8 +1202,8 @@ onUnmounted(() => {
 
               <!-- Duration + model badges -->
               <div v-if="playingVideoId !== job.id" class="absolute bottom-2 right-2 flex items-center gap-1">
-                <span v-if="isBorrowedJob(job)" class="borrowed-compute-badge rounded-md border border-cyan-300/30 bg-cyan-500/25 px-1.5 py-0.5 text-[9px] font-semibold text-cyan-100 backdrop-blur-sm">
-                  <SvgIcon icon="ri:share-forward-box-line" class="mr-0.5 inline text-[10px]" />借调算力
+                <span v-if="isBorrowedJob(job)" class="borrowed-compute-badge rounded-md border px-1.5 py-0.5 text-[9px] font-semibold backdrop-blur-sm" :class="borrowedStatusClass(job)">
+                  <SvgIcon icon="ri:share-forward-box-line" class="mr-0.5 inline text-[10px]" />{{ borrowedStatusLabel(job) }}
                 </span>
                 <span class="rounded-md px-1.5 py-0.5 text-[9px] font-medium backdrop-blur-sm" :class="modelBadgeClass(job.modelName)">{{ modelBadgeLabel(job.modelName) }}</span>
                 <span v-if="job.duration" class="rounded-md bg-black/60 px-1.5 py-0.5 text-[10px] font-medium text-white/70 backdrop-blur-sm">{{ job.duration }}s</span>
@@ -1232,8 +1251,8 @@ onUnmounted(() => {
                   <span v-if="(job as any).priority > 0 && isQueued(job.status)">⚡</span>
                   {{ (job as any).priority > 0 && isQueued(job.status) ? '优先排队' : (statusLabel[job.status] || job.status) }}
                 </span>
-                <span v-if="isBorrowedJob(job)" class="borrowed-compute-badge rounded-md border border-cyan-300/30 bg-cyan-500/25 px-1.5 py-0.5 text-[9px] font-semibold text-cyan-100 backdrop-blur-sm">
-                  <SvgIcon icon="ri:share-forward-box-line" class="mr-0.5 inline text-[10px]" />借调算力
+                <span v-if="isBorrowedJob(job)" class="borrowed-compute-badge rounded-md border px-1.5 py-0.5 text-[9px] font-semibold backdrop-blur-sm" :class="borrowedStatusClass(job)">
+                  <SvgIcon icon="ri:share-forward-box-line" class="mr-0.5 inline text-[10px]" />{{ borrowedStatusLabel(job) }}
                 </span>
                 <span
                   class="rounded-md px-1.5 py-0.5 text-[9px] font-medium backdrop-blur-sm"
@@ -1273,8 +1292,8 @@ onUnmounted(() => {
               <!-- Meta info -->
               <div class="mb-2.5 flex flex-wrap items-center gap-1.5 text-xs text-slate-500">
                 <span v-if="job.username" class="rounded-md border border-sky-400/15 bg-sky-500/10 px-1.5 py-0.5 font-medium text-sky-300">{{ job.username }}</span>
-                <span v-if="isBorrowedJob(job)" class="borrowed-compute-badge rounded-md border border-cyan-400/20 bg-cyan-500/10 px-1.5 py-0.5 font-medium text-cyan-300">
-                  <SvgIcon icon="ri:share-forward-box-line" class="mr-0.5 inline text-[11px]" />借调算力 · {{ borrowedSystemLabel(job) }}
+                <span v-if="isBorrowedJob(job)" class="borrowed-compute-badge rounded-md border px-1.5 py-0.5 font-medium" :class="borrowedStatusClass(job)">
+                  <SvgIcon icon="ri:share-forward-box-line" class="mr-0.5 inline text-[11px]" />{{ borrowedStatusLabel(job) }} · {{ borrowedSystemLabel(job) }}
                 </span>
                 <span>{{ formatTime(job.createdAt) }}</span>
                 <span class="rounded-md border border-white/8 bg-white/5 px-1.5 py-0.5 text-slate-400">
@@ -1449,9 +1468,16 @@ onUnmounted(() => {
           <div v-if="isBorrowedJob(detailJob)" class="detail-row">
             <span class="detail-label">执行方式</span>
             <span class="detail-value">
-              <span class="borrowed-compute-badge inline-flex items-center gap-1 rounded-full border border-cyan-400/25 bg-cyan-500/10 px-2 py-0.5 text-[11px] font-medium text-cyan-300">
-                <SvgIcon icon="ri:share-forward-box-line" class="text-xs" />借调算力 · {{ borrowedSystemLabel(detailJob) }}
+              <span class="borrowed-compute-badge inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium" :class="borrowedStatusClass(detailJob)">
+                <SvgIcon icon="ri:share-forward-box-line" class="text-xs" />{{ borrowedStatusLabel(detailJob) }} · {{ borrowedSystemLabel(detailJob) }}
               </span>
+            </span>
+          </div>
+          <div v-if="isBorrowedJob(detailJob) && detailJob.borrowStatus" class="detail-row">
+            <span class="detail-label">借调状态</span>
+            <span class="detail-value text-xs text-slate-300">
+              {{ detailJob.borrowStatus }}
+              <span v-if="detailJob.progress != null && detailJob.progress > 0" class="text-sky-300"> · {{ Math.round(detailJob.progress * 100) }}%</span>
             </span>
           </div>
           <div v-if="detailJob.remark" class="detail-row">

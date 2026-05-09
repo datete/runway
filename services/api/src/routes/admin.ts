@@ -1024,6 +1024,8 @@ router.get("/dashboard", async (_req: Request, res: Response) => {
         SELECT
           COALESCE(SUM(bcr.available_slots) FILTER (WHERE bs.enabled), 0) AS "globalRedundantSlots",
           COALESCE(SUM(bcr.free_slots) FILTER (WHERE bs.enabled), 0) AS "globalFreeSlots",
+          COUNT(*) FILTER (WHERE bs.enabled AND COALESCE((bcr.raw_json->>'localBacklogProtected')::boolean, false)) AS "protectedSystems",
+          COUNT(*) FILTER (WHERE bs.enabled AND (bcr.reported_at IS NULL OR bcr.reported_at < now() - INTERVAL '2 minutes' OR bcr.raw_json ? 'error')) AS "unhealthySystems",
           COUNT(*) FILTER (WHERE bs.enabled AND (bcr.reported_at IS NULL OR bcr.reported_at < now() - INTERVAL '2 minutes')) AS "staleSystems"
         FROM borrow_systems bs
         LEFT JOIN borrow_capacity_reports bcr ON bcr.system_id = bs.id
@@ -1041,6 +1043,8 @@ router.get("/dashboard", async (_req: Request, res: Response) => {
         enabledSystems: Number(systemsRows[0]?.enabled || 0),
         globalRedundantSlots: Number(redundancyRows[0]?.globalRedundantSlots || 0),
         globalFreeSlots: Number(redundancyRows[0]?.globalFreeSlots || 0),
+        protectedSystems: Number(redundancyRows[0]?.protectedSystems || 0),
+        unhealthySystems: Number(redundancyRows[0]?.unhealthySystems || 0),
         staleSystems: Number(redundancyRows[0]?.staleSystems || 0),
         providerAvailableSlots,
       };
@@ -1227,6 +1231,25 @@ router.get("/borrow/systems", async (_req: Request, res: Response) => {
              COALESCE((bcr.raw_json->>'channelOccupied')::int, COALESCE(ad.active_dispatches, 0)) AS "channelOccupied",
              COALESCE((bcr.raw_json->>'borrowedShadowActive')::int, 0) AS "borrowedShadowActive",
              COALESCE((bcr.raw_json->>'borrowedShadowPending')::int, 0) AS "borrowedShadowPending",
+             COALESCE((bcr.raw_json->>'localBacklogProtected')::boolean, false) AS "localBacklogProtected",
+             bcr.raw_json->>'error' AS "capacityError",
+             CASE
+               WHEN bcr.reported_at IS NULL THEN 'offline'
+               WHEN bcr.reported_at < now() - INTERVAL '2 minutes' THEN 'stale'
+               WHEN bcr.raw_json ? 'error' THEN 'error'
+               ELSE 'online'
+             END AS "healthState",
+             CASE
+               WHEN bs.enabled = false THEN 'unregistered'
+               WHEN bcr.reported_at IS NULL THEN 'offline'
+               WHEN bcr.reported_at < now() - INTERVAL '2 minutes' THEN 'stale'
+               WHEN bcr.raw_json ? 'error' THEN 'error'
+               WHEN COALESCE((bcr.raw_json->>'enabled')::boolean, false) = false THEN 'disabled'
+               WHEN COALESCE((bcr.raw_json->>'localBacklogProtected')::boolean, false) = true THEN 'protected'
+               WHEN COALESCE(bcr.available_slots, 0) > 0 THEN 'available'
+               WHEN COALESCE((bcr.raw_json->>'channelOccupied')::int, COALESCE(ad.active_dispatches, 0)) >= GREATEST(bs.max_inflight, 1) THEN 'full'
+               ELSE 'idle'
+             END AS "capacityReason",
              COALESCE(ad.active_dispatches, 0) AS "activeDispatches"
       FROM borrow_systems bs
       LEFT JOIN borrow_capacity_reports bcr ON bcr.system_id = bs.id
@@ -1322,7 +1345,22 @@ router.get("/borrow/dispatches", async (req: Request, res: Response) => {
              bd.result_url AS "resultUrl", bd.thumbnail_url AS "thumbnailUrl", bd.video_url AS "videoUrl",
              bd.error_code AS "errorCode", bd.error_message AS "errorMessage", bd.attempt,
              bd.last_heartbeat_at AS "lastHeartbeatAt", bd.created_at AS "createdAt", bd.updated_at AS "updatedAt",
-             rj.seq, rj.prompt, rj.status AS "jobStatus"
+             rj.seq, rj.prompt, rj.status AS "jobStatus", rj.borrow_status AS "borrowStatus",
+             rj.progress, NULL::text AS "remoteTaskId",
+             (bd.result_url IS NOT NULL OR bd.video_url IS NOT NULL OR rj.result_url IS NOT NULL OR rj.video_url IS NOT NULL) AS "hasResult",
+             EXTRACT(EPOCH FROM now() - COALESCE(bd.last_heartbeat_at, bd.updated_at, bd.created_at))::int AS "stageAgeSeconds",
+             CASE
+               WHEN bd.status = 'completed' THEN 'completed'
+               WHEN bd.status = 'failed' AND rj.status = 'pending' THEN 'fallback_local'
+               WHEN bd.status = 'failed' THEN 'failed'
+               WHEN rj.borrow_status IN ('pending', 'queued') THEN 'child_pending'
+               WHEN rj.borrow_status = 'submitted' THEN 'child_submitted'
+               WHEN rj.borrow_status = 'processing' AND COALESCE(rj.progress, 0) > 0 THEN 'runway_processing'
+               WHEN rj.borrow_status = 'processing' THEN 'runway_queued'
+               WHEN bd.status = 'accepted' THEN 'child_pending'
+               WHEN bd.status = 'dispatching' THEN 'dispatching'
+               ELSE COALESCE(rj.borrow_status, bd.status)
+             END AS "stage"
       FROM borrow_dispatches bd
       LEFT JOIN runway_jobs rj ON rj.id = bd.runway_job_id
       ORDER BY bd.updated_at DESC
