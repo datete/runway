@@ -39,9 +39,17 @@ function onClickOutside(e: MouseEvent) {
   expanded.value = false
 }
 
+function progressPercent(value: unknown): number | null {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return null
+  const percent = n > 1 ? n : n * 100
+  return Math.max(0, Math.min(100, Math.round(percent)))
+}
+
 function progressText(job: any): string {
-  if (job.progress != null) return job.progress + '%'
   if (job.status === 'completed') return '100%'
+  const percent = progressPercent(job.progress)
+  if (percent != null) return percent + '%'
   if (job.status === 'pending' || job.status === 'queued') return '0%'
   return ''
 }

@@ -125,11 +125,11 @@
           <div class="progress-track-enhanced">
             <div
               class="progress-fill-enhanced"
-              :style="{ width: `${job.progress}%` }"
+              :style="{ width: `${progressPercent(job.progress)}%` }"
             >
               <div class="progress-shimmer" />
             </div>
-            <span class="progress-text">{{ job.progress }}%</span>
+            <span class="progress-text">{{ progressPercent(job.progress) }}%</span>
           </div>
         </div>
 
@@ -333,6 +333,13 @@ interface RunwayJob {
   errorMessage: string | null
   retryCount: number
   videoUrl?: string | null
+}
+
+function progressPercent(value: unknown): number {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return 0
+  const percent = n > 1 ? n : n * 100
+  return Math.max(0, Math.min(100, Math.round(percent)))
 }
 
 type TabKey = 'all' | 'queued' | 'processing' | 'completed' | 'failed'

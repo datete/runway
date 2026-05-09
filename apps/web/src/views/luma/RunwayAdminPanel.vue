@@ -250,6 +250,11 @@ const asNum = (v: unknown, fallback = 0) => {
   return Number.isFinite(n) ? n : fallback
 }
 const pct = (used: number, total: number) => Math.min(100, Math.max(0, Math.round((used / Math.max(1, total)) * 100)))
+const progressPct = (value: unknown) => {
+  const n = asNum(value)
+  const percent = n > 1 ? n : n * 100
+  return Math.min(100, Math.max(0, Math.round(percent)))
+}
 const borrowActivePct = computed(() => pct(asNum(borrowSettings.value.activeDispatches), asNum(borrowSettings.value.maxGlobal, 1)))
 const borrowTopologySystems = computed(() => borrowSystems.value.map((system) => {
   const occupied = asNum(system.channelOccupied ?? system.activeDispatches)
@@ -1908,7 +1913,7 @@ onUnmounted(() => { if (autoRefreshTimer) clearInterval(autoRefreshTimer) })
                         <SvgIcon icon="ri:film-line" class="text-2xl text-white/10" />
                       </div>
                       <div v-if="t.progress > 0" class="absolute bottom-0 left-0 right-0">
-                        <div class="h-1 bg-emerald-500/80 transition-all" :style="{ width: Math.round(t.progress * 100) + '%' }" />
+                        <div class="h-1 bg-emerald-500/80 transition-all" :style="{ width: progressPct(t.progress) + '%' }" />
                       </div>
                       <div class="absolute left-1 top-1">
                         <span class="inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[9px] font-bold backdrop-blur-sm"
@@ -1918,7 +1923,7 @@ onUnmounted(() => { if (autoRefreshTimer) clearInterval(autoRefreshTimer) })
                         </span>
                       </div>
                       <div v-if="t.progress > 0" class="absolute right-1 top-1 rounded-full bg-black/60 px-1.5 py-0.5 text-[10px] font-bold text-emerald-300 backdrop-blur-sm">
-                        {{ Math.round(t.progress * 100) }}%
+                        {{ progressPct(t.progress) }}%
                       </div>
                     </div>
                     <div class="px-2 py-1.5">

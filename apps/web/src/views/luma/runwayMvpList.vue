@@ -374,6 +374,12 @@ const modelDetailClass = (modelName?: string | null) => {
 const isQueued = (status: string) => ['pending', 'queued'].includes(status)
 const isProcessing = (status: string) => ['submitted', 'processing'].includes(status)
 const isActive = (status: string) => isQueued(status) || isProcessing(status)
+const progressPct = (value: unknown) => {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return 0
+  const percent = n > 1 ? n : n * 100
+  return Math.min(100, Math.max(0, Math.round(percent)))
+}
 const isBorrowedJob = (job: RunwayJob | null) => job?.executionMode === 'borrowed'
 const borrowedSystemLabel = (job: RunwayJob | null) => job?.borrowSystemName || '外部系统'
 const borrowedStatusLabel = (job: RunwayJob | null) => {
@@ -1225,10 +1231,10 @@ onUnmounted(() => {
                   <div class="processing-dot h-2 w-2 rounded-full bg-sky-400" />
                   <span class="text-sm font-medium text-white">{{ statusLabel[job.status] || job.status }}</span>
                   <span v-if="isQueued(job.status) && queuePosition(job) !== null" class="text-xs text-sky-300">第 {{ queuePosition(job) }}/{{ job.queueTotal || '?' }} 位</span>
-                  <span v-if="isProcessing(job.status)" class="text-xs text-sky-300">{{ job.progress != null && job.progress > 0 ? Math.round(job.progress * 100) + '%' : '处理中...' }}</span>
+                  <span v-if="isProcessing(job.status)" class="text-xs text-sky-300">{{ job.progress != null && job.progress > 0 ? progressPct(job.progress) + '%' : '处理中...' }}</span>
                 </div>
                 <div v-if="isProcessing(job.status)" class="progress-glow mt-2 h-1 w-full overflow-hidden rounded-full bg-white/10">
-                  <div class="h-full rounded-full bg-gradient-to-r from-sky-500 to-blue-400 transition-all duration-500" :style="{ width: Math.round((job.progress || 0) * 100) + '%' }" />
+                  <div class="h-full rounded-full bg-gradient-to-r from-sky-500 to-blue-400 transition-all duration-500" :style="{ width: progressPct(job.progress) + '%' }" />
                 </div>
               </div>
             </div>
@@ -1418,9 +1424,9 @@ onUnmounted(() => {
           <div class="relative z-10">
             <div class="processing-dot mx-auto mb-2 h-3 w-3 rounded-full bg-sky-400" />
             <p class="text-sm font-medium text-white/80">{{ statusLabel[detailJob.status] || detailJob.status }}</p>
-            <p v-if="detailJob.progress != null && detailJob.progress > 0" class="mt-1 text-lg font-bold text-sky-400">{{ Math.round(detailJob.progress * 100) }}%</p>
+            <p v-if="detailJob.progress != null && detailJob.progress > 0" class="mt-1 text-lg font-bold text-sky-400">{{ progressPct(detailJob.progress) }}%</p>
             <div v-if="isProcessing(detailJob.status)" class="mx-auto mt-3 h-1.5 w-48 overflow-hidden rounded-full bg-white/10">
-              <div class="h-full rounded-full bg-gradient-to-r from-sky-500 to-blue-400 transition-all duration-500" :style="{ width: Math.round((detailJob.progress || 0) * 100) + '%' }" />
+              <div class="h-full rounded-full bg-gradient-to-r from-sky-500 to-blue-400 transition-all duration-500" :style="{ width: progressPct(detailJob.progress) + '%' }" />
             </div>
           </div>
         </div>
@@ -1477,7 +1483,7 @@ onUnmounted(() => {
             <span class="detail-label">借调状态</span>
             <span class="detail-value text-xs text-slate-300">
               {{ detailJob.borrowStatus }}
-              <span v-if="detailJob.progress != null && detailJob.progress > 0" class="text-sky-300"> · {{ Math.round(detailJob.progress * 100) }}%</span>
+              <span v-if="detailJob.progress != null && detailJob.progress > 0" class="text-sky-300"> · {{ progressPct(detailJob.progress) }}%</span>
             </span>
           </div>
           <div v-if="detailJob.remark" class="detail-row">
