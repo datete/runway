@@ -74,7 +74,9 @@ async function buildCapacity() {
     redis.keys("account:cooldown:*").catch(() => [] as string[]),
   ]);
   const freeSlots = Math.max(0, totalSlots - usedSlots);
-  const availableSlots = enabled ? Math.max(0, Math.min(maxBorrow, freeSlots - reserveSlots)) : 0;
+  const channelOccupied = borrowedShadowActive + borrowedShadowPending;
+  const borrowHeadroom = Math.max(0, maxBorrow - channelOccupied);
+  const availableSlots = enabled ? Math.max(0, Math.min(borrowHeadroom, freeSlots - reserveSlots)) : 0;
   return {
     enabled,
     totalSlots,
@@ -85,7 +87,7 @@ async function buildCapacity() {
     localActive,
     borrowedShadowActive,
     borrowedShadowPending,
-    channelOccupied: borrowedShadowActive + borrowedShadowPending,
+    channelOccupied,
     cooldownAccounts: cooldownKeys.length,
     recent429: 0,
     failureRate: 0,

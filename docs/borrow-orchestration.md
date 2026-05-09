@@ -45,7 +45,8 @@ Capacity is calculated on the child controller from its own accounts and Redis c
 
 ```text
 freeSlots = total active account slots - currently used account slots
-availableSlots = min(providerMaxConcurrency, freeSlots - providerReserveSlots)
+channelOccupied = borrowedShadowActive + borrowedShadowPending
+availableSlots = min(providerMaxConcurrency - channelOccupied, freeSlots - providerReserveSlots)
 ```
 
 A child returns zero available slots if its provider switch is off. The child still applies its own cooldowns, account concurrency, proxy behavior, submit worker pacing, and polling logic. Borrowed shadow jobs are marked with `provider = 'borrowed'` and `execution_mode = 'borrowed_shadow'`, so normal local queues and admin task views do not display them.
