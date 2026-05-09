@@ -22,8 +22,10 @@ interface TokenStatus {
   cooldownTtl: number
 }
 const MAX_IMAGES = 4
+const SEEDANCE_MAX_IMAGES = 9
 const HAPPYHORSE_MAX_IMAGES = 1
 const BATCH_MAX_IMAGES = 10
+const MAX_REF_VIDEO_SECONDS = 16
 const batchMode = ref(false)
 const batchSubmitting = ref(false)
 const batchProgress = ref({ current: 0, total: 0, success: 0, fail: 0 })
@@ -163,7 +165,7 @@ const totalQuota = ref<number | null>(null)
 
 const isUploading = computed(() => images.value.some((item) => item.uploading))
 const uploadedUrls = computed(() => images.value.filter((item) => item.url).map((item) => item.url))
-const modelMaxImages = computed(() => selectedModel.value === 'happyhorse' ? HAPPYHORSE_MAX_IMAGES : MAX_IMAGES)
+const modelMaxImages = computed(() => selectedModel.value === 'happyhorse' ? HAPPYHORSE_MAX_IMAGES : selectedModel.value === 'seedance' ? SEEDANCE_MAX_IMAGES : MAX_IMAGES)
 const remainingSlots = computed(() => Math.max(0, (batchMode.value ? BATCH_MAX_IMAGES : modelMaxImages.value) - images.value.length))
 
 
@@ -181,7 +183,7 @@ const canSubmit = computed(() => {
   if (!jwtToken.value) return false
   if (!prompt.value.trim()) return false
   if (batchMode.value && uploadedUrls.value.length === 0) return false
-  if (loading.value || isUploading.value || batchSubmitting.value) return false
+  if (loading.value || isUploading.value || refVideoUploading.value || batchSubmitting.value) return false
   if (quotaExceeded.value) return false
   if (promptLength.value > PROMPT_MAX_LENGTH) return false
   return true
@@ -191,6 +193,7 @@ const canSubmitReason = computed(() => {
   if (!jwtToken.value) return '请先登录后再提交任务'
   if (loading.value || batchSubmitting.value) return '正在提交任务，请稍候'
   if (isUploading.value) return '参考图片上传中，请稍候'
+  if (refVideoUploading.value) return '参考视频上传中，请稍候'
   if (quotaExceeded.value) return quotaExceeded.value
   if (promptLength.value > PROMPT_MAX_LENGTH) return `提示词超出${PROMPT_MAX_LENGTH}字上限（当前${promptLength.value}字），请精简后再提交`
   if (!prompt.value.trim()) return '请输入提示词'
@@ -349,8 +352,17 @@ const handleVideoSelect = async (e: Event) => {
   if (!file) return
   if (!file.type.startsWith('video/')) { message.warning('请选择视频文件'); return }
   if (file.size > 50 * 1024 * 1024) { message.error('视频文件最大 50MB'); return }
+  const previewUrl = URL.createObjectURL(file)
+  try {
+    const seconds = await readVideoDuration(previewUrl)
+    if (seconds > MAX_REF_VIDEO_SECONDS) {
+      URL.revokeObjectURL(previewUrl)
+      message.error('参考视频最长 15 秒')
+      return
+    }
+  } catch {}
   refVideoUploading.value = true
-  refVideoPreview.value = URL.createObjectURL(file)
+  refVideoPreview.value = previewUrl
   try {
     const reader = new FileReader()
     const base64: string = await new Promise((resolve, reject) => {
@@ -375,6 +387,25 @@ const handleVideoSelect = async (e: Event) => {
     refVideoUploading.value = false
   }
 }
+
+const readVideoDuration = (url: string) => new Promise<number>((resolve, reject) => {
+  const video = document.createElement('video')
+  const cleanup = () => {
+    video.removeAttribute('src')
+    video.load()
+  }
+  video.preload = 'metadata'
+  video.onloadedmetadata = () => {
+    const duration = video.duration
+    cleanup()
+    Number.isFinite(duration) ? resolve(duration) : reject(new Error('invalid duration'))
+  }
+  video.onerror = () => {
+    cleanup()
+    reject(new Error('metadata failed'))
+  }
+  video.src = url
+})
 
 const removeRefVideo = () => {
   refVideoUrl.value = ''
@@ -1139,7 +1170,7 @@ const submit = async () => {
       resolution: isHappyHorse ? happyHorseRatio.value : (resolution.value || undefined),
       quality: isHappyHorse ? happyHorseResolution.value : isSeedance ? 'std' : quality.value,
       cfgScale: isSeedance || isHappyHorse ? undefined : cfgScale.value,
-      sound: isHappyHorse ? undefined : sound.value,
+      sound: isSeedance ? true : isHappyHorse ? undefined : sound.value,
       remark: remark.value.trim() || undefined,
       imageUrls: uploadedUrls.value,
       videoUrl: isHappyHorse ? undefined : (refVideoUrl.value || undefined),
@@ -1187,7 +1218,7 @@ const batchSubmit = async () => {
     resolution: isHappyHorse ? happyHorseRatio.value : (resolution.value || undefined),
     quality: isHappyHorse ? happyHorseResolution.value : isSeedance ? 'std' : quality.value,
     cfgScale: isSeedance || isHappyHorse ? undefined : cfgScale.value,
-    sound: isHappyHorse ? undefined : sound.value,
+    sound: isSeedance ? true : isHappyHorse ? undefined : sound.value,
     remark: remark.value.trim() || undefined,
     videoUrl: isHappyHorse ? undefined : (refVideoUrl.value || undefined),
   }
@@ -1303,7 +1334,7 @@ onUnmounted(() => {
             {{ batchMode ? '批量模式 — 每张图一个任务' : '单任务模式' }}
           </span>
           <span class="text-[9px]" :class="batchMode ? 'text-violet-300/40' : 'text-white/25'">
-            {{ batchMode ? `可上传最多 ${BATCH_MAX_IMAGES} 张图片` : selectedModel === 'happyhorse' ? `最多 ${HAPPYHORSE_MAX_IMAGES} 张起始帧` : `最多 ${MAX_IMAGES} 张参考图` }}
+            {{ batchMode ? `可上传最多 ${BATCH_MAX_IMAGES} 张图片` : selectedModel === 'seedance' ? `最多 ${SEEDANCE_MAX_IMAGES} 张参考图` : selectedModel === 'happyhorse' ? `最多 ${HAPPYHORSE_MAX_IMAGES} 张起始帧` : `最多 ${MAX_IMAGES} 张参考图` }}
           </span>
         </div>
       </div>
@@ -1411,7 +1442,7 @@ onUnmounted(() => {
 
     <!-- 参考图片 - 拖拽上传 -->
     <div class="flex flex-col gap-1.5">
-      <label class="section-label">{{ batchMode ? "批量图片 *（每张图 = 一个任务）" : selectedModel === 'seedance' ? '参考图片（可选，可上传多张）' : selectedModel === 'happyhorse' ? `起始帧（可选，最多 ${HAPPYHORSE_MAX_IMAGES} 张）` : `参考图片 *（最多 ${MAX_IMAGES} 张）` }}</label>
+      <label class="section-label">{{ batchMode ? "批量图片 *（每张图 = 一个任务）" : selectedModel === 'seedance' ? `参考图片（可选，最多 ${SEEDANCE_MAX_IMAGES} 张）` : selectedModel === 'happyhorse' ? `起始帧（可选，最多 ${HAPPYHORSE_MAX_IMAGES} 张）` : `参考图片 *（最多 ${MAX_IMAGES} 张）` }}</label>
       <div v-if="images.length > 0" class="mb-0.5 flex items-center justify-between">
         <p class="text-[10px] text-white/30">
           已上传 {{ uploadedUrls.length }}/{{ images.length }} 张
@@ -1513,8 +1544,8 @@ onUnmounted(() => {
       </div>
       <label v-else class="flex cursor-pointer items-center justify-center gap-2 rounded-xl border border-dashed border-emerald-400/15 bg-emerald-500/[0.03] py-3 transition-all hover:border-emerald-400/30 hover:bg-emerald-500/[0.06]">
         <SvgIcon icon="ri:video-add-line" class="text-base text-emerald-400/40" />
-        <span class="text-[11px] text-emerald-300/40">上传参考视频（mp4/mov，最大 50MB）</span>
-        <input type="file" accept="video/mp4,video/quicktime,video/x-msvideo" class="hidden" @change="handleVideoSelect" />
+        <span class="text-[11px] text-emerald-300/40">上传参考视频（mp4/mov，最大 50MB，约 15 秒内）</span>
+        <input type="file" accept="video/mp4,video/quicktime" class="hidden" @change="handleVideoSelect" />
       </label>
     </div>
 

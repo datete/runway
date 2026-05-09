@@ -199,8 +199,12 @@ async function runCleanup() {
     cleanupRunning = false;
   }
 }
-setInterval(runCleanup, 6 * 60 * 60 * 1000); // every 6 hours
-setTimeout(runCleanup, 5000); // run once after startup
+if (process.env.RUNWAY_DISABLE_STARTUP_CLEANUP === 'true') {
+  console.log('[cleanup] disabled by RUNWAY_DISABLE_STARTUP_CLEANUP');
+} else {
+  setInterval(runCleanup, 6 * 60 * 60 * 1000); // every 6 hours
+  setTimeout(runCleanup, 5000); // run once after startup
+}
 
 app.listen(PORT, () => {
   console.log(`[runway-api] listening on :${PORT}`);

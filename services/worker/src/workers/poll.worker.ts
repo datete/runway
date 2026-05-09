@@ -32,6 +32,8 @@ function pollJobOptions(jobId: string, delay: number, suffix = `${Date.now()}`) 
 const MAX_REMOTE_RETRIES = 10;
 // Max time a job can stay in processing/generating before auto-retry (queued/THROTTLED has no limit)
 const MAX_PROCESSING_MINUTES = Number(process.env.MAX_PROCESSING_MINUTES) || 30;
+const PROGRESS_STALL_MINUTES = Number(process.env.PROGRESS_STALL_MINUTES) || 10;
+const HIGH_PROGRESS_STALL_THRESHOLD = Number(process.env.HIGH_PROGRESS_STALL_THRESHOLD) || 0.95;
 
 /** Create a RunwayDirectClient for a specific account.
  *  Resolves account from: (1) explicit accountId, (2) DB lookup by jobId, (3) default fallback.
@@ -57,6 +59,18 @@ async function getClientForJob(accountId?: string, jobId?: string): Promise<Runw
   }
   console.warn(`[poll-worker] WARNING: using default account for job ${jobId?.slice(0,8) || '?'}`);
   return new RunwayDirectClient();
+}
+
+async function cancelRemoteBeforeRetry(accountId: string | undefined, jobId: string, remoteTaskId: string, reason: string): Promise<boolean> {
+  try {
+    const client = await getClientForJob(accountId, jobId);
+    await client.cancelTask(remoteTaskId);
+    console.warn(`[poll-worker] job ${jobId.slice(0,8)} cancelled remote ${remoteTaskId.slice(0,8)} before retry: ${reason}`);
+    return true;
+  } catch (err: any) {
+    console.warn(`[poll-worker] job ${jobId.slice(0,8)} cancel remote ${remoteTaskId.slice(0,8)} failed: ${err.message || String(err)}, keep polling`);
+    return false;
+  }
 }
 
 const VIDEOS_DIR = '/root/runway/uploads/videos';
@@ -96,6 +110,15 @@ new Worker('runway-poll', async (job: Job) => {
     return;
   }
 
+  if (!['submitted', 'processing', 'queued'].includes(dbJob.status) || dbJob.remoteTaskId !== remoteTaskId) {
+    console.log(
+      `[poll-worker] stale poll ignored for job ${jobId.slice(0,8)} ` +
+      `(dbStatus=${dbJob.status}, dbRemote=${dbJob.remoteTaskId ? String(dbJob.remoteTaskId).slice(0,8) : 'none'}, ` +
+      `pollRemote=${String(remoteTaskId).slice(0,8)})`
+    );
+    return;
+  }
+
   if (dbJob.resultUrl && dbJob.resultUrl.startsWith('/img/videos/')) {
     console.log(`[poll-worker] job ${jobId.slice(0,8)} already has cached video, marking completed`);
     await prisma.runwayJob.update({
@@ -117,7 +140,7 @@ new Worker('runway-poll', async (job: Job) => {
   } catch (err: any) {
     const errMsg = err.message || String(err);
     const is404 = errMsg.includes('404') || errMsg.includes('Could not find');
-    const isTokenRevoked = errMsg.includes('401') && /revoked|invalid|expired/i.test(errMsg);
+    const isTokenRevoked = errMsg.includes('401') && /revoked|invalid|expired|unauthorized/i.test(errMsg);
 
     if (is404 || isTokenRevoked) {
       const reason = is404 ? '系统任务不存在(404)，可能已被平台删除' : 'Token 已失效(401)，无法继续查询';
@@ -132,6 +155,9 @@ new Worker('runway-poll', async (job: Job) => {
       });
       if (accountId) {
         await accountPool.release(accountId, jobId);
+        if (isTokenRevoked) {
+          await accountPool.handleRiskError(accountId, errMsg);
+        }
       }
       await triggerSubmit(humanSubmitDelay());
       return;
@@ -233,7 +259,7 @@ new Worker('runway-poll', async (job: Job) => {
       });
       if (accountId) {
         await accountPool.release(accountId, jobId);
-        await accountPool.recordError(accountId, result.errorMessage || 'Task failed');
+        await accountPool.handleRiskError(accountId, result.errorMessage || 'Task failed');
       }
       console.log(`[poll-worker] job ${jobId.slice(0,8)} failed after ${retryCount} retries, giving up`);
     }
@@ -253,6 +279,13 @@ new Worker('runway-poll', async (job: Job) => {
       // Give it 60 minutes grace period, then switch account
       if (queuedMinutes > 60) {
         console.warn(`[poll-worker] job ${jobId.slice(0,8)} queued/throttled for ${Math.round(queuedMinutes)}min, switching account`);
+        const cancelled = await cancelRemoteBeforeRetry(accountId, jobId, remoteTaskId, 'queued/throttled timeout');
+        if (!cancelled) {
+          await pollQueue.add('poll', {
+            jobId, remoteTaskId, accountId,
+          }, pollJobOptions(jobId, INTERVAL_ERROR));
+          return;
+        }
         await prisma.runwayJob.update({
           where: { id: jobId },
           data: {
@@ -277,6 +310,13 @@ new Worker('runway-poll', async (job: Job) => {
       const stuckMinutes = (Date.now() - new Date(dbJob.startedAt).getTime()) / 60000;
       if (stuckMinutes > 10) {
         console.warn(`[poll-worker] job ${jobId.slice(0,8)} processing ${Math.round(stuckMinutes)}min with progress=0, switching account`);
+        const cancelled = await cancelRemoteBeforeRetry(accountId, jobId, remoteTaskId, 'processing zero progress');
+        if (!cancelled) {
+          await pollQueue.add('poll', {
+            jobId, remoteTaskId, accountId,
+          }, pollJobOptions(jobId, INTERVAL_ERROR));
+          return;
+        }
         await prisma.runwayJob.update({
           where: { id: jobId },
           data: {
@@ -296,11 +336,49 @@ new Worker('runway-poll', async (job: Job) => {
       }
     }
 
+    // Tail-end stalls: Runway can sit at 95-99% for a long time without finishing.
+    // updatedAt tracks the last progress change here, so stale high progress means retry.
+    if (result.status !== 'queued' && dbJob.updatedAt && (result.progress || 0) >= HIGH_PROGRESS_STALL_THRESHOLD) {
+      const staleMinutes = (Date.now() - new Date(dbJob.updatedAt).getTime()) / 60000;
+      if (staleMinutes > PROGRESS_STALL_MINUTES) {
+        console.warn(`[poll-worker] job ${jobId.slice(0,8)} progress stalled at ${result.progress} for ${Math.round(staleMinutes)}min, retrying`);
+        const cancelled = await cancelRemoteBeforeRetry(accountId, jobId, remoteTaskId, 'high progress stalled');
+        if (!cancelled) {
+          await pollQueue.add('poll', {
+            jobId, remoteTaskId, accountId,
+          }, pollJobOptions(jobId, INTERVAL_ERROR));
+          return;
+        }
+        await prisma.runwayJob.update({
+          where: { id: jobId },
+          data: {
+            status: 'pending',
+            remoteTaskId: null,
+            errorMessage: `进度长时间未变化，已重新排队重试`,
+            startedAt: null,
+            accountId: null,
+          } as any,
+        });
+        if (accountId) {
+          await accountPool.release(accountId, jobId);
+        }
+        await triggerSubmit(humanSubmitDelay());
+        return;
+      }
+    }
+
     // Processing timeout: 30min
     if (result.status !== 'queued' && dbJob.startedAt) {
       const processingMinutes = (Date.now() - new Date(dbJob.startedAt).getTime()) / 60000;
       if (processingMinutes > MAX_PROCESSING_MINUTES) {
         console.warn(`[poll-worker] job ${jobId.slice(0,8)} generation timeout (${Math.round(processingMinutes)}min), switching account`);
+        const cancelled = await cancelRemoteBeforeRetry(accountId, jobId, remoteTaskId, 'processing timeout');
+        if (!cancelled) {
+          await pollQueue.add('poll', {
+            jobId, remoteTaskId, accountId,
+          }, pollJobOptions(jobId, INTERVAL_ERROR));
+          return;
+        }
         await prisma.runwayJob.update({
           where: { id: jobId },
           data: {
@@ -347,23 +425,17 @@ new Worker('runway-poll', async (job: Job) => {
       }
     }
 
-    // THROTTLED/queued: release concurrency slot so other jobs can use the account
-    // The task is still being tracked on Platform side, we just free the local slot
+    // THROTTLED/queued still counts against Runway platform concurrency.
+    // Keep the local slot occupied; otherwise the submitter creates extra remote tasks
+    // that immediately become platform-active queue blockers.
     if (result.status === 'queued' && accountId) {
-      const slotKey = `poll:slot-released:${jobId}`;
-      const alreadyReleased = await connection.get(slotKey);
-      if (!alreadyReleased) {
-        await accountPool.release(accountId, jobId);
-        await connection.set(slotKey, '1', 'EX', 7200); // 2h guard
-        // Update DB status to 'queued' so submit worker's DB check knows the slot is free
-        await prisma.runwayJob.update({
-          where: { id: jobId },
-          data: { status: 'queued' } as any,
-        }).catch(() => {});
-        console.log(`[poll-worker] job ${jobId.slice(0,8)} THROTTLED, released slot + DB->queued (still polling)`);
-        // Trigger submit since a real slot opened up
-        await triggerSubmit(humanSubmitDelay());
-      }
+      await connection.del(`poll:slot-released:${jobId}`);
+      await connection.del(`account:released:${accountId}:${jobId}`);
+      await prisma.runwayJob.update({
+        where: { id: jobId },
+        data: { status: 'processing', errorMessage: '平台排队中，继续等待' } as any,
+      }).catch(() => {});
+      console.log(`[poll-worker] job ${jobId.slice(0,8)} THROTTLED, keeping account slot occupied`);
     }
 
     const delay = result.status === 'queued' ? INTERVAL_QUEUED : INTERVAL_PROCESSING;

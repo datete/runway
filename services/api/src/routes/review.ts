@@ -13,8 +13,12 @@ import { JWT_SECRET } from "../middleware/auth";
 
 export const reviewRouter = Router();
 
-// kick off safety net once router is loaded
-startSafetyNet();
+// kick off safety net once router is loaded. Sidecar API instances can disable it for read-only validation.
+if (process.env.RUNWAY_DISABLE_REVIEW_SAFETY_NET === "true") {
+  console.log("[review.engine] safety net disabled by RUNWAY_DISABLE_REVIEW_SAFETY_NET");
+} else {
+  startSafetyNet();
+}
 
 // expose hook for runway.ts polling integration
 export { onSeedreamCompleted };

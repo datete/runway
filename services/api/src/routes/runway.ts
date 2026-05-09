@@ -5,11 +5,153 @@ import { prisma } from "../services/prisma";
 import { redisConnection } from "../queues/runway.queue";
 import fs from "fs";
 import path from "path";
+import crypto from "crypto";
 
 const ctrl = new RunwayController();
 export const runwayRouter = Router();
 
 const UPLOAD_ROOT = "/root/runway/uploads";
+const DOWNLOAD_TOKEN_TTL_SECONDS = Number(process.env.RUNWAY_DOWNLOAD_TOKEN_TTL_SECONDS) || 60;
+const MAX_BATCH_DOWNLOAD = Number(process.env.RUNWAY_BATCH_DOWNLOAD_MAX) || 20;
+const DOWNLOAD_TOKEN_ENABLED = process.env.RUNWAY_DOWNLOAD_TOKEN_ENABLED !== "false";
+const PROMPT_GUARD_ENABLED = process.env.RUNWAY_PROMPT_GUARD_ENABLED !== "false";
+const CONTENT_REVIEW_KEY = "runway:content-review-enabled";
+const TEMPLATE_LIMIT_PER_HOUR = Math.max(1, Number(process.env.RUNWAY_TEMPLATE_LIMIT_PER_HOUR) || 10);
+const GLOBAL_TEMPLATE_LIMIT_PER_HOUR = Math.max(1, Number(process.env.RUNWAY_GLOBAL_TEMPLATE_LIMIT_PER_HOUR) || TEMPLATE_LIMIT_PER_HOUR);
+const TEMPLATE_WINDOW_SECONDS = Math.max(300, Number(process.env.RUNWAY_TEMPLATE_WINDOW_SECONDS) || 3600);
+const DIRECT_SUBMIT_LIMIT_PER_HOUR = Math.max(1, Number(process.env.RUNWAY_DIRECT_SUBMIT_LIMIT_PER_HOUR) || 30);
+const STRICT_MINOR_GUARD = process.env.RUNWAY_ALLOW_MINOR_PROMPTS !== "true";
+const SAFETY_FAILURE_DAILY_LIMIT = Math.max(1, Number(process.env.RUNWAY_SAFETY_FAILURE_DAILY_LIMIT) || 3);
+const SAFETY_FAILURE_WINDOW_SECONDS = Math.max(300, Number(process.env.RUNWAY_SAFETY_FAILURE_WINDOW_SECONDS) || 24 * 60 * 60);
+
+type DownloadTokenPayload = {
+  kind: "single" | "batch";
+  userId: string;
+  role: string;
+  jobId?: string;
+  ids?: string[];
+  createdAt: number;
+};
+
+type PromptRisk = { blocked: boolean; reason?: string; keywords?: string[] };
+
+function collectRiskKeywords(text: string, ...patterns: RegExp[]): string[] {
+  const keywords: string[] = [];
+  for (const pattern of patterns) {
+    const flags = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
+    const globalPattern = new RegExp(pattern.source, flags);
+    let match: RegExpExecArray | null;
+    while ((match = globalPattern.exec(text)) !== null) {
+      if (match[0]) keywords.push(match[0]);
+      if (keywords.length >= 12) break;
+    }
+  }
+  return Array.from(new Set(
+    keywords
+      .map(k => k.trim())
+      .filter(Boolean)
+      .map(k => k.length > 32 ? `${k.slice(0, 32)}...` : k)
+  )).slice(0, 6);
+}
+
+function blockedRisk(reason: string, text: string, ...patterns: RegExp[]): PromptRisk {
+  return { blocked: true, reason, keywords: collectRiskKeywords(text, ...patterns) };
+}
+
+function inspectPromptRisk(prompt: unknown): PromptRisk {
+  if (!PROMPT_GUARD_ENABLED) return { blocked: false };
+  const text = String(prompt || "").toLowerCase();
+  const evasion = /\b(bypass|jailbreak|uncensored|unfiltered|no censorship|ignore policy|ignore safety|no limits?|no restrictions?)\b|\u7ed5\u8fc7.*\u5ba1\u6838|\u7ed5\u8fc7.*\u5ba1\u67e5|\u65e0\u9650\u5236|\u4e0d\u8981\u9650\u5236/i;
+  const prohibited = /\b(nsfw|nude|naked|nudity|porn|pornographic|erotic|rape|raped|sexual assault|suicide|self[- ]?harm|gore|gory|graphic blood)\b|\u8272\u60c5|\u88f8|\u88f8\u7167|\u5f3a\u5978|\u6027\u4fb5|\u81ea\u6740|\u81ea\u6b8b|\u8840\u8165/i;
+  const sexual = /\b(sexy|sexual|sensual|seductive|provocative|lingerie|underwear|bikini|swimsuit|cleavage|breasts?|boobs?|nipples?|bra|panties|thong|see[- ]?through|revealing|curvy|hourglass|big breasts?|large breasts?|slim waist|wide hips?|butt|buttocks|\bass\b|fetish|intimate|adult|voyeur|non[- ]?consensual)\b|\u6027\u611f|\u8bf1\u60d1|\u5185\u8863|\u6bd4\u57fa\u5c3c|\u4e73\u6c9f|\u80f8|\u4e73\u623f|\u81c0|\u7fd8\u81c0|\u4e30\u6ee1\u80f8|\u4e30\u6ee1\u81c0|\u6210\u4eba|\u672a\u7ecf\u540c\u610f/i;
+  const violence = /\b(violent|violence|blood|bloody|blood splatter|kill|killing|murder|gun|shoot|shooting|knife|stab|stabbing|fight|fighting|wound|wounded|injur(?:y|ed)|corpse|dead body|death|explosion|war|torture|pain|suffering|struggl(?:e|ing)|scream(?:ing)?|crying|crush|burn(?:ing)?|terroris[mt]|extremis[mt]|dismember|behead|beheading|mutilat(?:e|ed|ion)|organs?|bones?|abuse)\b|\u66b4\u529b|\u8840|\u6d41\u8840|\u6740|\u67aa|\u5200|\u6253\u6597|\u4f24\u53e3|\u5c38\u4f53|\u6b7b\u4ea1|\u7206\u70b8|\u6218\u4e89|\u75db\u82e6|\u6323\u624e|\u54ed\u95f9|\u6495\u788e|\u6050\u6016|\u8650\u5f85|\u80a2\u89e3|\u65a9\u9996|\u65ad\u5934|\u5668\u5b98|\u9aa8\u5934|\u6050\u6016\u4e3b\u4e49|\u6781\u7aef\u4e3b\u4e49/i;
+  const minor = /\b(child|children|kid|kids|toddler|minor|minors|baby|babies|teen|teens|teenage|teenager|teenagers|underage|under 18|schoolgirl|schoolboy|young girl|young boy)\b|\u513f\u7ae5|\u5c0f\u5b69|\u5e7c\u513f|\u5b69\u5b50|\u672a\u6210\u5e74|\u5b9d\u5b9d|\u5a74\u513f/i;
+  const hateHarassment = /\b(hate speech|racist|slur|nazi|kkk|harass(?:ment)?|bully|bullying|defame|defamation|intimidat(?:e|ion))\b|\u4ec7\u6068|\u6b67\u89c6|\u7eb3\u7cb9|\u9a9a\u6270|\u9738\u51cc|\u8fb1\u9a82|\u8bfd\u8c24/i;
+  const deceptionRights = /\b(deepfake|face[- ]?swap|impersonat(?:e|ion)|celebrity|public figure|politician|president|living artist|style of .*artist)\b|\u6362\u8138|\u6df1\u5ea6\u4f2a\u9020|\u5192\u5145|\u8bef\u5bfc|\u540d\u4eba|\u660e\u661f|\u516c\u4f17\u4eba\u7269|\u653f\u6cbb\u4eba\u7269|\u603b\u7edf|\u5728\u4e16\u827a\u672f\u5bb6/i;
+  const illegal = /\b(drug|drugs|cocaine|meth|weapon making|bomb making|scam|fraud|phishing)\b|\u6bd2\u54c1|\u5438\u6bd2|\u8d29\u6bd2|\u70b8\u5f39|\u8bc8\u9a97|\u9493\u9c7c|\u8fdd\u6cd5/i;
+  if (evasion.test(text)) return blockedRisk("safety-evasion or uncensored wording", text, evasion);
+  if (prohibited.test(text)) return blockedRisk("prohibited sexual/graphic/self-harm keyword", text, prohibited);
+  if (minor.test(text) && (sexual.test(text) || violence.test(text))) return blockedRisk("minor combined with sexual or violent context", text, minor, sexual, violence);
+  if (STRICT_MINOR_GUARD && minor.test(text)) return blockedRisk("child/minor keyword blocked by strict safety guard", text, minor);
+  if (sexual.test(text)) return blockedRisk("sexualized body or adult keyword", text, sexual);
+  if (violence.test(text)) return blockedRisk("violent distress or injury keyword", text, violence);
+  if (hateHarassment.test(text)) return blockedRisk("hate harassment or self-harm adjacent keyword", text, hateHarassment);
+  if (deceptionRights.test(text)) return blockedRisk("impersonation public-figure or rights-risk keyword", text, deceptionRights);
+  if (illegal.test(text)) return blockedRisk("illegal activity keyword", text, illegal);
+  return { blocked: false };
+}
+
+function normalizePromptTemplate(prompt: unknown): string {
+  return String(prompt || "")
+    .toLowerCase()
+    .normalize("NFKC")
+    .replace(/https?:\/\/\S+/gi, " ")
+    .replace(/[0-9]+/g, "#")
+    .replace(/[，。！？、,.!?;:()[\]{}"'<>`~\-_/\\|]+/g, "")
+    .replace(/\s+/g, "")
+    .slice(0, 320);
+}
+
+function promptTemplateHash(prompt: unknown): string {
+  const normalized = normalizePromptTemplate(prompt);
+  return crypto.createHash("sha1").update(normalized || String(prompt || "").slice(0, 120)).digest("hex").slice(0, 16);
+}
+
+function localRiskMessage(reason?: string): string {
+  const r = reason || "";
+  if (r.includes("child/minor")) return "包含儿童/未成年相关内容";
+  if (r.includes("minor combined")) return "儿童/未成年内容与敏感场景组合";
+  if (r.includes("sexual")) return "包含色情、裸露或性暗示内容";
+  if (r.includes("violent")) return "包含暴力、血腥、痛苦或危险行为内容";
+  if (r.includes("evasion")) return "包含绕过审核或无限制生成相关表述";
+  if (r.includes("hate")) return "包含仇恨、骚扰或辱骂相关内容";
+  if (r.includes("impersonation")) return "包含名人、公人物、换脸、冒充或版权风险内容";
+  if (r.includes("illegal")) return "包含违法、毒品、诈骗或武器相关内容";
+  return "提示词命中本地安全规则";
+}
+
+function keywordDetail(keywords?: string[]): string {
+  return keywords && keywords.length > 0 ? `；命中关键词：${keywords.join("、")}` : "";
+}
+
+async function isContentReviewEnabled(): Promise<boolean> {
+  if (!PROMPT_GUARD_ENABLED) return false;
+  const raw = await redisConnection.get(CONTENT_REVIEW_KEY).catch(() => null);
+  return raw === null ? true : raw === "1";
+}
+
+async function validateDirectRunwayPrompt(userId: string | undefined, prompt: unknown, source: string): Promise<string | null> {
+  if (!(await isContentReviewEnabled())) return null;
+  const risk = inspectPromptRisk(prompt);
+  if (risk.blocked) {
+    const blockKey = `risk:local-blocks:${source}:${userId || "anon"}`;
+    await redisConnection.incr(blockKey).then((count) => {
+      if (count === 1) return redisConnection.expire(blockKey, TEMPLATE_WINDOW_SECONDS);
+      return undefined;
+    }).catch(() => {});
+    return `提示词触发本地风控，未提交 Runway：${localRiskMessage(risk.reason)}${keywordDetail(risk.keywords)}`;
+  }
+  const hash = promptTemplateHash(prompt);
+  const userKey = `risk:template:user:${userId || "anon"}:${hash}`;
+  const userCount = await redisConnection.incr(userKey);
+  if (userCount === 1) await redisConnection.expire(userKey, TEMPLATE_WINDOW_SECONDS);
+  if (userCount > TEMPLATE_LIMIT_PER_HOUR) {
+    return `相同/相似提示词提交过于频繁，未提交 Runway（${userCount}/${TEMPLATE_LIMIT_PER_HOUR}，${TEMPLATE_WINDOW_SECONDS}秒窗口）`;
+  }
+  const globalKey = `risk:template:global:${hash}`;
+  const globalCount = await redisConnection.incr(globalKey);
+  if (globalCount === 1) await redisConnection.expire(globalKey, TEMPLATE_WINDOW_SECONDS);
+  if (globalCount > GLOBAL_TEMPLATE_LIMIT_PER_HOUR) {
+    return `全站相同/相似提示词提交过于频繁，未提交 Runway（${globalCount}/${GLOBAL_TEMPLATE_LIMIT_PER_HOUR}，${TEMPLATE_WINDOW_SECONDS}秒窗口）`;
+  }
+  const directSubmitKey = "risk:direct-submit:global";
+  const directSubmitCount = await redisConnection.incr(directSubmitKey);
+  if (directSubmitCount === 1) await redisConnection.expire(directSubmitKey, TEMPLATE_WINDOW_SECONDS);
+  if (directSubmitCount > DIRECT_SUBMIT_LIMIT_PER_HOUR) {
+    return `Runway 提交过于频繁，已本地拦截（${directSubmitCount}/${DIRECT_SUBMIT_LIMIT_PER_HOUR}，${TEMPLATE_WINDOW_SECONDS}秒窗口）`;
+  }
+  return null;
+}
 
 function safeDownloadName(id: string) {
   return `runway-${id.slice(0, 8)}.mp4`;
@@ -67,32 +209,267 @@ async function streamRemoteDownload(remoteUrl: string, filename: string, res: an
   }
 }
 
+function downloadTokenKey(token: string) {
+  return `runway:download-token:${token}`;
+}
+
+async function createDownloadToken(payload: DownloadTokenPayload) {
+  const token = crypto.randomBytes(24).toString("base64url");
+  await redisConnection.setex(downloadTokenKey(token), DOWNLOAD_TOKEN_TTL_SECONDS, JSON.stringify(payload));
+  return token;
+}
+
+async function readDownloadToken(token: unknown, expectedKind: "single" | "batch") {
+  if (!DOWNLOAD_TOKEN_ENABLED || typeof token !== "string" || !token) return null;
+  const raw = await redisConnection.get(downloadTokenKey(token)).catch(() => null);
+  if (!raw) return null;
+  try {
+    const payload = JSON.parse(raw) as DownloadTokenPayload;
+    if (payload.kind !== expectedKind || !payload.userId || !payload.role) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+function canAccessJob(job: any, user?: { id?: string; role?: string } | null) {
+  if (!job || job.status === "deleted") return false;
+  if (user?.role === "admin") return true;
+  return !!user?.id && job.userId === user.id;
+}
+
+async function findDownloadableJob(jobId: string, user?: { id?: string; role?: string } | null) {
+  const job = await prisma.runwayJob.findUnique({ where: { id: jobId } }) as any;
+  if (!job || job.status === "deleted") return { status: 404 as const, error: "任务不存在" };
+  if (!canAccessJob(job, user)) return { status: 403 as const, error: "无权下载该任务" };
+  return { status: 200 as const, job };
+}
+
+async function streamJobDownload(job: any, res: any) {
+  const filename = safeDownloadName(job.id);
+  const localPath = localUploadPathFromUrl(job.resultUrl);
+  if (localPath && fs.existsSync(localPath) && fs.statSync(localPath).isFile()) {
+    return res.download(localPath, filename);
+  }
+
+  const remoteUrl = job.videoUrl || (typeof job.resultUrl === "string" && job.resultUrl.startsWith("http") ? job.resultUrl : "");
+  if (!remoteUrl) {
+    return res.status(404).json({ error: "暂无可下载的视频文件" });
+  }
+  return streamRemoteDownload(remoteUrl, filename, res);
+}
+
+function sanitizeZipName(name: string) {
+  const cleaned = name.replace(/[\\/:*?"<>|\r\n\t]/g, "_").trim();
+  return cleaned || "video";
+}
+
+function zipFileName(job: any) {
+  return sanitizeZipName(`${String(job.id).slice(0, 8)}_${String(job.prompt || "video").slice(0, 20)}.mp4`);
+}
+
+const crcTable = (() => {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+    table[n] = c >>> 0;
+  }
+  return table;
+})();
+
+function crc32Update(crc: number, buf: Buffer) {
+  let c = crc;
+  for (let i = 0; i < buf.length; i++) c = crcTable[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  return c >>> 0;
+}
+
+function dosDateTime(date = new Date()) {
+  const year = Math.max(1980, date.getFullYear());
+  const dosTime = (date.getHours() << 11) | (date.getMinutes() << 5) | Math.floor(date.getSeconds() / 2);
+  const dosDate = ((year - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate();
+  return { dosTime, dosDate };
+}
+
+async function writeZipBuffer(res: any, state: { offset: number }, chunk: Buffer) {
+  state.offset += chunk.length;
+  if (res.write(chunk)) return;
+  await new Promise<void>((resolve) => res.once("drain", resolve));
+}
+
+async function openJobSource(job: any) {
+  const localPath = localUploadPathFromUrl(job.resultUrl);
+  if (localPath && fs.existsSync(localPath) && fs.statSync(localPath).isFile()) {
+    return { stream: fs.createReadStream(localPath), cleanup: () => {} };
+  }
+
+  const remoteUrl = job.videoUrl || (typeof job.resultUrl === "string" && job.resultUrl.startsWith("http") ? job.resultUrl : "");
+  if (!remoteUrl) throw new Error("no download url");
+  const fetchMod = await import("node-fetch");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 120000);
+  const upstream = await fetchMod.default(remoteUrl, { signal: controller.signal as any });
+  if (!upstream.ok || !upstream.body) {
+    clearTimeout(timer);
+    throw new Error(`remote download failed ${upstream.status}`);
+  }
+  return {
+    stream: upstream.body as any,
+    cleanup: () => clearTimeout(timer),
+  };
+}
+
+async function writeZipEntry(res: any, state: { offset: number }, filename: string, source: any, entries: any[]) {
+  const nameBuf = Buffer.from(filename);
+  const { dosTime, dosDate } = dosDateTime();
+  const localOffset = state.offset;
+  const localHeader = Buffer.alloc(30 + nameBuf.length);
+  localHeader.writeUInt32LE(0x04034b50, 0);
+  localHeader.writeUInt16LE(20, 4);
+  localHeader.writeUInt16LE(0x08, 6);
+  localHeader.writeUInt16LE(0, 8);
+  localHeader.writeUInt16LE(dosTime, 10);
+  localHeader.writeUInt16LE(dosDate, 12);
+  localHeader.writeUInt16LE(nameBuf.length, 26);
+  nameBuf.copy(localHeader, 30);
+  await writeZipBuffer(res, state, localHeader);
+
+  let crc = 0xffffffff;
+  let size = 0;
+  try {
+    for await (const chunk of source.stream as AsyncIterable<Buffer>) {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      crc = crc32Update(crc, buf);
+      size += buf.length;
+      if (size > 0xffffffff) throw new Error("zip entry too large");
+      await writeZipBuffer(res, state, buf);
+    }
+  } finally {
+    source.cleanup?.();
+  }
+
+  const finalCrc = (crc ^ 0xffffffff) >>> 0;
+  const descriptor = Buffer.alloc(16);
+  descriptor.writeUInt32LE(0x08074b50, 0);
+  descriptor.writeUInt32LE(finalCrc, 4);
+  descriptor.writeUInt32LE(size, 8);
+  descriptor.writeUInt32LE(size, 12);
+  await writeZipBuffer(res, state, descriptor);
+  entries.push({ filename, nameBuf, crc: finalCrc, size, localOffset, dosTime, dosDate });
+}
+
+async function streamBatchZip(jobs: any[], res: any) {
+  const state = { offset: 0 };
+  const entries: any[] = [];
+  res.setHeader("Content-Type", "application/zip");
+  res.setHeader("Content-Disposition", `attachment; filename="video_batch_${Date.now()}.zip"`);
+  res.setHeader("Cache-Control", "no-store");
+
+  for (const job of jobs) {
+    if (!(job.resultUrl || job.videoUrl)) continue;
+    try {
+      const source = await openJobSource(job);
+      await writeZipEntry(res, state, zipFileName(job), source, entries);
+    } catch (e: any) {
+      console.warn(`[batch-download] skip ${job.id}:`, e?.message || e);
+    }
+  }
+
+  const centralStart = state.offset;
+  for (const entry of entries) {
+    const central = Buffer.alloc(46 + entry.nameBuf.length);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(0x08, 8);
+    central.writeUInt16LE(0, 10);
+    central.writeUInt16LE(entry.dosTime, 12);
+    central.writeUInt16LE(entry.dosDate, 14);
+    central.writeUInt32LE(entry.crc, 16);
+    central.writeUInt32LE(entry.size, 20);
+    central.writeUInt32LE(entry.size, 24);
+    central.writeUInt16LE(entry.nameBuf.length, 28);
+    central.writeUInt32LE(entry.localOffset, 42);
+    entry.nameBuf.copy(central, 46);
+    await writeZipBuffer(res, state, central);
+  }
+  const centralSize = state.offset - centralStart;
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(entries.length, 8);
+  eocd.writeUInt16LE(entries.length, 10);
+  eocd.writeUInt32LE(centralSize, 12);
+  eocd.writeUInt32LE(centralStart, 16);
+  await writeZipBuffer(res, state, eocd);
+  res.end();
+}
+
 // Jobs routes — require auth
 runwayRouter.post("/jobs", authMiddleware, (req, res) => ctrl.createJob(req, res));
 runwayRouter.post("/jobs/batch", authMiddleware, (req, res) => ctrl.batchCreateJobs(req, res));
 runwayRouter.get("/jobs", authMiddleware, (req, res) => ctrl.listJobs(req, res));
-runwayRouter.get("/jobs/:id/download", authMiddleware, async (req, res) => {
+runwayRouter.post("/jobs/:id/download-token", authMiddleware, async (req, res) => {
   try {
-    const job = await prisma.runwayJob.findUnique({ where: { id: req.params.id } }) as any;
-    if (!job || job.status === "deleted") return res.status(404).json({ error: "任务不存在" });
-    if (req.user?.role !== "admin" && req.user?.id && job.userId !== req.user.id) {
-      return res.status(403).json({ error: "无权下载该任务" });
-    }
+    if (!DOWNLOAD_TOKEN_ENABLED) return res.status(404).json({ error: "download token disabled" });
+    const found = await findDownloadableJob(req.params.id, req.user);
+    if (found.status !== 200) return res.status(found.status).json({ error: found.error });
+    if (!(found.job.resultUrl || found.job.videoUrl)) return res.status(404).json({ error: "暂无可下载的视频文件" });
+    const token = await createDownloadToken({ kind: "single", userId: req.user!.id, role: req.user!.role, jobId: req.params.id, createdAt: Date.now() });
+    res.json({ url: `/api/runway/jobs/${req.params.id}/download?downloadToken=${encodeURIComponent(token)}`, expiresIn: DOWNLOAD_TOKEN_TTL_SECONDS });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message || "download token failed" });
+  }
+});
 
-    const filename = safeDownloadName(job.id);
-    const localPath = localUploadPathFromUrl(job.resultUrl);
-    if (localPath && fs.existsSync(localPath) && fs.statSync(localPath).isFile()) {
-      return res.download(localPath, filename);
-    }
+runwayRouter.post("/jobs/batch-download-token", authMiddleware, async (req, res) => {
+  try {
+    if (!DOWNLOAD_TOKEN_ENABLED) return res.status(404).json({ error: "download token disabled" });
+    const ids = (Array.isArray(req.body?.ids) ? req.body.ids.filter((id: any) => typeof id === "string") : []) as string[];
+    const uniqueIds = Array.from(new Set(ids)).slice(0, MAX_BATCH_DOWNLOAD);
+    if (uniqueIds.length === 0) return res.status(400).json({ error: "ids required" });
+    const jobs = await prisma.runwayJob.findMany({ where: { id: { in: uniqueIds } } }) as any[];
+    const allowed = jobs.filter(job => canAccessJob(job, req.user) && job.status === "completed" && (job.resultUrl || job.videoUrl)).map(job => job.id);
+    if (allowed.length === 0) return res.status(404).json({ error: "暂无可下载的视频文件" });
+    const token = await createDownloadToken({ kind: "batch", userId: req.user!.id, role: req.user!.role, ids: allowed, createdAt: Date.now() });
+    res.json({ url: `/api/runway/jobs/batch-download?downloadToken=${encodeURIComponent(token)}`, expiresIn: DOWNLOAD_TOKEN_TTL_SECONDS, count: allowed.length });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message || "batch download token failed" });
+  }
+});
 
-    const remoteUrl = job.videoUrl || (typeof job.resultUrl === "string" && job.resultUrl.startsWith("http") ? job.resultUrl : "");
-    if (!remoteUrl) {
-      return res.status(404).json({ error: "暂无可下载的视频文件" });
-    }
-    return streamRemoteDownload(remoteUrl, filename, res);
+runwayRouter.get("/jobs/batch-download", async (req, res) => {
+  try {
+    const payload = await readDownloadToken(req.query.downloadToken, "batch");
+    if (!payload?.ids?.length) return res.status(401).json({ error: "下载链接已过期" });
+    const jobs = await prisma.runwayJob.findMany({ where: { id: { in: payload.ids } } }) as any[];
+    const jobMap = new Map(jobs.map(job => [job.id, job]));
+    const ordered = payload.ids.map(id => jobMap.get(id)).filter(Boolean).filter(job => canAccessJob(job, payload) && job.status === "completed");
+    if (ordered.length === 0) return res.status(404).json({ error: "暂无可下载的视频文件" });
+    return streamBatchZip(ordered, res);
+  } catch (e: any) {
+    if (!res.headersSent) res.status(500).json({ error: e.message || "batch download failed" });
+    else res.end();
+  }
+});
+
+const handleSingleDownload = async (req: any, res: any) => {
+  try {
+    const found = await findDownloadableJob(req.params.id, req.user);
+    if (found.status !== 200) return res.status(found.status).json({ error: found.error });
+    return streamJobDownload(found.job, res);
   } catch (e: any) {
     if (!res.headersSent) res.status(500).json({ error: e.message || "download failed" });
+    else res.end();
   }
+};
+
+runwayRouter.get("/jobs/:id/download", async (req, res) => {
+  const payload = await readDownloadToken(req.query.downloadToken, "single");
+  if (payload?.jobId === req.params.id) {
+    (req as any).user = { id: payload.userId, role: payload.role, username: "download-token" };
+    return handleSingleDownload(req, res);
+  }
+  return authMiddleware(req, res, () => handleSingleDownload(req, res));
 });
 runwayRouter.get("/jobs/:id", authMiddleware, (req, res) => ctrl.getJob(req, res));
 runwayRouter.post("/jobs/:id/cancel", authMiddleware, (req, res) => ctrl.cancelJob(req, res));
@@ -427,6 +804,48 @@ async function _runwayFetch(path: string, init: any, account: any) {
   return { ok: res.ok, status: res.status, json, text };
 }
 
+function _isTokenRevokedResponse(status: number, text: string): boolean {
+  return status === 401 && /revoked|expired|invalid|unauthorized|jwt/i.test(text || "");
+}
+
+function _isSafetyModerationResponse(status: number, text: string): boolean {
+  return /SAFETY\.|moderation|content policy|risk control|SEXUALLY_EXPLICIT|VIOLENCE|prohibited|safety|内容审核|未通过审核|暴力|色情/i.test(`${status} ${text || ""}`);
+}
+
+async function _recordDirectRunwayError(account: any, context: string, status: number, text: string) {
+  const message = `${context} ${status}: ${String(text || "").slice(0, 300)}`;
+  const isRevoked = _isTokenRevokedResponse(status, text);
+  const isSafety = _isSafetyModerationResponse(status, text);
+  let shouldDisable = isRevoked;
+  let safetyCount = 0;
+  if (isSafety && account?.id) {
+    if (await isContentReviewEnabled()) {
+      const key = `account:safety-failures:${account.id}`;
+      safetyCount = await redisConnection.incr(key).catch(() => 0);
+      if (safetyCount === 1) await redisConnection.expire(key, SAFETY_FAILURE_WINDOW_SECONDS).catch(() => {});
+      shouldDisable = shouldDisable || safetyCount >= SAFETY_FAILURE_DAILY_LIMIT;
+    } else {
+      console.warn(`[runway:direct] content review disabled, safety failure recorded without disabling ${String(account.id).slice(0,8)}`);
+    }
+  }
+  await prisma.runwayAccount.update({
+    where: { id: account.id },
+    data: {
+      ...(shouldDisable ? { isActive: false } : {}),
+      lastErrorAt: new Date(),
+      lastErrorMessage: isRevoked
+        ? `token invalid/revoked: ${message}`
+        : isSafety
+          ? (safetyCount > 0 ? `safety failure ${safetyCount}/${SAFETY_FAILURE_DAILY_LIMIT}: ${message}` : message)
+          : message,
+    },
+  }).catch(() => {});
+  if (shouldDisable) {
+    await redisConnection.del(`account:concurrency:${account.id}`, `account:cooldown:${account.id}`).catch(() => {});
+    console.warn(`[runway:direct] auto-disabled ${String(account.id).slice(0,8)}: ${message}`);
+  }
+}
+
 async function _pickSeedreamAccount() {
   const accounts = await prisma.runwayAccount.findMany({
     where: { isActive: true },
@@ -460,7 +879,10 @@ runwayRouter.post("/seedream/upload", authMiddleware, async (req: any, res: any)
       body: JSON.stringify({ filename: safeName, numberOfParts: 1, type: "DATASET" }),
     }, account);
     console.log("[seedream:log] /v1/uploads status:", r1.status, "body:", r1.text.slice(0,400));
-    if (!r1.ok) return res.status(502).json({ error: `上传失败 ${r1.status}`, detail: r1.text.slice(0, 500) });
+    if (!r1.ok) {
+      await _recordDirectRunwayError(account, "seedream upload", r1.status, r1.text);
+      return res.status(502).json({ error: `上传失败 ${r1.status}`, detail: r1.text.slice(0, 500) });
+    }
     const uploadId = r1.json?.id;
     const uploadUrl = r1.json?.uploadUrls?.[0];
     const uploadHeaders = r1.json?.uploadHeaders || { "Content-Type": mime };
@@ -499,7 +921,10 @@ runwayRouter.post("/seedream/upload", authMiddleware, async (req: any, res: any)
       method: "POST",
       body: JSON.stringify({ parts: [{ PartNumber: 1, ETag: etag }] }),
     }, account);
-    if (!r3.ok) return res.status(502).json({ error: `complete 失败 ${r3.status}`, detail: r3.text.slice(0, 500) });
+    if (!r3.ok) {
+      await _recordDirectRunwayError(account, "seedream upload complete", r3.status, r3.text);
+      return res.status(502).json({ error: `complete 失败 ${r3.status}`, detail: r3.text.slice(0, 500) });
+    }
     const cdnUrl = r3.json?.url;
     if (!cdnUrl) return res.status(502).json({ error: "未返回 CDN url" });
 
@@ -517,6 +942,8 @@ runwayRouter.post("/seedream", authMiddleware, async (req: any, res: any) => {
     if (!userId) return res.status(401).json({ error: "未登录" });
     const { prompt, aspectRatio, resolution, numImages, exploreMode, referenceImages, name } = req.body || {};
     if (!prompt || !String(prompt).trim()) return res.status(400).json({ error: "提示词不能为空" });
+    const promptError = await validateDirectRunwayPrompt(userId, prompt, "seedream");
+    if (promptError) return res.status(400).json({ error: promptError });
     const ar = aspectRatio || "1:1";
     const rs = resolution || "2k";
     const n = Math.max(1, Math.min(4, Number(numImages) || 1));
@@ -549,10 +976,7 @@ runwayRouter.post("/seedream", authMiddleware, async (req: any, res: any) => {
     const r = await _runwayFetch("/v1/tasks", { method: "POST", body: JSON.stringify(body) }, account);
     console.log("[seedream:log] /v1/tasks status:", r.status, "body:", r.text.slice(0,500));
     if (!r.ok) {
-      await prisma.runwayAccount.update({
-        where: { id: account.id },
-        data: { lastErrorAt: new Date(), lastErrorMessage: `seedream create ${r.status}: ${r.text.slice(0, 300)}` },
-      }).catch(() => {});
+      await _recordDirectRunwayError(account, "seedream create", r.status, r.text);
       return res.status(502).json({ error: `API ${r.status}`, detail: r.text.slice(0, 500) });
     }
     const remoteTaskId = r.json?.id || r.json?.task?.id || r.json?.taskId;
@@ -640,6 +1064,8 @@ runwayRouter.get("/seedream/:id", authMiddleware, async (req: any, res: any) => 
             }
           } catch (e:any) { console.error("[review hook] import error", e?.message); }
           return res.json({ ok: true, job: updated });
+        } else if (!r.ok) {
+          await _recordDirectRunwayError(account, "seedream poll", r.status, r.text);
         }
       }
     }
@@ -691,7 +1117,10 @@ async function _uploadAssetToRunway(account: any, dataUrl: string, filename: str
     method: "POST",
     body: JSON.stringify({ filename: safeName, numberOfParts: 1, type: "DATASET" }),
   }, account);
-  if (!r1.ok) throw new Error(`上传失败 ${r1.status}: ${r1.text.slice(0,300)}`);
+  if (!r1.ok) {
+    await _recordDirectRunwayError(account, "video upload", r1.status, r1.text);
+    throw new Error(`upload failed ${r1.status}: ${r1.text.slice(0,300)}`);
+  }
   const uploadId = r1.json?.id;
   const uploadUrl = r1.json?.uploadUrls?.[0];
   const uploadHeaders = r1.json?.uploadHeaders || { "Content-Type": mime };
@@ -723,7 +1152,10 @@ async function _uploadAssetToRunway(account: any, dataUrl: string, filename: str
     method: "POST",
     body: JSON.stringify({ parts: [{ PartNumber: 1, ETag: etag }] }),
   }, account);
-  if (!r3.ok) throw new Error(`complete 失败 ${r3.status}: ${r3.text.slice(0,300)}`);
+  if (!r3.ok) {
+    await _recordDirectRunwayError(account, "video upload complete", r3.status, r3.text);
+    throw new Error(`complete failed ${r3.status}: ${r3.text.slice(0,300)}`);
+  }
   const cdnUrl = r3.json?.url;
   if (!cdnUrl) throw new Error("no CDN url");
   return { assetId: uploadId, url: cdnUrl, filename: safeName };
@@ -766,6 +1198,8 @@ runwayRouter.post("/video", authMiddleware, async (req: any, res: any) => {
       name,
     } = req.body || {};
     if (!prompt || !String(prompt).trim()) return res.status(400).json({ error: "prompt required" });
+    const promptError = await validateDirectRunwayPrompt(userId, prompt, "video");
+    if (promptError) return res.status(400).json({ error: promptError });
     if (mode !== "text_to_video" && mode !== "image_to_video") return res.status(400).json({ error: "mode must be text_to_video or image_to_video" });
     const model = modelIn === "gen4" ? "gen4" : "gen4_turbo";
     const ratio = ratioIn === "9:16" || ratioIn === "1:1" ? ratioIn : "16:9";
@@ -811,10 +1245,7 @@ runwayRouter.post("/video", authMiddleware, async (req: any, res: any) => {
     const r = await _runwayFetch("/v1/tasks", { method: "POST", body: JSON.stringify(body) }, account);
     console.log("[video:log] /v1/tasks status:", r.status, "body:", r.text.slice(0, 500));
     if (!r.ok) {
-      await prisma.runwayAccount.update({
-        where: { id: account.id },
-        data: { lastErrorAt: new Date(), lastErrorMessage: `video create ${r.status}: ${r.text.slice(0, 300)}` },
-      }).catch(() => {});
+      await _recordDirectRunwayError(account, "video create", r.status, r.text);
       return res.status(502).json({ error: `API ${r.status}`, detail: r.text.slice(0, 500) });
     }
     const remoteTaskId = r.json?.id || r.json?.task?.id || r.json?.taskId;
@@ -897,6 +1328,8 @@ runwayRouter.get("/video/:id", authMiddleware, async (req: any, res: any) => {
             data: { status: mapped, videoUrl, errorMessage: err },
           });
           return res.json({ ok: true, job: updated });
+        } else if (!r.ok) {
+          await _recordDirectRunwayError(account, "video poll", r.status, r.text);
         }
       }
     }

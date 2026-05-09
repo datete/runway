@@ -53,11 +53,15 @@ videosRouter.post(
         });
       }
 
+      const isSeedance = mapping.internal === "seedance_2";
       const isHappyHorse = mapping.internal === "happyhorse_1_0";
       const validHappyHorseRatios = new Set(["16:9", "9:16", "1:1", "4:3", "3:4"]);
       const happyHorseAspectRatio = typeof aspect_ratio === "string" ? aspect_ratio.trim() : "";
       const happyHorseResolutionInput = typeof resolution === "string" ? resolution.trim().toLowerCase() : "";
       const happyHorseResolution = happyHorseResolutionInput === "720p" ? "720p" : "1080p";
+      const validSeedanceResolutions = new Set(["480p", "720p", "1080p"]);
+      const seedanceResolutionInput = typeof resolution === "string" ? resolution.trim().toLowerCase() : "";
+      const seedanceResolution = validSeedanceResolutions.has(seedanceResolutionInput) ? seedanceResolutionInput : "720p";
 
       const job = await runwayService.createJob({
         prompt,
@@ -65,7 +69,7 @@ videosRouter.post(
         model: mapping.internal,
         quality: isHappyHorse ? happyHorseResolution : mapping.quality,
         duration: duration ?? 5,
-        sound: isHappyHorse ? undefined : (sound ?? false),
+        sound: isHappyHorse ? undefined : (isSeedance ? (sound ?? true) : (sound ?? false)),
         exploreMode: explore_mode ?? false,
         cfgScale: isHappyHorse ? undefined : cfg_scale,
         ...(image_url ? { imageUrl: image_url } : {}),
@@ -74,6 +78,8 @@ videosRouter.post(
         userId,
         resolution: isHappyHorse
           ? (validHappyHorseRatios.has(happyHorseAspectRatio) ? happyHorseAspectRatio : "9:16")
+          : isSeedance
+            ? seedanceResolution
           : aspect_ratio === "16:9" ? "1920x1080" : aspect_ratio === "9:16" ? "1080x1920" : undefined,
       });
 

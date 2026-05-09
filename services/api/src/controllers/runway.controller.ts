@@ -7,6 +7,81 @@ export const runwayService = new RunwayService();
 const svc = runwayService;
 
 const ACTIVE_STATUSES = ["pending", "queued", "submitted", "processing"];
+const LIST_STATS_CACHE_MS = Number(process.env.RUNWAY_LIST_STATS_CACHE_MS) || 5000;
+
+let hourlyCompletedCache = { expiresAt: 0, value: 0 };
+let queueTotalCache = { expiresAt: 0, value: 0 };
+const queuePositionCache = new Map<string, { expiresAt: number; position: number; total: number }>();
+
+async function getHourlyCompleted() {
+  const now = Date.now();
+  if (hourlyCompletedCache.expiresAt > now) return hourlyCompletedCache.value;
+  const value = await prisma.runwayJob.count({
+    where: {
+      status: "completed",
+      finishedAt: { gte: new Date(Date.now() - 3600_000) },
+    },
+  }).catch(() => 0);
+  hourlyCompletedCache = { value, expiresAt: now + LIST_STATS_CACHE_MS };
+  return value;
+}
+
+async function getQueueTotal() {
+  const now = Date.now();
+  if (queueTotalCache.expiresAt > now) return queueTotalCache.value;
+  const value = await prisma.runwayJob.count({ where: { status: { in: ACTIVE_STATUSES } } }).catch(() => 0);
+  queueTotalCache = { value, expiresAt: now + LIST_STATS_CACHE_MS };
+  return value;
+}
+
+async function getQueuePositionsForJobs(jobIds: string[]) {
+  const now = Date.now();
+  const total = await getQueueTotal();
+  const positionMap = new Map<string, number>();
+  const missing: string[] = [];
+  for (const id of jobIds) {
+    const cached = queuePositionCache.get(id);
+    if (cached && cached.expiresAt > now && cached.total === total) positionMap.set(id, cached.position);
+    else missing.push(id);
+  }
+
+  if (missing.length > 0) {
+    const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const idList = missing.filter(id => uuidRe.test(id)).map(id => `'${id}'::uuid`).join(",");
+    if (idList) {
+      const rows = await prisma.$queryRawUnsafe(`
+        WITH target AS (
+          SELECT id, created_at, COALESCE(priority, 0) AS priority
+          FROM runway_jobs
+          WHERE id IN (${idList})
+        )
+        SELECT t.id::text AS id,
+               (1 + COUNT(o.id))::int AS position
+        FROM target t
+        LEFT JOIN runway_jobs o
+          ON o.status IN ('pending', 'queued', 'submitted', 'processing')
+         AND (
+           COALESCE(o.priority, 0) > t.priority
+           OR (
+             COALESCE(o.priority, 0) = t.priority
+             AND (
+               o.created_at < t.created_at
+               OR (o.created_at = t.created_at AND o.id::text < t.id::text)
+             )
+           )
+         )
+        GROUP BY t.id
+      `) as any[];
+      for (const row of rows) {
+        const position = Number(row.position);
+        positionMap.set(row.id, position);
+        queuePositionCache.set(row.id, { position, total, expiresAt: now + LIST_STATS_CACHE_MS });
+      }
+    }
+  }
+
+  return { positionMap, queueTotal: total };
+}
 
 async function logAction(userId: string | undefined, action: string, detail?: string, ip?: string) {
   if (!userId) return;
@@ -27,6 +102,7 @@ export class RunwayController {
     try {
       const { prompt, mode, imageUrl, imageUrls, duration, exploreMode, model, remark, resolution, quality, cfgScale, sound, videoUrl } = req.body;
       if (!prompt || !mode) throw new ValidationError("prompt and mode required");
+      if (typeof prompt !== "string") throw new ValidationError("prompt must be a string");
       if (typeof prompt === "string" && prompt.length > 2000) {
         throw new ValidationError(`提示词超出2000字上限（当前${prompt.length}字），请精简后再提交`);
       }
@@ -59,34 +135,29 @@ export class RunwayController {
       const tag = req.query.tag as string | undefined;
       const result = await svc.listJobs(req.user?.id, req.user?.role, { page, pageSize, status, search, tag });
 
-      const queueData = await prisma.$queryRawUnsafe(`
-        SELECT id,
-               ROW_NUMBER() OVER (ORDER BY COALESCE(priority, 0) DESC, created_at ASC) AS position,
-               COUNT(*) OVER () AS total
-        FROM runway_jobs
-        WHERE status IN ('pending', 'queued', 'submitted', 'processing')
-      `) as any[];
-      const hourlyCompleted = await prisma.runwayJob.count({
-        where: {
-          status: "completed",
-          finishedAt: { gte: new Date(Date.now() - 3600_000) },
-        },
-      }).catch(() => 0);
-
-      const positionMap = new Map<string, number>();
+      const activeJobIds = result.jobs.filter((job: any) => ACTIVE_STATUSES.includes(job.status)).map((job: any) => job.id);
+      let positionMap = new Map<string, number>();
       let queueTotal = 0;
-      for (const row of queueData) {
-        positionMap.set(row.id, Number(row.position));
-        queueTotal = Number(row.total);
+      let hourlyCompleted = 0;
+      if (activeJobIds.length > 0) {
+        try {
+          const queueInfo = await getQueuePositionsForJobs(activeJobIds);
+          positionMap = queueInfo.positionMap;
+          queueTotal = queueInfo.queueTotal;
+          hourlyCompleted = await getHourlyCompleted();
+        } catch (err: any) {
+          console.warn("[listJobs] queue stats skipped:", err?.message || err);
+        }
       }
 
       const enriched = result.jobs.map((job: any) => {
-        const queuePosition = ACTIVE_STATUSES.includes(job.status) ? (positionMap.get(job.id) || null) : null;
+        const isActiveJob = ACTIVE_STATUSES.includes(job.status);
+        const queuePosition = isActiveJob ? (positionMap.get(job.id) || null) : null;
         return {
           ...job,
           queuePosition,
-          queueTotal,
-          hourlyCompleted,
+          queueTotal: isActiveJob ? queueTotal : null,
+          hourlyCompleted: isActiveJob ? hourlyCompleted : null,
           etaMinutes: queuePosition && hourlyCompleted > 0
             ? Math.max(1, Math.ceil((queuePosition / hourlyCompleted) * 60))
             : null,
@@ -150,6 +221,8 @@ export class RunwayController {
       for (const p of prompts) {
         if (!p || typeof p !== "string") {
           errors.push({ prompt: String(p), error: "invalid or empty prompt" });
+        } else if (p.length > 2000) {
+          errors.push({ prompt: p, error: "prompt too long" });
         } else {
           validPrompts.push(p);
         }

@@ -16,6 +16,17 @@ export interface AccountEntry {
 
 const CACHE_TTL = 30; // seconds to cache account list
 const CONCURRENCY_TTL = 900; // seconds for concurrency key safety TTL (15 min)
+const SAFETY_FAILURE_DAILY_LIMIT = Math.max(1, Number(process.env.RUNWAY_SAFETY_FAILURE_DAILY_LIMIT) || 3);
+const SAFETY_FAILURE_WINDOW_SECONDS = Math.max(300, Number(process.env.RUNWAY_SAFETY_FAILURE_WINDOW_SECONDS) || 24 * 60 * 60);
+const CONTENT_REVIEW_KEY = "runway:content-review-enabled";
+
+export function isRunwayTokenRevokedError(message: string): boolean {
+  return /(?:\b401\b|unauthorized|token.*(?:revoked|expired|invalid)|jwt expired|invalid token|token revoked)/i.test(message || '');
+}
+
+export function isRunwaySafetyError(message: string): boolean {
+  return /(?:SAFETY\.|failureCode|moderation|content policy|risk control|SEXUALLY_EXPLICIT|VIOLENCE|prohibited|safety checker|内容审核|未通过审核|暴力|色情|安全)/i.test(message || '');
+}
 
 export class AccountPool {
   private redis: IORedis;
@@ -325,10 +336,75 @@ export class AccountPool {
 
   /** Record an error on an account */
   async recordError(accountId: string, message: string): Promise<void> {
+    const clipped = String(message || '').slice(0, 500);
     await this.prisma.runwayAccount.update({
       where: { id: accountId },
-      data: { lastErrorAt: new Date(), lastErrorMessage: message },
+      data: { lastErrorAt: new Date(), lastErrorMessage: clipped },
     }).catch(() => {});
+  }
+
+  /** Disable an account immediately when the token is revoked or risk is too high. */
+  async disableAccount(accountId: string, reason: string): Promise<void> {
+    const clipped = String(reason || 'auto-disabled by risk control').slice(0, 500);
+    await this.prisma.runwayAccount.update({
+      where: { id: accountId },
+      data: { isActive: false, lastErrorAt: new Date(), lastErrorMessage: clipped },
+    }).catch(() => {});
+    await this.redis.del(
+      `account:concurrency:${accountId}`,
+      `account:cooldown:${accountId}`,
+      `submit:batch-resting:${accountId}`,
+      `submit:batch-count:${accountId}`,
+      `submit:batch-limit:${accountId}`,
+    ).catch(() => {});
+    this.cachedAccounts = this.cachedAccounts.filter(a => a.id !== accountId);
+    this.invalidateCache();
+    this.invalidateDbCache();
+    console.warn(`[account-pool] auto-disabled ${accountId.slice(0,8)}: ${clipped}`);
+  }
+
+  /** Track content-safety failures and disable the account after a rolling-window limit. */
+  async recordSafetyFailure(accountId: string, message: string): Promise<number> {
+    await this.recordError(accountId, message);
+    const key = `account:safety-failures:${accountId}`;
+    const count = await this.redis.incr(key);
+    if (count === 1) {
+      await this.redis.expire(key, SAFETY_FAILURE_WINDOW_SECONDS);
+    }
+    if (count >= SAFETY_FAILURE_DAILY_LIMIT) {
+      await this.disableAccount(
+        accountId,
+        `auto-disabled after ${count} safety failures in ${Math.round(SAFETY_FAILURE_WINDOW_SECONDS / 3600)}h: ${String(message || '').slice(0, 220)}`,
+      );
+    } else {
+      console.warn(`[account-pool] safety failure ${count}/${SAFETY_FAILURE_DAILY_LIMIT} for ${accountId.slice(0,8)}`);
+    }
+    return count;
+  }
+
+  private async isContentReviewEnabled(): Promise<boolean> {
+    const raw = await this.redis.get(CONTENT_REVIEW_KEY).catch(() => null);
+    return raw === null ? true : raw === '1';
+  }
+
+  /** Classify high-risk upstream errors and apply account-level protection. */
+  async handleRiskError(accountId: string, message: string): Promise<'disabled' | 'safety' | 'recorded'> {
+    const msg = String(message || '');
+    if (isRunwayTokenRevokedError(msg)) {
+      await this.disableAccount(accountId, `token invalid/revoked: ${msg.slice(0, 260)}`);
+      return 'disabled';
+    }
+    if (isRunwaySafetyError(msg)) {
+      if (!(await this.isContentReviewEnabled())) {
+        await this.recordError(accountId, msg);
+        console.warn(`[account-pool] content review disabled, safety failure recorded without disabling ${accountId.slice(0,8)}`);
+        return 'recorded';
+      }
+      const count = await this.recordSafetyFailure(accountId, msg);
+      return count >= SAFETY_FAILURE_DAILY_LIMIT ? 'disabled' : 'safety';
+    }
+    await this.recordError(accountId, msg);
+    return 'recorded';
   }
 
   /** Increment totalGenerated counter */
@@ -365,7 +441,8 @@ export class AccountPool {
     const accounts = await this.getAccounts();
     for (const account of accounts) {
       try {
-        // Count jobs that are truly occupying API slots (submitted/processing but NOT throttled-released)
+        // Count jobs that are occupying Runway platform slots.
+        // THROTTLED/PENDING remote tasks still count on Runway, so keep Redis aligned with DB.
         const dbActive = await this.prisma.runwayJob.count({
           where: {
             accountId: account.id,
@@ -375,15 +452,15 @@ export class AccountPool {
         const redisKey = `account:concurrency:${account.id}`;
         const redisVal = parseInt(await this.redis.get(redisKey) || '0', 10);
 
-        // Only correct if Redis is HIGHER than DB (leaked slots)
-        // Never inflate Redis to match DB — THROTTLED jobs intentionally have redis < db
-        if (redisVal > dbActive) {
-          console.log(`[account-pool:reconcile] ${account.label}: redis=${redisVal} > db=${dbActive}, correcting down`);
+        if (redisVal !== dbActive) {
+          console.log(`[account-pool:reconcile] ${account.label}: redis=${redisVal} db=${dbActive}, correcting`);
           if (dbActive > 0) {
             await this.redis.set(redisKey, String(dbActive), 'EX', CONCURRENCY_TTL);
           } else {
             await this.redis.del(redisKey);
           }
+        } else if (dbActive > 0) {
+          await this.redis.expire(redisKey, CONCURRENCY_TTL);
         }
       } catch (e: any) {
         console.warn(`[account-pool:reconcile] ${account.label} error: ${e.message}`);

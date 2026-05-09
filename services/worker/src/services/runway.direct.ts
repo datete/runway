@@ -289,7 +289,7 @@ export class RunwayDirectClient implements RunwayProvider {
     ].filter(Boolean);
 
     console.log(`[runway:task] reference images to upload: ${sourceUrls.length}`);
-    const maxReferenceImages = isHappyHorse ? 1 : 2;
+    const maxReferenceImages = isHappyHorse ? 1 : (isSeedance ? 9 : 2);
     if (sourceUrls.length > maxReferenceImages) {
       console.warn(`[runway:task] user sent ${sourceUrls.length} ref images, truncating to ${maxReferenceImages} (API limit)`);
       sourceUrls.splice(maxReferenceImages);
@@ -301,11 +301,10 @@ export class RunwayDirectClient implements RunwayProvider {
       referenceImages = await this.uploadReferenceImages(sourceUrls, isPro);
     }
 
-    // Upload reference video for pro mode
-    // NOTE: upstream Kling 拒绝 referenceVideos 当参考图 > 1 张时("Reference videos are not supported for this model")
-    // 因此多参考图场景下跳过 ref video,只送参考图。
+    // Upload reference video. Kling rejects referenceVideos when ref images > 1,
+    // but Seedance 2.0 supports mixed image + video references.
     let referenceVideoAsset: { url: string; assetId: string } | undefined;
-    if (input.videoUrl && !isHappyHorse && referenceImages.length <= 1) {
+    if (input.videoUrl && (isSeedance || (!isHappyHorse && referenceImages.length <= 1))) {
       console.log(`[runway:task] uploading reference video: ${input.videoUrl}`);
       referenceVideoAsset = await this.uploadFileWithAsset(input.videoUrl);
       console.log(`[runway:task] reference video uploaded, assetId=${referenceVideoAsset.assetId}`);
@@ -343,6 +342,7 @@ export class RunwayDirectClient implements RunwayProvider {
           exploreMode:    input.exploreMode ?? false,
           creationSource: "tool-mode",
           ...(referenceImages.length > 0 && { referenceImages }),
+          ...(referenceVideoAsset && { referenceVideos: [{ assetId: referenceVideoAsset.assetId, url: referenceVideoAsset.url }] }),
         },
         asTeamId:  this.teamId,
         sessionId: uuidv4(),
@@ -390,7 +390,7 @@ export class RunwayDirectClient implements RunwayProvider {
       };
     }
 
-    console.log(`[runway:task] POST /v1/tasks, referenceImages=${referenceImages.length}`);
+    console.log(`[runway:task] POST /v1/tasks, referenceImages=${referenceImages.length}, referenceVideos=${referenceVideoAsset ? 1 : 0}`);
 
     const proxyOpts = await this.getFetchOptions();
     const createAbort = new AbortController();
@@ -500,4 +500,3 @@ export class RunwayDirectClient implements RunwayProvider {
     }, TIMEOUT_CANCEL, "cancel task");
   }
 }
-

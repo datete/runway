@@ -35,7 +35,7 @@ interface DashboardOverview {
   queuedJobs: number; processingJobs: number; completedJobs: number; failedJobs: number
   todayCompleted: number; todayFailed: number; hourlyCompleted: number
   totalAccounts: number; activeAccounts: number; totalMaxConcurrency: number; totalCurrentConcurrency: number
-  speedMultiplier?: number; deepNightEnabled?: boolean
+  speedMultiplier?: number; deepNightEnabled?: boolean; contentReviewEnabled?: boolean
 }
 interface AccountInfo {
   id: string; label: string; tokenShort: string; teamId: string; proxyUrl: string | null; proxyId: string | null
@@ -115,6 +115,8 @@ const speedPct = ref<number>(100)
 const speedSyncing = ref(false)
 const deepNightEnabled = ref(true)
 const deepNightSyncing = ref(false)
+const contentReviewEnabled = ref(true)
+const contentReviewSyncing = ref(false)
 let speedDebounceTimer: ReturnType<typeof setTimeout> | null = null
 let speedSuppressFromServer = false
 const speedColorClass = computed(() => {
@@ -181,6 +183,24 @@ const onDeepNightChange = async (enabled: boolean) => {
     message.error(e.message || '网络错误')
   } finally {
     deepNightSyncing.value = false
+  }
+}
+const onContentReviewChange = async (enabled: boolean) => {
+  contentReviewSyncing.value = true
+  try {
+    const res = await fetch('/api/runway/admin/content-review', {
+      method: 'POST',
+      headers: { ...headers(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(data.error || '更新失败')
+    contentReviewEnabled.value = Boolean(data.enabled)
+    message.success(contentReviewEnabled.value ? '本地内容过滤已启用' : '本地内容过滤已关闭')
+  } catch (e: any) {
+    message.error(e.message || '网络错误')
+  } finally {
+    contentReviewSyncing.value = false
   }
 }
 const userStats = ref<UserStat[]>([])
@@ -415,6 +435,9 @@ const fetchDashboard = async () => {
     if (typeof data.overview?.deepNightEnabled === 'boolean') {
       deepNightEnabled.value = data.overview.deepNightEnabled
     }
+    if (typeof data.overview?.contentReviewEnabled === 'boolean') {
+      contentReviewEnabled.value = data.overview.contentReviewEnabled
+    }
   } catch {}
 }
 
@@ -544,13 +567,23 @@ const proxySelectOptions = computed(() => [
   })),
 ])
 
-const onProxySelectChange = (id: string) => {
-  accountForm.value.proxyId = id
-  if (id) {
-    const pr = proxies.value.find(x => x.id === id)
-    if (pr) accountForm.value.proxyUrl = pr.url
-  }
+const refreshProxiesForAccountModal = () => {
+  if (!proxiesLoading.value)
+    void fetchProxies()
 }
+
+const applyProxySelection = (id: string | null, target: 'login' | 'manual') => {
+  const proxyId = id || ''
+  accountForm.value.proxyId = proxyId
+  const pr = proxyId ? proxies.value.find(x => x.id === proxyId) : null
+  const proxyUrl = pr?.url || ''
+  accountForm.value.proxyUrl = proxyUrl
+  if (target === 'login')
+    loginForm.value.proxyUrl = proxyUrl
+}
+
+const onLoginProxySelectChange = (id: string | null) => applyProxySelection(id, 'login')
+const onProxySelectChange = (id: string | null) => applyProxySelection(id, 'manual')
 
 
 const fetchAdminJobs = async () => {
@@ -666,6 +699,7 @@ const refreshAll = async () => {
     fetchStorage(),
     fetchUsers(),
     fetchAccounts(),
+    fetchProxies(),
     fetchAdminJobs(),
     fetchLogs(),
     fetchDevices(),
@@ -776,6 +810,7 @@ const refreshCurrentTab = () => {
   if (activeTab.value === 'proxies') { fetchProxies(); return }
   if (activeTab.value === 'accounts') {
     fetchAccounts()
+    fetchProxies()
     fetchDashboard()
   } else if (activeTab.value === 'users') {
     fetchUsers()
@@ -813,6 +848,7 @@ const openCreateAccount = () => {
   accountForm.value = { label: '', token: '', teamId: '', proxyId: '', proxyUrl: '', maxConcurrency: 2, priority: 0 }
   loginForm.value = { email: '', password: '', proxyUrl: '' }
   accountModalTab.value = 'login'
+  refreshProxiesForAccountModal()
   showAccountModal.value = true
 }
 
@@ -820,6 +856,7 @@ const openEditAccount = (acc: AccountInfo) => {
   editingAccount.value = acc
   accountForm.value = { label: acc.label, token: '', teamId: acc.teamId, proxyId: acc.proxyId || '', proxyUrl: acc.proxyUrl || '', maxConcurrency: acc.maxConcurrency, priority: acc.priority }
   accountModalTab.value = 'manual'
+  refreshProxiesForAccountModal()
   showAccountModal.value = true
 }
 
@@ -1263,6 +1300,20 @@ onUnmounted(() => { if (autoRefreshTimer) clearInterval(autoRefreshTimer) })
                   <span class="text-[10px]" :class="deepNightEnabled ? 'text-emerald-300' : 'text-amber-300'">{{ deepNightEnabled ? "启用中" : "已关闭" }}</span>
                 </div>
                 <NSwitch :value="deepNightEnabled" :loading="deepNightSyncing" @update:value="onDeepNightChange" />
+              </div>
+              <div class="mt-3 flex items-center justify-between rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2">
+                <div class="flex items-center gap-2">
+                  <SvgIcon icon="ri:shield-check-line" class="text-sm text-emerald-300" />
+                  <span class="text-xs font-medium text-white/80">本地内容过滤</span>
+                  <NTooltip trigger="hover" placement="top">
+                    <template #trigger>
+                      <SvgIcon icon="ri:information-line" class="text-xs text-white/30" />
+                    </template>
+                    <div style="max-width: 300px">关闭后跳过本地提示词、重复模板、直接提交频率预审；上游安全失败只记录错误，不再自动停用账号。上游平台审核仍会生效。</div>
+                  </NTooltip>
+                  <span class="text-[10px]" :class="contentReviewEnabled ? 'text-emerald-300' : 'text-amber-300'">{{ contentReviewEnabled ? "启用中" : "已关闭" }}</span>
+                </div>
+                <NSwitch :value="contentReviewEnabled" :loading="contentReviewSyncing" @update:value="onContentReviewChange" />
               </div>
             </div>
           </div>
@@ -1939,7 +1990,7 @@ curl http://101.35.158.183/v1/videos/generations/vgen_seedance_xxx \
           <NInput v-model:value="loginForm.password" type="password" show-password-on="click" placeholder="Runway 登录密码" />
         </NFormItem>
         <NFormItem label="选择代理">
-          <NSelect :value="accountForm.proxyId" :options="proxySelectOptions" @update:value="(v) => { accountForm.proxyId = v; const pr = proxies.find(x => x.id === v); if (pr) loginForm.proxyUrl = pr.url }" placeholder="从代理池选择" />
+          <NSelect :value="accountForm.proxyId" :options="proxySelectOptions" :loading="proxiesLoading" filterable clearable @update:value="onLoginProxySelectChange" placeholder="从代理池选择" />
         </NFormItem>
         <NFormItem label="代理地址">
           <NInput v-model:value="loginForm.proxyUrl" placeholder="socks5://user:pass@host:port" />
@@ -1971,7 +2022,7 @@ curl http://101.35.158.183/v1/videos/generations/vgen_seedance_xxx \
           <NInput v-model:value="accountForm.teamId" :placeholder="editingAccount ? accountForm.teamId || '不修改留空' : 'Runway Team ID'" />
         </NFormItem>
         <NFormItem label="选择代理">
-          <NSelect :value="accountForm.proxyId" :options="proxySelectOptions" @update:value="onProxySelectChange" placeholder="从代理池选择（可留空手动填写）" />
+          <NSelect :value="accountForm.proxyId" :options="proxySelectOptions" :loading="proxiesLoading" filterable clearable @update:value="onProxySelectChange" placeholder="从代理池选择（可留空手动填写）" />
         </NFormItem>
         <NFormItem label="代理地址">
           <NInput v-model:value="accountForm.proxyUrl" placeholder="可选，如 socks5://user:pass@host:port 或 http://host:port" />

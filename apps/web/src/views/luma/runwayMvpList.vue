@@ -6,7 +6,6 @@ import { SvgIcon } from '@/components/common'
 import { useRunwayJwt } from '@/composables/useRunwayJwt'
 import RunwayAdminPanel from './RunwayAdminPanel.vue'
 import RunwayLoginModal from './RunwayLoginModal.vue'
-import JSZip from 'jszip'
 
 interface RunwayJob {
   id: string
@@ -34,6 +33,11 @@ interface RunwayJob {
   progress: number
   priority?: number | null
   username?: string | null
+  remoteTaskId?: string | null
+  seq?: number | null
+  previewImages: string[]
+  firstImage: string | null
+  __signature?: string
 }
 
 type TabKey = 'all' | 'queued' | 'processing' | 'completed' | 'failed'
@@ -181,6 +185,10 @@ const selected = ref<Set<string>>(new Set())
 const showConfirm = ref(false)
 const deleting = ref(false)
 let pollTimer: ReturnType<typeof setInterval> | null = null
+let jobsAbortController: AbortController | null = null
+let fetchSequence = 0
+let cardObserver: IntersectionObserver | null = null
+const visibleJobIds = ref<Set<string>>(new Set())
 
 // Loading state
 const loading = ref(false)
@@ -202,8 +210,7 @@ const openDetail = (job: RunwayJob) => {
   showDetail.value = true
 }
 
-// Get all reference images
-const getAllImages = (job: RunwayJob): string[] => {
+const parseReferenceImages = (job: Partial<RunwayJob>): string[] => {
   const imgs: string[] = []
   if (job.referenceImages) {
     try {
@@ -214,6 +221,83 @@ const getAllImages = (job: RunwayJob): string[] => {
   if (job.imageUrl && !imgs.includes(job.imageUrl)) imgs.push(job.imageUrl)
   return imgs
 }
+
+const jobSignature = (job: RunwayJob) => [
+  job.id,
+  job.status,
+  job.progress,
+  job.resultUrl,
+  job.videoUrl,
+  job.thumbnailUrl,
+  job.errorMessage,
+  job.usedToken,
+  job.imageUrl,
+  job.referenceImages,
+  job.modelName,
+  job.updatedAt,
+  job.queuePosition,
+  job.queueTotal,
+  job.hourlyCompleted,
+  job.etaMinutes,
+  job.priority,
+  job.remark,
+  job.prompt,
+  job.username,
+].join('|')
+
+const normalizeJob = (raw: any): RunwayJob => {
+  const job = { ...raw } as RunwayJob
+  if (job.status === 'queued' && job.remoteTaskId) job.status = 'processing'
+  job.previewImages = parseReferenceImages(job)
+  job.firstImage = job.previewImages[0] || null
+  job.__signature = jobSignature(job)
+  return job
+}
+
+const mergeFetchedJobs = (rawJobs: any[]): RunwayJob[] => {
+  const previous = new Map(allJobs.value.map(job => [job.id, job]))
+  return rawJobs.map((raw) => {
+    const next = normalizeJob(raw)
+    const prev = previous.get(next.id)
+    return prev?.__signature === next.__signature ? prev : next
+  })
+}
+
+const markJobVisible = (id: string) => {
+  if (visibleJobIds.value.has(id)) return
+  const next = new Set(visibleJobIds.value)
+  next.add(id)
+  visibleJobIds.value = next
+}
+
+const registerJobCard = (el: Element | null, id: string) => {
+  if (!el) return
+  const element = el as HTMLElement
+  if (typeof window === 'undefined' || !('IntersectionObserver' in window)) {
+    markJobVisible(id)
+    return
+  }
+  if (!cardObserver) {
+    cardObserver = new IntersectionObserver((entries) => {
+      const next = new Set(visibleJobIds.value)
+      let changed = false
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue
+        const jobId = (entry.target as HTMLElement).dataset.jobId
+        if (jobId && !next.has(jobId)) {
+          next.add(jobId)
+          changed = true
+        }
+        cardObserver?.unobserve(entry.target)
+      }
+      if (changed) visibleJobIds.value = next
+    }, { rootMargin: '600px 0px' })
+  }
+  element.dataset.jobId = id
+  cardObserver.observe(element)
+}
+
+const shouldRenderPreview = (job: RunwayJob) => visibleJobIds.value.has(job.id) || playingVideoId.value === job.id || detailJob.value?.id === job.id
 
 const tabs: Array<{ key: TabKey; label: string }> = [
   { key: 'all', label: '全部' },
@@ -288,16 +372,7 @@ const isActive = (status: string) => isQueued(status) || isProcessing(status)
 
 const tabCount = computed(() => tabCounts.value)
 
-const filteredJobs = computed(() => {
-  const kw = searchKeyword.value.trim().toLowerCase()
-  if (!kw) return allJobs.value
-  return allJobs.value.filter((j) => {
-    const prompt = (j.prompt || '').toLowerCase()
-    const id = (j.id || '').toLowerCase()
-    const remarkStr = (j.remark || '').toLowerCase()
-    return prompt.includes(kw) || id.includes(kw) || remarkStr.includes(kw)
-  })
-})
+const filteredJobs = computed(() => allJobs.value)
 
 const pageCount = computed(() => Math.max(1, Math.ceil(totalJobs.value / pageSize.value)))
 
@@ -317,17 +392,6 @@ const allPageSelected = computed(
   () => paginatedJobs.value.length > 0 && paginatedJobs.value.every((job) => selected.value.has(job.id)),
 )
 
-const getFirstImage = (job: RunwayJob) => {
-  if (job.referenceImages) {
-    try {
-      const parsed = JSON.parse(job.referenceImages)
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed[0]
-    } catch {
-      // 忽略解析失败
-    }
-  }
-  return job.imageUrl || null
-}
 
 const queuePosition = (job: RunwayJob) => job.queuePosition || null
 
@@ -372,6 +436,11 @@ const fetchJobs = async (silent = false) => {
     showLoginModal.value = true
     return
   }
+  if (jobsAbortController) jobsAbortController.abort()
+  const requestId = ++fetchSequence
+  const controller = new AbortController()
+  jobsAbortController = controller
+
   if (!silent) loading.value = true
   fetchError.value = ''
 
@@ -381,19 +450,16 @@ const fetchJobs = async (silent = false) => {
     if (activeTab.value !== 'all') params.set('status', statusMap[activeTab.value] || '')
     if (searchKeyword.value.trim()) params.set('search', searchKeyword.value.trim())
     if (activeTag.value) params.set('tag', activeTag.value)
-    const res = await fetch('/api/runway/jobs?' + params.toString(), { headers: authHeaders() })
+    const res = await fetch('/api/runway/jobs?' + params.toString(), { headers: authHeaders(), signal: controller.signal })
     if (!res.ok) {
       if (res.status === 401) { showLoginModal.value = true; return }
       throw new Error('任务列表加载失败')
     }
 
     const data = await res.json()
+    if (requestId !== fetchSequence) return
     const rawJobs = data.jobs || data
-    // UI fix: treat THROTTLED queued (has remoteTaskId) as processing to avoid flip-flop
-    for (const j of rawJobs) {
-      if (j.status === "queued" && (j as any).remoteTaskId) j.status = "processing"
-    }
-    allJobs.value = rawJobs
+    allJobs.value = mergeFetchedJobs(rawJobs)
     totalJobs.value = data.total ?? allJobs.value.length
     if (data.counts) tabCounts.value = data.counts
 
@@ -407,9 +473,11 @@ const fetchJobs = async (silent = false) => {
     if (hasActive && !pollTimer) pollTimer = setInterval(() => { if (document.visibilityState === "visible") fetchJobs(true) }, 8000)
     if (!hasActive) stopPolling()
   } catch (e: any) {
+    if (e?.name === 'AbortError') return
     if (!silent) fetchError.value = e.message || '网络异常'
   } finally {
-    loading.value = false
+    if (jobsAbortController === controller) jobsAbortController = null
+    if (requestId === fetchSequence) loading.value = false
   }
 }
 
@@ -550,11 +618,6 @@ const hasServerDownload = computed(() => {
   return !!(job?.resultUrl || job?.videoUrl)
 })
 
-const serverDownloadUrl = computed(() => {
-  const job = downloadJob.value
-  return job ? `/api/runway/jobs/${job.id}/download?source=server` : ''
-})
-
 const serverDownloadTitle = computed(() => hasServerCache.value ? '服务器缓存下载' : '服务器中转下载')
 const serverDownloadHint = computed(() => hasServerCache.value ? '从服务器缓存文件下载，稳定快速' : '由服务器转发源文件，避免浏览器拦截')
 
@@ -626,6 +689,21 @@ const openDirectDownload = (url: string, filename: string) => {
   anchor.click()
   document.body.removeChild(anchor)
   message.success('已打开直连下载')
+}
+
+const openServerDownload = async (job: RunwayJob, fallbackUrl = '') => {
+  showDownloadPicker.value = false
+  downloadLoading.value = true
+  try {
+    const res = await fetch(`/api/runway/jobs/${job.id}/download-token`, { method: 'POST', headers: authHeaders() })
+    if (!res.ok) throw new Error('token failed')
+    const data = await res.json()
+    openDirectDownload(data.url, `video-${job.id.slice(0, 8)}.mp4`)
+  } catch {
+    await doDownload(`/api/runway/jobs/${job.id}/download?source=server`, `video-${job.id.slice(0, 8)}.mp4`, true, fallbackUrl)
+  } finally {
+    downloadLoading.value = false
+  }
 }
 
 const doDownload = async (url: string, filename: string, withAuth = false, fallbackUrl = '') => {
@@ -723,6 +801,27 @@ const handleBatchDownload = async () => {
     message.warning(`可下载的视频最多 ${MAX_BATCH_DOWNLOAD} 个，当前选中 ${targets.length} 个`)
     return
   }
+  downloadStatus.value = { active: true, phase: 'fetching', current: targets.length, total: targets.length, percent: 0, skipped: 0 }
+  try {
+    const res = await fetch('/api/runway/jobs/batch-download-token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ ids: targets.map(job => job.id) }),
+    })
+    if (!res.ok) throw new Error('batch token failed')
+    const data = await res.json()
+    openDirectDownload(data.url, `video_batch_${Date.now()}.zip`)
+    downloadStatus.value = { active: false, phase: 'done', current: targets.length, total: targets.length, percent: 100, skipped: 0 }
+    message.success('已开始批量下载')
+    setTimeout(() => { downloadStatus.value = null }, 3000)
+    return
+  } catch {
+    await handleBatchDownloadFallback(targets)
+  }
+}
+
+const handleBatchDownloadFallback = async (targets: RunwayJob[]) => {
+  const { default: JSZip } = await import('jszip')
   const zip = new JSZip()
   let skipped = 0
   downloadStatus.value = { active: true, phase: 'fetching', current: 0, total: targets.length, percent: 0, skipped: 0 }
@@ -750,7 +849,7 @@ const handleBatchDownload = async () => {
   const url = URL.createObjectURL(zipBlob)
   const a = document.createElement('a')
   a.href = url
-  a.download = `runway_batch_${Date.now()}.zip`
+  a.download = `video_batch_${Date.now()}.zip`
   document.body.appendChild(a)
   a.click()
   document.body.removeChild(a)
@@ -789,7 +888,11 @@ watch(jwtToken, (token) => {
 })
 
 onMounted(async () => { await fetchJobs(); fetchTags(); mountedOnce.value = true })
-onUnmounted(() => stopPolling())
+onUnmounted(() => {
+  stopPolling()
+  jobsAbortController?.abort()
+  cardObserver?.disconnect()
+})
 </script>
 
 <template>
@@ -1012,7 +1115,8 @@ onUnmounted(() => stopPolling())
           <div
             v-for="(job, index) in paginatedJobs"
             :key="job.id"
-            v-memo="[job.status, job.progress, job.resultUrl, job.thumbnailUrl, selected.has(job.id), playingVideoId === job.id, selectMode]"
+            :ref="(el) => registerJobCard(el as Element | null, job.id)"
+            v-memo="[job.__signature, selected.has(job.id), playingVideoId === job.id, selectMode, shouldRenderPreview(job)]"
             class="job-card group relative overflow-hidden rounded-2xl border bg-white/4 backdrop-blur-md transition-colors duration-200"
             :class="selected.has(job.id) ? 'border-sky-400/50 shadow-lg shadow-sky-500/15' : 'border-white/8 hover:border-white/15'"
             :style="mountedOnce ? {} : { animationDelay: `${Math.min(index, 6) * 40}ms` }"
@@ -1048,17 +1152,18 @@ onUnmounted(() => stopPolling())
             <div v-if="job.resultUrl" class="video-thumb relative bg-black" @click="toggleInlinePlay(job.id, $event)">
               <!-- Playing state: show video with controls -->
               <video
-                v-if="playingVideoId === job.id"
+                v-if="playingVideoId === job.id && shouldRenderPreview(job)"
                 controls
                 autoplay
                 loop
+                preload="none"
                 class="aspect-video w-full object-contain"
                 :src="job.resultUrl"
                 @click.stop
               />
               <!-- Thumbnail state: static preview with play button -->
               <template v-else>
-                <img v-if="job.thumbnailUrl" :src="job.thumbnailUrl" loading="lazy" class="aspect-video w-full object-cover pointer-events-none" />
+                <img v-if="shouldRenderPreview(job) && job.thumbnailUrl" :src="job.thumbnailUrl" loading="lazy" decoding="async" class="aspect-video w-full object-cover pointer-events-none" />
                 <div v-else class="aspect-video w-full bg-gradient-to-br from-slate-800 to-slate-900 flex items-center justify-center">
                   <SvgIcon icon="ri:movie-2-line" class="text-2xl text-white/20" />
                 </div>
@@ -1081,10 +1186,10 @@ onUnmounted(() => stopPolling())
               v-else-if="isActive(job.status)"
               class="relative aspect-video w-full overflow-hidden bg-slate-900/80"
             >
-              <div v-if="getAllImages(job).length > 1" class="absolute inset-0 grid grid-cols-2 gap-0.5">
-                <img v-for="(img, i) in getAllImages(job).slice(0, 2)" :key="i" :src="img" class="h-full w-full object-cover opacity-50" />
+              <div v-if="shouldRenderPreview(job) && job.previewImages.length > 1" class="absolute inset-0 grid grid-cols-2 gap-0.5">
+                <img v-for="(img, i) in job.previewImages.slice(0, 2)" :key="i" :src="img" loading="lazy" decoding="async" class="h-full w-full object-cover opacity-50" />
               </div>
-              <img v-else-if="getFirstImage(job)" :src="getFirstImage(job) as string" class="h-full w-full object-cover opacity-50" />
+              <img v-else-if="shouldRenderPreview(job) && job.firstImage" :src="job.firstImage" loading="lazy" decoding="async" class="h-full w-full object-cover opacity-50" />
               <div class="shimmer-overlay absolute inset-0" />
               <div class="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/90 via-black/50 to-transparent px-4 py-3">
                 <div class="flex items-center gap-2">
@@ -1100,11 +1205,11 @@ onUnmounted(() => stopPolling())
             </div>
 
             <!-- 5b. Static preview for non-active jobs (failed/cancelled/no video) -->
-            <div v-else-if="getFirstImage(job)" class="relative aspect-video w-full overflow-hidden bg-slate-900/60">
-              <div v-if="getAllImages(job).length > 1" class="absolute inset-0 grid grid-cols-2 gap-0.5">
-                <img v-for="(img, i) in getAllImages(job).slice(0, 2)" :key="i" :src="img" class="h-full w-full object-cover opacity-60 transition-opacity group-hover:opacity-75" />
+            <div v-else-if="job.firstImage" class="relative aspect-video w-full overflow-hidden bg-slate-900/60">
+              <div v-if="shouldRenderPreview(job) && job.previewImages.length > 1" class="absolute inset-0 grid grid-cols-2 gap-0.5">
+                <img v-for="(img, i) in job.previewImages.slice(0, 2)" :key="i" :src="img" loading="lazy" decoding="async" class="h-full w-full object-cover opacity-60 transition-opacity group-hover:opacity-75" />
               </div>
-              <img v-else :src="getFirstImage(job) as string" class="h-full w-full object-cover opacity-60 transition-opacity group-hover:opacity-75" />
+              <img v-else-if="shouldRenderPreview(job)" :src="job.firstImage" loading="lazy" decoding="async" class="h-full w-full object-cover opacity-60 transition-opacity group-hover:opacity-75" />
               <div class="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 to-transparent px-3 py-2 flex items-center justify-between">
                 <span
                   class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium"
@@ -1274,7 +1379,7 @@ onUnmounted(() => stopPolling())
 
         <!-- Processing state -->
         <div v-else-if="isActive(detailJob.status)" class="relative overflow-hidden rounded-xl border border-white/8 bg-slate-900/80 p-6 text-center">
-          <img v-if="getFirstImage(detailJob)" :src="getFirstImage(detailJob) as string" class="absolute inset-0 h-full w-full object-cover opacity-20" />
+          <img v-if="detailJob.firstImage" :src="detailJob.firstImage" loading="lazy" decoding="async" class="absolute inset-0 h-full w-full object-cover opacity-20" />
           <div class="relative z-10">
             <div class="processing-dot mx-auto mb-2 h-3 w-3 rounded-full bg-sky-400" />
             <p class="text-sm font-medium text-white/80">{{ statusLabel[detailJob.status] || detailJob.status }}</p>
@@ -1286,17 +1391,19 @@ onUnmounted(() => stopPolling())
         </div>
 
         <!-- Reference images (all) -->
-        <div v-if="getAllImages(detailJob).length > 0" class="overflow-hidden rounded-xl border border-white/8">
+        <div v-if="detailJob.previewImages.length > 0" class="overflow-hidden rounded-xl border border-white/8">
           <p class="border-b border-white/6 px-3 py-2 text-xs font-medium text-white/40">
-            参考图片 <span class="text-white/20">({{ getAllImages(detailJob).length }})</span>
+            参考图片 <span class="text-white/20">({{ detailJob.previewImages.length }})</span>
           </p>
-          <div class="grid gap-1 p-1" :class="getAllImages(detailJob).length > 1 ? 'grid-cols-2' : 'grid-cols-1'">
+          <div class="grid gap-1 p-1" :class="detailJob.previewImages.length > 1 ? 'grid-cols-2' : 'grid-cols-1'">
             <img
-              v-for="(imgUrl, imgIdx) in getAllImages(detailJob)"
+              v-for="(imgUrl, imgIdx) in detailJob.previewImages"
               :key="imgIdx"
               :src="imgUrl"
+              loading="lazy"
+              decoding="async"
               class="w-full rounded-lg object-cover transition-opacity hover:opacity-80 cursor-pointer"
-              :style="{ maxHeight: getAllImages(detailJob).length > 1 ? '140px' : '220px' }"
+              :style="{ maxHeight: detailJob.previewImages.length > 1 ? '140px' : '220px' }"
               @click="() => { const w = globalThis.window; w.open(imgUrl, '_blank') }"
             />
           </div>
@@ -1583,7 +1690,8 @@ onUnmounted(() => stopPolling())
       <button
         v-if="hasServerDownload"
         class="flex w-full items-center gap-3 rounded-xl border border-sky-400/15 bg-sky-500/[0.06] px-4 py-3 text-left transition-all hover:border-sky-400/30 hover:bg-sky-500/12 active:scale-[0.98]"
-        @click="doDownload(serverDownloadUrl, `video-${downloadJob.id.slice(0,8)}.mp4`, true, directUrl)"
+        :disabled="downloadLoading"
+        @click="openServerDownload(downloadJob, directUrl)"
       >
         <div class="flex h-9 w-9 items-center justify-center rounded-lg bg-sky-500/15">
           <SvgIcon icon="ri:server-line" class="text-base text-sky-400" />

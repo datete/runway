@@ -1,4 +1,5 @@
 import { Worker, Job, Queue } from "bullmq";
+import crypto from "crypto";
 import { RunwayDirectClient } from "../services/runway.direct";
 import { prisma, redis as connection, accountPool } from "../services/shared";
 import type { AccountEntry } from "../services/account-pool";
@@ -8,6 +9,170 @@ const JOB_HISTORY_LIMIT = Number(process.env.BULLMQ_HISTORY_LIMIT) || 1000;
 const defaultJobOptions = { removeOnComplete: true, removeOnFail: JOB_HISTORY_LIMIT };
 const pollQueue = new Queue("runway-poll", { connection, defaultJobOptions });
 const submitQueue = new Queue("runway-submit", { connection, defaultJobOptions });
+const PROMPT_GUARD_ENABLED = process.env.RUNWAY_PROMPT_GUARD_ENABLED !== "false";
+const CONTENT_REVIEW_KEY = "runway:content-review-enabled";
+const WORKER_TEMPLATE_LIMIT_PER_HOUR = Math.max(1, Number(process.env.RUNWAY_WORKER_TEMPLATE_LIMIT_PER_HOUR) || 10);
+const GLOBAL_WORKER_TEMPLATE_LIMIT_PER_HOUR = Math.max(1, Number(process.env.RUNWAY_GLOBAL_TEMPLATE_LIMIT_PER_HOUR) || WORKER_TEMPLATE_LIMIT_PER_HOUR);
+const WORKER_TEMPLATE_WINDOW_SECONDS = Math.max(300, Number(process.env.RUNWAY_TEMPLATE_WINDOW_SECONDS) || 3600);
+const WORKER_GLOBAL_SUBMIT_LIMIT_PER_HOUR = Math.max(1, Number(process.env.RUNWAY_WORKER_GLOBAL_SUBMIT_LIMIT_PER_HOUR) || 30);
+const RELAXED_TEMPLATE_LIMIT_PER_HOUR = Math.max(1, Number(process.env.RUNWAY_RELAXED_TEMPLATE_LIMIT_PER_HOUR) || 25);
+const RELAXED_GLOBAL_TEMPLATE_LIMIT_PER_HOUR = Math.max(1, Number(process.env.RUNWAY_RELAXED_GLOBAL_TEMPLATE_LIMIT_PER_HOUR) || 40);
+const PENDING_CANDIDATE_LIMIT = Math.max(10, Number(process.env.RUNWAY_PENDING_CANDIDATE_LIMIT) || 500);
+const STALE_LOCAL_SUBMIT_MINUTES = Math.max(2, Number(process.env.RUNWAY_STALE_LOCAL_SUBMIT_MINUTES) || 8);
+const LEGACY_GUARD_BEFORE = process.env.RUNWAY_LEGACY_PROMPT_GUARD_BEFORE
+  ? Date.parse(process.env.RUNWAY_LEGACY_PROMPT_GUARD_BEFORE)
+  : 0;
+const STRICT_MINOR_GUARD = process.env.RUNWAY_ALLOW_MINOR_PROMPTS !== "true";
+
+type PromptRisk = { blocked: boolean; reason?: string; keywords?: string[] };
+type GuardProfile = "seedance" | "kling" | "legacy" | "default";
+
+function getGuardProfile(modelName?: string | null, createdAt?: Date | string | null): GuardProfile {
+  if (LEGACY_GUARD_BEFORE > 0 && createdAt) {
+    const ts = new Date(createdAt).getTime();
+    if (Number.isFinite(ts) && ts < LEGACY_GUARD_BEFORE) return "legacy";
+  }
+  const model = String(modelName || "").toLowerCase();
+  if (model.includes("seedance")) return "seedance";
+  if (model.includes("kling")) return "kling";
+  return "default";
+}
+
+function collectRiskKeywords(text: string, ...patterns: RegExp[]): string[] {
+  const keywords: string[] = [];
+  for (const pattern of patterns) {
+    const flags = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
+    const globalPattern = new RegExp(pattern.source, flags);
+    let match: RegExpExecArray | null;
+    while ((match = globalPattern.exec(text)) !== null) {
+      if (match[0]) keywords.push(match[0]);
+      if (keywords.length >= 12) break;
+    }
+  }
+  return Array.from(new Set(
+    keywords
+      .map(k => k.trim())
+      .filter(Boolean)
+      .map(k => k.length > 32 ? `${k.slice(0, 32)}...` : k)
+  )).slice(0, 6);
+}
+
+function blockedRisk(reason: string, text: string, ...patterns: RegExp[]): PromptRisk {
+  return { blocked: true, reason, keywords: collectRiskKeywords(text, ...patterns) };
+}
+
+function inspectPromptRisk(prompt: unknown, profile: GuardProfile = "default"): PromptRisk {
+  if (!PROMPT_GUARD_ENABLED) return { blocked: false };
+  const text = String(prompt || "").toLowerCase();
+  const evasion = /\b(bypass|jailbreak|uncensored|unfiltered|no censorship|ignore policy|ignore safety|no limits?|no restrictions?)\b|\u7ed5\u8fc7.*\u5ba1\u6838|\u7ed5\u8fc7.*\u5ba1\u67e5|\u65e0\u9650\u5236|\u4e0d\u8981\u9650\u5236/i;
+  const prohibited = /\b(nsfw|nude|naked|nudity|porn|pornographic|erotic|rape|raped|sexual assault|suicide|self[- ]?harm|gore|gory|graphic blood)\b|\u8272\u60c5|\u88f8|\u88f8\u7167|\u5f3a\u5978|\u6027\u4fb5|\u81ea\u6740|\u81ea\u6b8b|\u8840\u8165/i;
+  const sexualHard = /\b(sexual|lingerie|underwear|bikini|cleavage|breasts?|boobs?|nipples?|bra|panties|thong|see[- ]?through|revealing|big breasts?|large breasts?|butt|buttocks|\bass\b|fetish|intimate|adult|voyeur|non[- ]?consensual)\b|\u5185\u8863|\u6bd4\u57fa\u5c3c|\u4e73\u6c9f|\u4e73\u623f|\u7fd8\u81c0|\u4e30\u6ee1\u80f8|\u4e30\u6ee1\u81c0|\u6210\u4eba|\u672a\u7ecf\u540c\u610f/i;
+  const sexualSoft = /\b(sexy|sensual|seductive|provocative|swimsuit|curvy|hourglass|slim waist|wide hips?)\b|\u6027\u611f|\u8bf1\u60d1|\u80f8|\u81c0/i;
+  const sexualCostume = /\b(maid outfit|french maid|schoolgirl outfit|tight top|bodycon|corset|latex outfit|fetish outfit)\b|\u5973\u4ec6\u88c5|\u5973\u4f63\u88c5|\u8377\u53f6\u8fb9\u5973\u4ec6|\u7d27\u8eab\u4e0a\u8863|\u7d27\u8eab\u88d9|\u60c5\u8da3|\u5236\u670d\u8bf1\u60d1/i;
+  const sexual = new RegExp(`(?:${sexualHard.source})|(?:${sexualSoft.source})|(?:${sexualCostume.source})`, "i");
+  const violenceHard = /\b(violent|violence|blood|bloody|blood splatter|kill|killing|murder|gun|shoot|shooting|knife|stab|stabbing|wound|wounded|injur(?:y|ed)|corpse|dead body|death|explosion|war|torture|crush|burn(?:ing)?|terroris[mt]|extremis[mt]|dismember|behead|beheading|mutilat(?:e|ed|ion)|organs?|bones?|abuse)\b|\u66b4\u529b|\u8840|\u6d41\u8840|\u6740|\u67aa|\u5200|\u4f24\u53e3|\u5c38\u4f53|\u6b7b\u4ea1|\u7206\u70b8|\u6218\u4e89|\u6050\u6016|\u8650\u5f85|\u80a2\u89e3|\u65a9\u9996|\u65ad\u5934|\u5668\u5b98|\u9aa8\u5934|\u6050\u6016\u4e3b\u4e49|\u6781\u7aef\u4e3b\u4e49/i;
+  const violenceSoft = /\b(fight|fighting|pain|suffering|struggl(?:e|ing)|scream(?:ing)?|crying)\b|\u6253\u6597|\u75db\u82e6|\u6323\u624e|\u54ed\u95f9|\u6495\u788e/i;
+  const violence = new RegExp(`(?:${violenceHard.source})|(?:${violenceSoft.source})`, "i");
+  const minor = /\b(child|children|kid|kids|toddler|minor|minors|baby|babies|teen|teens|teenage|teenager|teenagers|underage|under 18|schoolgirl|schoolboy|young girl|young boy)\b|\u513f\u7ae5|\u5c0f\u5b69|\u5e7c\u513f|\u5b69\u5b50|\u672a\u6210\u5e74|\u5b9d\u5b9d|\u5a74\u513f/i;
+  const hateHarassment = /\b(hate speech|racist|slur|nazi|kkk|harass(?:ment)?|bully|bullying|defame|defamation|intimidat(?:e|ion))\b|\u4ec7\u6068|\u6b67\u89c6|\u7eb3\u7cb9|\u9a9a\u6270|\u9738\u51cc|\u8fb1\u9a82|\u8bfd\u8c24/i;
+  const deceptionRights = /\b(deepfake|face[- ]?swap|impersonat(?:e|ion)|celebrity|public figure|politician|president|living artist|style of .*artist)\b|\u6362\u8138|\u6df1\u5ea6\u4f2a\u9020|\u5192\u5145|\u8bef\u5bfc|\u540d\u4eba|\u660e\u661f|\u516c\u4f17\u4eba\u7269|\u653f\u6cbb\u4eba\u7269|\u603b\u7edf|\u5728\u4e16\u827a\u672f\u5bb6/i;
+  const illegal = /\b(drug|drugs|cocaine|meth|weapon making|bomb making|scam|fraud|phishing)\b|\u6bd2\u54c1|\u5438\u6bd2|\u8d29\u6bd2|\u70b8\u5f39|\u8bc8\u9a97|\u9493\u9c7c|\u8fdd\u6cd5/i;
+  const protectedAttribute = /\b(black|white|asian|latino|african|caucasian|race|racial|ethnicity|ethnic|skin color|gender|male|female|man|woman|transgender|trans|non[- ]?binary|gay|lesbian|pregnant|pregnancy|disabled|disability|elderly)\b|\u9ed1\u4eba|\u767d\u4eba|\u4e9a\u88d4|\u6b27\u7f8e|\u79cd\u65cf|\u80a4\u8272|\u6c11\u65cf|\u7537\u6027|\u5973\u6027|\u7537\u4eba|\u5973\u4eba|\u8de8\u6027\u522b|\u53d8\u6027|\u540c\u6027\u604b|\u5b55\u5987|\u6000\u5b55|\u5927\u809a\u5b50|\u8001\u5e74|\u6b8b\u75be/i;
+  const identityTransform = /\b(change|replace|swap|turn|convert|transform|make)\b.{0,80}\b(to|into|as)\b|\b(change|replace|swap|turn|convert|transform)\b|\u628a.{0,80}(\u6362\u6210|\u6539\u6210|\u53d8\u6210|\u66ff\u6362\u6210)|\u66f4\u6539.{0,80}(\u4e3a|\u6210)|\u4fee\u6539.{0,80}(\u4e3a|\u6210)|\u4eba\u7269\u4fee\u6539|\u6362\u6210/i;
+  const degradingContext = /\b(trash|garbage|dumpster|stink|stinky|dirty|filthy|humiliat(?:e|ing|ion)|degrad(?:e|ing)|slave|servant)\b|\u5783\u573e|\u5783\u573e\u6876|\u81ed\u6c14|\u81ed\u6c14\u718f\u5929|\u810f|\u80ae\u810f|\u5974|\u4f63\u4eba|\u4ec6\u4eba|\u7f9e\u8fb1|\u4fae\u8fb1/i;
+  const pregnancy = /\b(pregnant|pregnancy|maternity|expecting mother)\b|\u5b55\u5987|\u6000\u5b55|\u5927\u809a\u5b50|\u4ea7\u5987/i;
+  const relaxed = profile === "kling" || profile === "legacy";
+  if (evasion.test(text)) return blockedRisk("safety-evasion or uncensored wording", text, evasion);
+  if (prohibited.test(text)) return blockedRisk("prohibited sexual/graphic/self-harm keyword", text, prohibited);
+  if (minor.test(text) && (sexual.test(text) || violence.test(text))) return blockedRisk("minor combined with sexual or violent context", text, minor, sexual, violence);
+  if (profile === "seedance" && STRICT_MINOR_GUARD && minor.test(text)) return blockedRisk("child/minor keyword blocked by seedance strict guard", text, minor);
+  if (profile === "seedance" && pregnancy.test(text)) return blockedRisk("pregnancy sensitive person keyword blocked by seedance strict guard", text, pregnancy);
+  if (protectedAttribute.test(text) && identityTransform.test(text)) return blockedRisk("protected attribute identity transformation", text, protectedAttribute, identityTransform);
+  if (protectedAttribute.test(text) && (sexual.test(text) || degradingContext.test(text))) return blockedRisk("protected attribute combined with sexualized or degrading context", text, protectedAttribute, sexualCostume, degradingContext);
+  if (sexualCostume.test(text)) return blockedRisk("sexualized costume keyword", text, sexualCostume);
+  if (relaxed ? sexualHard.test(text) : sexual.test(text)) return blockedRisk("sexualized body or adult keyword", text, relaxed ? sexualHard : sexual);
+  if (relaxed ? violenceHard.test(text) : violence.test(text)) return blockedRisk("violent distress or injury keyword", text, relaxed ? violenceHard : violence);
+  if (hateHarassment.test(text)) return blockedRisk("hate harassment or self-harm adjacent keyword", text, hateHarassment);
+  if (deceptionRights.test(text)) return blockedRisk("impersonation public-figure or rights-risk keyword", text, deceptionRights);
+  if (illegal.test(text)) return blockedRisk("illegal activity keyword", text, illegal);
+  return { blocked: false };
+}
+
+function normalizePromptTemplate(prompt: unknown): string {
+  return String(prompt || "")
+    .toLowerCase()
+    .normalize("NFKC")
+    .replace(/https?:\/\/\S+/gi, " ")
+    .replace(/[0-9]+/g, "#")
+    .replace(/[，。！？、,.!?;:()[\]{}"'<>`~\-_/\\|]+/g, "")
+    .replace(/\s+/g, "")
+    .slice(0, 320);
+}
+
+function promptTemplateHash(prompt: unknown): string {
+  const normalized = normalizePromptTemplate(prompt);
+  return crypto.createHash("sha1").update(normalized || String(prompt || "").slice(0, 120)).digest("hex").slice(0, 16);
+}
+
+function localRiskMessage(reason?: string): string {
+  const r = reason || "";
+  if (r.includes("child/minor")) return "包含儿童/未成年相关内容";
+  if (r.includes("minor combined")) return "儿童/未成年内容与敏感场景组合";
+  if (r.includes("protected attribute")) return "包含种族、性别、孕妇等受保护属性替换或敏感组合";
+  if (r.includes("pregnancy")) return "包含孕妇/怀孕相关敏感人物设定";
+  if (r.includes("sexualized costume")) return "包含女仆装、紧身服等性化服装或角色设定";
+  if (r.includes("sexual")) return "包含色情、裸露或性暗示内容";
+  if (r.includes("violent")) return "包含暴力、血腥、痛苦或危险行为内容";
+  if (r.includes("evasion")) return "包含绕过审核或无限制生成相关表述";
+  if (r.includes("hate")) return "包含仇恨、骚扰或辱骂相关内容";
+  if (r.includes("impersonation")) return "包含名人、公人物、换脸、冒充或版权风险内容";
+  if (r.includes("illegal")) return "包含违法、毒品、诈骗或武器相关内容";
+  return "提示词命中本地安全规则";
+}
+
+function keywordDetail(keywords?: string[]): string {
+  return keywords && keywords.length > 0 ? `；命中关键词：${keywords.join("、")}` : "";
+}
+
+async function isContentReviewEnabled(): Promise<boolean> {
+  if (!PROMPT_GUARD_ENABLED) return false;
+  const raw = await connection.get(CONTENT_REVIEW_KEY).catch(() => null);
+  return raw === null ? true : raw === "1";
+}
+
+async function checkWorkerTemplateBurst(accountId: string, userId: string | null | undefined, prompt: unknown, profile: GuardProfile): Promise<string | null> {
+  const hash = promptTemplateHash(prompt);
+  const relaxed = profile === "kling" || profile === "legacy";
+  const perAccountLimit = relaxed ? RELAXED_TEMPLATE_LIMIT_PER_HOUR : WORKER_TEMPLATE_LIMIT_PER_HOUR;
+  const globalLimit = relaxed ? RELAXED_GLOBAL_TEMPLATE_LIMIT_PER_HOUR : GLOBAL_WORKER_TEMPLATE_LIMIT_PER_HOUR;
+  const key = `risk:worker-template:${profile}:${accountId}:${userId || "anon"}:${hash}`;
+  const count = await connection.incr(key);
+  if (count === 1) await connection.expire(key, WORKER_TEMPLATE_WINDOW_SECONDS);
+  if (count > perAccountLimit) {
+    return `相同/相似提示词提交过于频繁，未提交 Runway（${count}/${perAccountLimit}，${WORKER_TEMPLATE_WINDOW_SECONDS}秒窗口）`;
+  }
+  const globalKey = `risk:worker-template:global:${profile}:${hash}`;
+  const globalCount = await connection.incr(globalKey);
+  if (globalCount === 1) await connection.expire(globalKey, WORKER_TEMPLATE_WINDOW_SECONDS);
+  if (globalCount > globalLimit) {
+    return `全站相同/相似提示词提交过于频繁，未提交 Runway（${globalCount}/${globalLimit}，${WORKER_TEMPLATE_WINDOW_SECONDS}秒窗口）`;
+  }
+  return null;
+}
+
+async function checkGlobalSubmitBudget(): Promise<number> {
+  const cooldownTtl = await connection.ttl("risk:worker-submit-cooldown").catch(() => -2);
+  if (cooldownTtl > 0) return cooldownTtl;
+
+  const key = "risk:worker-submit:global";
+  const count = await connection.incr(key);
+  if (count === 1) await connection.expire(key, WORKER_TEMPLATE_WINDOW_SECONDS);
+  if (count <= WORKER_GLOBAL_SUBMIT_LIMIT_PER_HOUR) return 0;
+
+  const ttl = Math.max(30, await connection.ttl(key).catch(() => 60));
+  await connection.set("risk:worker-submit-cooldown", "1", "EX", Math.min(ttl, 300)).catch(() => {});
+  return ttl;
+}
 
 function pollJobOptions(jobId: string, delay: number) {
   return {
@@ -143,6 +308,66 @@ async function areAllAccountsResting(): Promise<boolean> {
   return true;
 }
 
+async function recoverStaleLocalSubmits(): Promise<number> {
+  const cutoff = new Date(Date.now() - STALE_LOCAL_SUBMIT_MINUTES * 60_000);
+  const jobs = await prisma.runwayJob.findMany({
+    where: {
+      status: "submitted",
+      accountId: { not: null },
+      updatedAt: { lt: cutoff },
+      OR: [{ remoteTaskId: null }, { remoteTaskId: "" }],
+    },
+    select: { id: true, accountId: true },
+    orderBy: { updatedAt: "asc" },
+    take: 20,
+  });
+
+  let recovered = 0;
+  for (const job of jobs) {
+    const updated = await prisma.runwayJob.updateMany({
+      where: {
+        id: job.id,
+        status: "submitted",
+        OR: [{ remoteTaskId: null }, { remoteTaskId: "" }],
+      },
+      data: {
+        status: "pending",
+        accountId: null,
+        startedAt: null,
+        errorMessage: "本地提交未拿到远程任务号，已回到队列重试",
+      } as any,
+    });
+    if (updated.count > 0) {
+      if (job.accountId) {
+        await accountPool.release(job.accountId, job.id);
+        await connection.del(`poll:slot-released:${job.id}`);
+      }
+      recovered++;
+      console.warn(`[submit-worker] recovered stale local submit ${job.id.slice(0,8)} without remote task`);
+    }
+  }
+  if (recovered > 0) accountPool.invalidateDbCache();
+  return recovered;
+}
+
+async function normalizeLocalQueuedJobs(): Promise<number> {
+  const updated = await prisma.runwayJob.updateMany({
+    where: {
+      status: "queued",
+      accountId: null,
+      OR: [{ remoteTaskId: null }, { remoteTaskId: "" }],
+    },
+    data: {
+      status: "pending",
+      errorMessage: null,
+    } as any,
+  });
+  if (updated.count > 0) {
+    console.warn(`[submit-worker] normalized ${updated.count} local queued job(s) back to pending`);
+  }
+  return updated.count;
+}
+
 // ═══════════════════════════════════════════════════════════════
 // 触发器（去重：同一时刻只有一个待执行的触发器）
 // ═══════════════════════════════════════════════════════════════
@@ -201,6 +426,8 @@ async function trySubmitOneOnAccount(account: AccountEntry): Promise<SubmitResul
   `).catch(() => {});
 
   // ── 选取待处理任务（FIFO + 优先级） ──
+  // Model-specific prompt guard still applies later, but concurrency occupancy
+  // is unified by account maxConcurrency only.
   const pendingJobs = await prisma.$queryRawUnsafe(`
     SELECT id, status, prompt, mode, priority,
            user_id AS "userId",
@@ -226,7 +453,7 @@ async function trySubmitOneOnAccount(account: AccountEntry): Promise<SubmitResul
     FROM runway_jobs
     WHERE status IN ('pending', 'queued')
     ORDER BY COALESCE(priority, 0) DESC, created_at ASC
-    LIMIT 10
+    LIMIT ${PENDING_CANDIDATE_LIMIT}
   `) as any[];
 
   if (pendingJobs.length === 0) {
@@ -234,28 +461,13 @@ async function trySubmitOneOnAccount(account: AccountEntry): Promise<SubmitResul
     return "no_pending";
   }
 
-  // ── 用户并发检查 ──
   let dbJob: any = null;
   for (const candidate of pendingJobs) {
-    if (candidate.userId) {
-      const user = await prisma.user.findUnique({
-        where: { id: candidate.userId },
-        select: { maxConcurrency: true },
-      });
-      if (user && user.maxConcurrency !== null) {
-        const activeCount = await prisma.runwayJob.count({
-          where: {
-            userId: candidate.userId,
-            status: { in: ["submitted", "processing"] },
-            id: { not: candidate.id },
-          },
-        });
-        if (activeCount >= user.maxConcurrency) {
-          console.log(`[submit-worker] user ${candidate.userId} concurrency full (${activeCount}/${user.maxConcurrency}), skipping ${candidate.id.slice(0,8)}`);
-          await prisma.runwayJob.update({ where: { id: candidate.id }, data: { status: "queued" } });
-          continue;
-        }
-      }
+    const avoidKey = `job:avoid-account:${candidate.id}:${account.id}`;
+    const shouldAvoid = await connection.get(avoidKey);
+    if (shouldAvoid) {
+      console.log(`[submit-worker] ${account.label} skipping avoided job ${String(candidate.id).slice(0,8)}`);
+      continue;
     }
     dbJob = candidate;
     break;
@@ -263,7 +475,7 @@ async function trySubmitOneOnAccount(account: AccountEntry): Promise<SubmitResul
 
   if (!dbJob) {
     await accountPool.releaseNoJob(account.id);
-    return "no_account";
+    return "no_pending";
   }
 
   const jobId: string = dbJob.id;
@@ -282,6 +494,36 @@ async function trySubmitOneOnAccount(account: AccountEntry): Promise<SubmitResul
       accountId: dbJob.accountId || account.id,
     }, pollJobOptions(jobId, 5000));
     return "submitted";
+  }
+
+  const guardProfile = getGuardProfile(dbJob.modelName, dbJob.createdAt);
+  const contentReviewEnabled = await isContentReviewEnabled();
+  if (contentReviewEnabled) {
+    const promptRisk = inspectPromptRisk(dbJob.prompt, guardProfile);
+    if (promptRisk.blocked) {
+      const message = `提示词触发本地风控，未提交 Runway：${localRiskMessage(promptRisk.reason)}${keywordDetail(promptRisk.keywords)}`;
+      console.warn(`[submit-worker] ${jobId.slice(0,8)} ${message}`);
+      const updated = await prisma.runwayJob.updateMany({
+        where: { id: jobId, status: { in: ["pending","queued"] } },
+        data: { status: "failed", errorMessage: message, finishedAt: new Date() },
+      });
+      await accountPool.releaseNoJob(account.id);
+      return updated.count === 0 ? "no_pending" : "job_failed";
+    }
+
+    const templateBlock = await checkWorkerTemplateBurst(account.id, dbJob.userId, dbJob.prompt, guardProfile);
+    if (templateBlock) {
+      const message = templateBlock;
+      console.warn(`[submit-worker] ${jobId.slice(0,8)} ${message}`);
+      const updated = await prisma.runwayJob.updateMany({
+        where: { id: jobId, status: { in: ["pending","queued"] } },
+        data: { status: "failed", errorMessage: message, finishedAt: new Date() },
+      });
+      await accountPool.releaseNoJob(account.id);
+      return updated.count === 0 ? "no_pending" : "job_failed";
+    }
+  } else {
+    console.warn(`[submit-worker] local content review disabled, submitting ${jobId.slice(0,8)} without local review`);
   }
 
   console.log(`[submit-worker] picked jobId=${jobId.slice(0,8)} -> account=${account.label}`);
@@ -371,11 +613,9 @@ async function trySubmitOneOnAccount(account: AccountEntry): Promise<SubmitResul
       where: {
         accountId: account.id,
         status: { in: ["submitted", "processing"] },
-        remoteTaskId: { not: null },
         id: { not: jobId },
       },
     });
-    // Note: 'queued' (THROTTLED) tasks have DB status 'queued' and don't occupy real API slots
     if (acctActiveCount >= account.maxConcurrency) {
       console.log(`[submit-worker] account ${account.label} already has ${acctActiveCount}/${account.maxConcurrency} active tasks (DB), aborting ${jobId.slice(0,8)}`);
       await accountPool.release(account.id);
@@ -389,6 +629,7 @@ async function trySubmitOneOnAccount(account: AccountEntry): Promise<SubmitResul
       if (realActive >= account.maxConcurrency) {
         console.log(`[submit-worker] Platform reports ${realActive} active for ${account.label} (max ${account.maxConcurrency}), aborting ${jobId.slice(0,8)}`);
         await accountPool.release(account.id);
+        await accountPool.setCooldown(account.id, 90);
         await prisma.runwayJob.updateMany({ where: { id: jobId, status: "submitted" }, data: { status: "pending", accountId: null, startedAt: null } as any });
         return "no_account";
       }
@@ -401,6 +642,17 @@ async function trySubmitOneOnAccount(account: AccountEntry): Promise<SubmitResul
     // ══════════════════════════════════════════════════════════
     // 调用 Platform API
     // ══════════════════════════════════════════════════════════
+
+    const submitBudgetWait = await checkGlobalSubmitBudget();
+    if (submitBudgetWait > 0) {
+      console.warn(`[submit-worker] global submit budget exhausted, delaying ${jobId.slice(0,8)} for ${submitBudgetWait}s`);
+      await accountPool.release(account.id);
+      await prisma.runwayJob.updateMany({
+        where: { id: jobId, status: "submitted" },
+        data: { status: "pending", accountId: null, startedAt: null, errorMessage: `Runway 提交过于频繁，延后提交（${submitBudgetWait}秒后重试）` } as any,
+      });
+      return "batch_resting";
+    }
 
     const { remoteTaskId } = await client.createTask({
       prompt:      dbJob.prompt,
@@ -469,7 +721,7 @@ async function trySubmitOneOnAccount(account: AccountEntry): Promise<SubmitResul
 
     // 永久失败
     await accountPool.release(account.id, jobId);
-    await accountPool.recordError(account.id, msg);
+    await accountPool.handleRiskError(account.id, msg);
     await prisma.runwayJob.update({
       where: { id: jobId },
       data: { status: "failed", errorMessage: translateRunwayError(msg).slice(0, 500), finishedAt: new Date() },
@@ -522,10 +774,30 @@ async function humanSleep(ms: number): Promise<void> {
   await sleep(Math.round(ms / sp));
 }
 
-const accountLoops = new Map<string, { stopFlag: boolean }>();
+async function hasPlatformQueuedJob(accountId: string): Promise<boolean> {
+  const count = await prisma.runwayJob.count({
+    where: {
+      accountId,
+      status: { in: ["queued", "submitted", "processing"] },
+      errorMessage: { startsWith: "平台排队中" },
+    },
+  });
+  return count > 0;
+}
 
-async function accountSubmitLoop(accountId: string): Promise<void> {
-  const state = { stopFlag: false };
+async function shouldHoldSecondSlotForQueuedJob(): Promise<boolean> {
+  const raw = await connection.get("runway:hold-second-slot-on-queued").catch(() => null);
+  if (raw !== null) return raw === "1";
+  return process.env.RUNWAY_HOLD_SECOND_SLOT_ON_QUEUED === "1";
+}
+
+type AccountLoopState = { stopFlag: boolean; started?: boolean };
+const accountLoops = new Map<string, AccountLoopState>();
+
+async function accountSubmitLoop(accountId: string, existingState?: AccountLoopState): Promise<void> {
+  const state = existingState || accountLoops.get(accountId) || { stopFlag: false };
+  if (state.started) return;
+  state.started = true;
   accountLoops.set(accountId, state);
   console.log(`[loop:${accountId.slice(0,8)}] started`);
 
@@ -571,6 +843,24 @@ async function accountSubmitLoop(accountId: string): Promise<void> {
       if (cooldown) {
         const ttl = await connection.ttl(`account:cooldown:${account.id}`);
         await sleep(Math.min(Math.max(ttl, 5), 60) * 1000);
+        continue;
+      }
+
+      // Global submit budget cooldown limits automated bursts across all accounts.
+      const submitCooldown = await connection.get("risk:worker-submit-cooldown");
+      if (submitCooldown) {
+        const ttl = await connection.ttl("risk:worker-submit-cooldown");
+        await sleep(Math.min(Math.max(ttl, 5), 60) * 1000);
+        continue;
+      }
+
+      await recoverStaleLocalSubmits();
+
+      // Optional conservative mode: hold an account's second local slot when it
+      // already has a platform-queued task. Default is off so account
+      // maxConcurrency=2 can actually run as 2 local slots.
+      if ((await shouldHoldSecondSlotForQueuedJob()) && await hasPlatformQueuedJob(account.id)) {
+        await humanSleep(humanDelay(18_000, 36_000));
         continue;
       }
 
@@ -651,8 +941,10 @@ async function refreshAccountLoops(): Promise<void> {
       if (!accountLoops.has(a.id)) {
         // 随机错开启动，避免 3 个账号齐步走
         const offset = randInt(0, 45_001);
+        const state: AccountLoopState = { stopFlag: false };
+        accountLoops.set(a.id, state);
         setTimeout(() => {
-          accountSubmitLoop(a.id).catch(e => console.error(`[loop:spawn] ${e.message}`));
+          accountSubmitLoop(a.id, state).catch(e => console.error(`[loop:spawn] ${e.message}`));
         }, offset);
       }
     }
@@ -690,6 +982,8 @@ async function reconcileOrphanBatchKeys(): Promise<void> {
 
 (async () => {
   await reconcileOrphanBatchKeys();
+  await recoverStaleLocalSubmits();
+  await normalizeLocalQueuedJobs();
   await refreshAccountLoops();
   setInterval(refreshAccountLoops, 30_000);
 })();
@@ -701,7 +995,9 @@ async function reconcileOrphanBatchKeys(): Promise<void> {
 
 setInterval(async () => {
   try {
-    const pendingCount = await prisma.runwayJob.count({ where: { status: "pending" } });
+    await recoverStaleLocalSubmits();
+    await normalizeLocalQueuedJobs();
+    const pendingCount = await prisma.runwayJob.count({ where: { status: { in: ["pending", "queued"] } } });
     if (pendingCount === 0) return;
 
     // 所有账号都在批次休息中不触发
@@ -716,7 +1012,6 @@ setInterval(async () => {
         where: {
           accountId: acct.id,
           status: { in: ["submitted", "processing"] },
-          remoteTaskId: { not: null },
         },
       });
       if (dbActive < acct.maxConcurrency) {

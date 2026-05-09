@@ -20,6 +20,7 @@ const UPLOAD_ROOT = process.env.RUNWAY_UPLOAD_ROOT || path.join(RUNWAY_ROOT, "up
 const VIDEO_CACHE_DIR = process.env.MEDIA_CACHE_DIR || path.join(UPLOAD_ROOT, "videos");
 const CAPTURES_DIR = path.join(RUNWAY_ROOT, "captures");
 const VIDEO_CACHE_FILE_RE = /^(?:[a-f0-9]{40}|video_[a-f0-9]{8}_\d+)\.mp4$/;
+const CONTENT_REVIEW_KEY = "runway:content-review-enabled";
 
 type StorageBucket = {
   path: string;
@@ -36,6 +37,11 @@ async function exists(p: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function getContentReviewEnabled(): Promise<boolean> {
+  const raw = await redis.get(CONTENT_REVIEW_KEY);
+  return raw === null ? true : raw === "1";
 }
 
 async function summarizeTree(root: string, includeFile?: (name: string, fullPath: string) => boolean): Promise<StorageBucket> {
@@ -904,6 +910,11 @@ router.get("/dashboard", async (_req: Request, res: Response) => {
       if (dnRaw !== null) deepNightEnabled = dnRaw === "1";
     } catch {}
 
+    let contentReviewEnabled = true;
+    try {
+      contentReviewEnabled = await getContentReviewEnabled();
+    } catch {}
+
     res.json({
       overview: {
         totalUsers, activeUsers, totalJobs, todayJobs, queuedJobs, processingJobs, completedJobs, failedJobs, todayCompleted, todayFailed,
@@ -914,6 +925,7 @@ router.get("/dashboard", async (_req: Request, res: Response) => {
         totalCurrentConcurrency,
         speedMultiplier,
         deepNightEnabled,
+        contentReviewEnabled,
       },
       userStats,
       accountStats,
@@ -1090,6 +1102,23 @@ router.post("/deep-night", async (req: Request, res: Response) => {
     const enabled = !!req.body?.enabled;
     await redis.set("runway:deep-night-enabled", enabled ? "1" : "0");
     console.log(`[admin] deep-night mode ${enabled ? "ENABLED" : "DISABLED"} by ${(req as any).user?.username || "unknown"}`);
+    res.json({ ok: true, enabled });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/runway/admin/content-review — read local content review toggle
+router.get("/content-review", async (_req: Request, res: Response) => {
+  try {
+    res.json({ enabled: await getContentReviewEnabled() });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/runway/admin/content-review — set local content review toggle
+router.post("/content-review", async (req: Request, res: Response) => {
+  try {
+    const enabled = !!req.body?.enabled;
+    await redis.set(CONTENT_REVIEW_KEY, enabled ? "1" : "0");
+    console.log(`[admin] content review ${enabled ? "ENABLED" : "DISABLED"} by ${(req as any).user?.username || "unknown"}`);
     res.json({ ok: true, enabled });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
