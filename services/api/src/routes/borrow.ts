@@ -76,7 +76,8 @@ async function buildCapacity() {
   const freeSlots = Math.max(0, totalSlots - usedSlots);
   const channelOccupied = borrowedShadowActive + borrowedShadowPending;
   const borrowHeadroom = Math.max(0, maxBorrow - channelOccupied);
-  const availableSlots = enabled ? Math.max(0, Math.min(borrowHeadroom, freeSlots - reserveSlots)) : 0;
+  const localBacklogProtected = localPending > 0;
+  const availableSlots = enabled && !localBacklogProtected ? Math.max(0, Math.min(borrowHeadroom, freeSlots - reserveSlots)) : 0;
   return {
     enabled,
     totalSlots,
@@ -88,6 +89,7 @@ async function buildCapacity() {
     borrowedShadowActive,
     borrowedShadowPending,
     channelOccupied,
+    localBacklogProtected,
     cooldownAccounts: cooldownKeys.length,
     recent429: 0,
     failureRate: 0,

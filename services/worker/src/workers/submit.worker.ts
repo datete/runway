@@ -453,7 +453,7 @@ async function trySubmitOneOnAccount(account: AccountEntry): Promise<SubmitResul
   // Model-specific prompt guard still applies later, but concurrency occupancy
   // is unified by account maxConcurrency only.
   const pendingJobs = await prisma.$queryRawUnsafe(`
-    SELECT id, status, prompt, mode, priority,
+    SELECT id, status, prompt, mode, priority, provider,
            user_id AS "userId",
            image_url AS "imageUrl",
            reference_images AS "referenceImages",
@@ -476,7 +476,7 @@ async function trySubmitOneOnAccount(account: AccountEntry): Promise<SubmitResul
            thumbnail_url AS "thumbnailUrl"
     FROM runway_jobs
     WHERE status IN ('pending', 'queued')
-    ORDER BY COALESCE(priority, 0) DESC, created_at ASC
+    ORDER BY CASE WHEN provider = 'borrowed' THEN 1 ELSE 0 END, COALESCE(priority, 0) DESC, created_at ASC
     LIMIT ${PENDING_CANDIDATE_LIMIT}
   `) as any[];
 
