@@ -49,6 +49,34 @@ function parseImages(raw: any): string[] | undefined {
   } catch { return undefined; }
 }
 
+function sourceBase(): string {
+  return String(
+    process.env.BORROW_SOURCE_BASE ||
+    process.env.BORROW_PUBLIC_BASE ||
+    process.env.WEB_BASE ||
+    process.env.PUBLIC_BASE_URL ||
+    "",
+  ).replace(/\/$/, "");
+}
+
+function absoluteSourceUrl(value?: string | null): string | null {
+  if (!value) return null;
+  const raw = String(value);
+  if (/^https?:\/\//i.test(raw)) return raw;
+  if (!raw.startsWith("/")) return raw;
+  const base = sourceBase();
+  if (!base) {
+    console.warn(`[borrow] relative asset URL without BORROW_SOURCE_BASE: ${raw}`);
+    return raw;
+  }
+  return `${base}${raw}`;
+}
+
+function absoluteSourceUrls(values?: string[]): string[] | undefined {
+  if (!values) return undefined;
+  return values.map((v) => absoluteSourceUrl(v)).filter(Boolean) as string[];
+}
+
 async function getSettings() {
   const [enabled, maxGlobal, pendingThreshold, usageThreshold] = await Promise.all([
     redis.get(DISPATCH_ENABLED_KEY),
@@ -149,14 +177,15 @@ async function getInflightBySystem(): Promise<Record<string, number>> {
 }
 
 function buildPayload(job: any, dispatchId: string) {
+  const imageUrls = absoluteSourceUrls(parseImages(job.referenceImages));
   return {
     dispatchId,
     jobId: job.id,
     prompt: job.prompt,
     mode: job.mode,
-    imageUrl: job.imageUrl,
-    imageUrls: parseImages(job.referenceImages),
-    referenceImages: job.referenceImages,
+    imageUrl: absoluteSourceUrl(job.imageUrl),
+    imageUrls,
+    referenceImages: imageUrls ? JSON.stringify(imageUrls) : job.referenceImages,
     duration: job.duration,
     exploreMode: job.exploreMode,
     modelName: job.modelName,
@@ -165,7 +194,7 @@ function buildPayload(job: any, dispatchId: string) {
     quality: job.quality,
     cfgScale: job.cfgScale,
     sound: job.sound,
-    videoUrl: job.videoUrl,
+    videoUrl: absoluteSourceUrl(job.videoUrl),
   };
 }
 

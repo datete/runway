@@ -30,6 +30,45 @@ async function timedFetch(url: string, opts: any, timeoutMs: number, label: stri
   }
 }
 
+function normalizedContentType(contentType: string): string {
+  return String(contentType || "").split(";")[0].trim().toLowerCase();
+}
+
+function looksLikeJpeg(buf: Buffer): boolean {
+  return buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
+}
+
+function looksLikePng(buf: Buffer): boolean {
+  return buf.length >= 8 && buf.subarray(0, 8).toString("hex") === "89504e470d0a1a0a";
+}
+
+function looksLikeGif(buf: Buffer): boolean {
+  if (buf.length < 6) return false;
+  const sig = buf.subarray(0, 6).toString("ascii");
+  return sig === "GIF87a" || sig === "GIF89a";
+}
+
+function looksLikeWebp(buf: Buffer): boolean {
+  return buf.length >= 12 && buf.subarray(0, 4).toString("ascii") === "RIFF" && buf.subarray(8, 12).toString("ascii") === "WEBP";
+}
+
+function looksLikeImage(buf: Buffer): boolean {
+  return looksLikeJpeg(buf) || looksLikePng(buf) || looksLikeGif(buf) || looksLikeWebp(buf);
+}
+
+function looksLikeVideo(buf: Buffer): boolean {
+  return buf.length >= 12 && buf.subarray(4, 8).toString("ascii") === "ftyp";
+}
+
+function ensureValidSourceAsset(sourceUrl: string, contentType: string, buf: Buffer): void {
+  const ct = normalizedContentType(contentType);
+  const valid = ct.startsWith("image/") || ct.startsWith("video/") || looksLikeImage(buf) || looksLikeVideo(buf);
+  if (valid) return;
+
+  const head = buf.subarray(0, 80).toString("utf8").replace(/[^\x20-\x7E]+/g, " ").trim();
+  throw new Error(`Downloaded source is not an image/video (${contentType || "unknown"}, ${buf.length} bytes): ${sourceUrl}${head ? `; head=${head}` : ""}`);
+}
+
 export class RunwayDirectClient implements RunwayProvider {
   private token: string;
   private teamId: number;
@@ -134,18 +173,21 @@ export class RunwayDirectClient implements RunwayProvider {
     if (!imgRes.ok) throw new Error(`Failed to download image ${imgRes.status}: ${sourceUrl}`);
     const imgBuf = Buffer.from(await imgRes.arrayBuffer());
     const ct = imgRes.headers.get("content-type") || "image/png";
-    const ext = ct.includes("jpeg") || ct.includes("jpg") ? "jpg"
-              : ct.includes("webp") ? "webp"
-              : ct.includes("gif")  ? "gif"
-              : ct.includes("mp4")  ? "mp4"
-              : ct.includes("video") ? "mp4"
+    ensureValidSourceAsset(sourceUrl, ct, imgBuf);
+    const normalizedCt = normalizedContentType(ct);
+    const isVideo = normalizedCt.startsWith("video/") || normalizedCt.includes("mp4") || looksLikeVideo(imgBuf);
+    const isGif = normalizedCt.includes("gif") || looksLikeGif(imgBuf);
+    const ext = normalizedCt.includes("jpeg") || normalizedCt.includes("jpg") || looksLikeJpeg(imgBuf) ? "jpg"
+              : normalizedCt.includes("webp") || looksLikeWebp(imgBuf) ? "webp"
+              : isGif ? "gif"
+              : isVideo ? "mp4"
               : "png";
     console.log(`[runway:upload] downloaded ${imgBuf.length} bytes, type=${ct}`);
 
     // Auto-upscale reference image to max resolution for best quality
-    const isImage = !ct.includes("video") && !ct.includes("mp4") && !ct.includes("gif");
+    const isImage = !isVideo && !isGif;
     let finalBuf = imgBuf;
-    let finalCt = ct;
+    let finalCt = normalizedCt || (isVideo ? "video/mp4" : isGif ? "image/gif" : "image/png");
     if (isImage) {
       const [tw, th] = [1076, 1920];
       finalBuf = await this.upscaleImage(imgBuf, tw, th) as any;
@@ -217,7 +259,10 @@ export class RunwayDirectClient implements RunwayProvider {
     if (!imgRes.ok) throw new Error(`Failed to download file ${imgRes.status}: ${sourceUrl}`);
     const buf = Buffer.from(await imgRes.arrayBuffer());
     const ct = imgRes.headers.get("content-type") || "video/mp4";
-    const ext = ct.includes("mp4") || ct.includes("video") ? "mp4" : "png";
+    ensureValidSourceAsset(sourceUrl, ct, buf);
+    const normalizedCt = normalizedContentType(ct);
+    const isVideo = normalizedCt.startsWith("video/") || normalizedCt.includes("mp4") || looksLikeVideo(buf);
+    const ext = isVideo ? "mp4" : "png";
     const filename = `ref_${Date.now()}.${ext}`;
     console.log(`[runway:upload:video] downloaded ${buf.length} bytes, type=${ct}`);
 
@@ -236,7 +281,7 @@ export class RunwayDirectClient implements RunwayProvider {
 
     const putRes = await timedFetch(s3Url, {
       method: "PUT",
-      headers: { "Content-Type": ct },
+      headers: { "Content-Type": normalizedCt || (isVideo ? "video/mp4" : "image/png") },
       body: buf,
     }, TIMEOUT_S3_PUT, "video S3 PUT");
     if (!putRes.ok) throw new Error(`S3 PUT ${putRes.status}`);
