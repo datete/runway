@@ -1,3 +1,5 @@
+import fs from "fs";
+import path from "path";
 import fetch from "node-fetch";
 import { v4 as uuidv4 } from "uuid";
 import { prisma, redis } from "../services/shared";
@@ -11,7 +13,9 @@ const DISPATCH_FAILURE_KEY = "borrow:dispatch:failure-count";
 const DISPATCH_INTERVAL_MS = Number(process.env.BORROW_DISPATCH_INTERVAL_MS) || 15000;
 const POLL_INTERVAL_MS = Number(process.env.BORROW_POLL_INTERVAL_MS) || 20000;
 const FETCH_TIMEOUT_MS = Number(process.env.BORROW_FETCH_TIMEOUT_MS) || 15000;
+const RESULT_CACHE_TIMEOUT_MS = Number(process.env.BORROW_RESULT_CACHE_TIMEOUT_MS) || 120000;
 const REMOTE_NO_TASK_STALE_MINUTES = Math.max(3, Number(process.env.BORROW_REMOTE_NO_TASK_STALE_MINUTES) || 10);
+const VIDEOS_DIR = process.env.RUNWAY_VIDEOS_DIR || "/root/runway/uploads/videos";
 
 const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled", "deleted"]);
 
@@ -75,6 +79,40 @@ function absoluteSourceUrl(value?: string | null): string | null {
 function absoluteSourceUrls(values?: string[]): string[] | undefined {
   if (!values) return undefined;
   return values.map((v) => absoluteSourceUrl(v)).filter(Boolean) as string[];
+}
+
+function ensureVideoDir(): void {
+  if (!fs.existsSync(VIDEOS_DIR)) fs.mkdirSync(VIDEOS_DIR, { recursive: true });
+}
+
+function isVideoContent(contentType: string | null): boolean {
+  const normalized = String(contentType || "").toLowerCase();
+  return normalized.startsWith("video/") || normalized.includes("application/octet-stream");
+}
+
+async function cacheBorrowResult(remoteUrl: string | null | undefined, jobId: string, dispatchId: string): Promise<string | null> {
+  if (!remoteUrl) return null;
+  if (remoteUrl.startsWith("/img/videos/")) return remoteUrl;
+  if (!/^https?:\/\//i.test(remoteUrl)) return remoteUrl;
+
+  try {
+    ensureVideoDir();
+    const timeout = new Promise((_resolve, reject) => setTimeout(() => reject(new Error(`timeout ${RESULT_CACHE_TIMEOUT_MS}ms`)), RESULT_CACHE_TIMEOUT_MS));
+    const response: any = await Promise.race([fetch(remoteUrl), timeout]);
+    if (!response.ok) throw new Error(`fetch failed: ${response.status} ${response.statusText || ""}`.trim());
+    const contentType = response.headers?.get?.("content-type") || "";
+    if (!isVideoContent(contentType)) throw new Error(`unexpected content-type: ${contentType || "unknown"}`);
+    const buffer = await response.buffer();
+    if (!buffer || buffer.length < 1024) throw new Error(`video too small: ${buffer?.length || 0} bytes`);
+
+    const filename = `borrow_${jobId.slice(0, 8)}_${dispatchId.slice(0, 8)}_${Date.now()}.mp4`;
+    fs.writeFileSync(path.join(VIDEOS_DIR, filename), buffer);
+    console.log(`[borrow] cached result for ${jobId.slice(0, 8)} from child (${Math.round(buffer.length / 1024)}KB)`);
+    return `/img/videos/${filename}`;
+  } catch (e: any) {
+    console.warn(`[borrow] result cache failed for ${jobId.slice(0, 8)}: ${e?.message || e}; keep remote url`);
+    return remoteUrl;
+  }
 }
 
 async function getSettings() {
@@ -335,18 +373,21 @@ async function pollTick() {
         continue;
       }
       if (status === "completed") {
+        const originalResultUrl = remote.resultUrl || remote.videoUrl || null;
+        const originalVideoUrl = remote.videoUrl || remote.resultUrl || null;
+        const cachedResultUrl = await cacheBorrowResult(originalResultUrl, row.jobId, row.id);
         await (prisma as any).$executeRawUnsafe(`
           UPDATE runway_jobs
           SET status = 'completed', result_url = $2, thumbnail_url = $3, video_url = $4,
               progress = 1, finished_at = COALESCE(finished_at, now()), borrow_status = 'completed', updated_at = now()
           WHERE id = $1::uuid AND borrow_dispatch_id = $5::uuid
-        `, row.jobId, remote.resultUrl || null, remote.thumbnailUrl || null, remote.videoUrl || remote.resultUrl || null, row.id);
+        `, row.jobId, cachedResultUrl, remote.thumbnailUrl || null, originalVideoUrl, row.id);
         await (prisma as any).$executeRawUnsafe(`
           UPDATE borrow_dispatches
           SET status = 'completed', result_url = $2, thumbnail_url = $3, video_url = $4,
               last_heartbeat_at = now(), updated_at = now()
           WHERE id = $1::uuid
-        `, row.id, remote.resultUrl || null, remote.thumbnailUrl || null, remote.videoUrl || remote.resultUrl || null);
+        `, row.id, cachedResultUrl, remote.thumbnailUrl || null, originalVideoUrl);
         console.log(`[borrow] ${String(row.jobId).slice(0, 8)} completed by ${row.systemName}`);
         continue;
       }
