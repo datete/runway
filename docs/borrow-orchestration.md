@@ -68,6 +68,10 @@ Main controller UI:
 - Shows global redundant slots, free child slots, enabled child count, active borrowed dispatch count, and child status.
 - Shows borrowed tasks as normal main tasks with a `借调算力` badge on task cards and admin job rows.
 - Shows each child system with animated channel occupancy and a child provider switch.
+- Task cards use lifecycle labels such as `借调算力`, `子控排队`, `平台排队`, `借调生成中`, `借调完成`, `借调回落`, and `借调异常`.
+- The topology panel shows the SORA main controller, child controller nodes, animated channel occupancy rings, global redundant slots, protected child count, unhealthy child count, and dispatch-stage flow lanes.
+- Child states are shown as `可借`, `本地保护`, `通道占满`, `通道关闭`, `上报过期`, `离线`, `异常`, or `无冗余`.
+- Borrowed dispatch lifecycle stages are shown as `派发中`, `子控排队`, `提交中`, `平台排队`, `生成中`, `完成回传`, `回落本地`, or `异常`.
 
 Child controller UI:
 
@@ -79,7 +83,12 @@ Child controller UI:
 Current intended topology:
 
 - `keling.iplcz.cn`: main controller, dispatch switch defaults off until manually enabled.
-- `81.70.250.85`: child controller, provider switch defaults on, registered in the main controller as `81-subcontrol`.
+- `81.70.250.85`: child controller, registered in the main controller as `81-subcontrol`.
+
+The child controller should always be registered and capacity-monitored by the main controller. Whether it accepts new borrowed tasks is controlled by the child provider switch:
+
+- Provider off: main UI still shows the child, free slots, health, and channel occupancy, but `availableSlots=0`.
+- Provider on: the child can lend redundant capacity after local backlog protection, reserve slots, cooldowns, and per-child limits are applied.
 
 Runtime concurrency semantics:
 
@@ -108,3 +117,20 @@ systemctl restart runway-worker.service
 ```
 
 A full rollback can run the generated rollback SQL and restore the backed-up files from the timestamped `backups/borrow_*` directories. Stop API and worker services before replacing files, then restart both services and verify `/ready`.
+
+For the May 9 topology/display deploy, the 81 child server has a file backup at:
+
+```bash
+/root/runway/backups/borrow_topology_20260509-220900/files.tar
+```
+
+Restore it with:
+
+```bash
+cd /root/runway
+tar -xf backups/borrow_topology_20260509-220900/files.tar -C /root/runway
+pnpm --filter @runway/api build
+cd apps/web && pnpm build
+systemctl restart runway-api.service runway-worker.service runway-web-service.service
+curl -fsS http://127.0.0.1:5102/ready
+```
