@@ -59,6 +59,12 @@ if (jwtToken.value) probeBackend()
       </div>
       <h1 class="mb-2 text-2xl font-bold text-slate-100">Agent · 生图审图</h1>
       <p class="mb-8 text-sm text-slate-400">请登录后开始创建智能审图任务</p>
+      <button
+        class="rounded-lg bg-violet-500 px-5 py-2 text-sm font-medium text-white shadow-lg shadow-violet-500/20 transition hover:bg-violet-600 active:bg-violet-700"
+        @click="showLogin = true"
+      >
+        登录工作台
+      </button>
     </div>
     <RunwayLoginModal :show="showLogin" @update:show="showLogin = $event" @logged-in="handleLoggedIn" />
   </div>

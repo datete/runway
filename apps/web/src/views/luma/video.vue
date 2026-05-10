@@ -44,6 +44,12 @@ const displayName = computed(() => username.value || "用户")
       </div>
       <h1 class="mb-2 text-2xl font-bold text-slate-800 dark:text-slate-100">视频工作台</h1>
       <p class="mb-8 text-sm text-slate-500 dark:text-slate-400">请登录后开始创建视频任务</p>
+      <button
+        class="rounded-lg bg-cyan-500 px-5 py-2 text-sm font-medium text-white shadow-lg shadow-cyan-500/20 transition hover:bg-cyan-600 active:bg-cyan-700"
+        @click="showLogin = true"
+      >
+        登录视频工作台
+      </button>
     </div>
     <RunwayLoginModal :show="showLogin" @update:show="showLogin = $event" @logged-in="handleLoggedIn" />
   </div>

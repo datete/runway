@@ -68,9 +68,10 @@ watch(
   <NModal
     :show="props.show"
     preset="card"
-    :closable="false"
-    :mask-closable="false"
+    :closable="true"
+    :mask-closable="true"
     style="width: min(92vw, 420px)"
+    @update:show="emit('update:show', $event)"
   >
     <div class="rounded-2xl bg-white/95 p-1 dark:bg-slate-900/95">
       <div
