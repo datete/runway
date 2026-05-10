@@ -325,6 +325,36 @@ const borrowSystemSubtitle = (system: BorrowSystemInfo) => {
   return `占用 ${system.channelOccupied || 0}/${system.maxInflight}`
 }
 const borrowGlobalMode = computed(() => borrowSettings.value.dispatchEnabled ? '新增派发开启' : '只回收已借调')
+const borrowHealthMeta = computed(() => {
+  if ((borrowSettings.value.unhealthySystems || 0) > 0) {
+    return { label: '子控异常', hint: `${borrowSettings.value.unhealthySystems} 个系统需处理`, type: 'error' as const, icon: 'ri:error-warning-line' }
+  }
+  if ((borrowSettings.value.protectedSystems || 0) > 0) {
+    return { label: '本地保护', hint: `${borrowSettings.value.protectedSystems} 个系统保护中`, type: 'warning' as const, icon: 'ri:shield-check-line' }
+  }
+  if (!borrowSettings.value.dispatchEnabled) {
+    return { label: '派发关闭', hint: '只回收已借调任务', type: 'default' as const, icon: 'ri:pause-circle-line' }
+  }
+  if ((borrowSettings.value.globalRedundantSlots || 0) <= 0) {
+    return { label: '等待冗余', hint: '子控暂无可借槽位', type: 'info' as const, icon: 'ri:timer-flash-line' }
+  }
+  return { label: '可借调', hint: `${borrowSettings.value.globalRedundantSlots || 0} 个冗余槽可用`, type: 'success' as const, icon: 'ri:flashlight-line' }
+})
+const borrowControlTiles = computed(() => {
+  const active = asNum(borrowSettings.value.activeDispatches)
+  const maxGlobal = asNum(borrowSettings.value.maxGlobal, 1)
+  const redundant = asNum(borrowSettings.value.globalRedundantSlots)
+  const free = asNum(borrowSettings.value.globalFreeSlots)
+  const systems = `${borrowSettings.value.enabledSystems || 0}/${borrowSettings.value.totalSystems || 0}`
+  const protectedCount = asNum(borrowSettings.value.protectedSystems)
+  return [
+    { key: 'redundant', label: '全局冗余', value: redundant, sub: `空闲 ${free}`, icon: 'ri:stackshare-line', tone: 'emerald', pct: pct(redundant, Math.max(1, free)) },
+    { key: 'active', label: '借调占用', value: active, sub: `上限 ${maxGlobal}`, icon: 'ri:route-line', tone: 'cyan', pct: pct(active, maxGlobal) },
+    { key: 'systems', label: '在线子控', value: systems, sub: `异常 ${borrowSettings.value.unhealthySystems || 0}`, icon: 'ri:node-tree', tone: 'blue', pct: pct(asNum(borrowSettings.value.enabledSystems), asNum(borrowSettings.value.totalSystems, 1)) },
+    { key: 'guard', label: '风控保护', value: protectedCount, sub: protectedCount > 0 ? '暂停共享' : '未触发', icon: 'ri:shield-check-line', tone: protectedCount > 0 ? 'amber' : 'slate', pct: protectedCount > 0 ? 100 : 0 },
+  ]
+})
+const borrowDispatchActiveCount = computed(() => borrowDispatches.value.filter(d => ['dispatching', 'accepted', 'processing'].includes(d.status)).length)
 
 const users = ref<AdminUser[]>([])
 const userLoading = ref(false)
@@ -1297,7 +1327,7 @@ const borrowSystemColumns = [
   { title: '子控通道', key: 'childProviderEnabled', width: 98, render: (row: BorrowSystemInfo) => h(NSwitch, { value: Boolean(row.childProviderEnabled), loading: borrowSaving.value, 'onUpdate:value': (v: boolean) => controlBorrowSystem(row, { providerEnabled: v }) }) },
   { title: '状态', key: 'capacityReason', width: 105, render: (row: BorrowSystemInfo) => {
     const meta = borrowSystemStateMeta(row)
-    return h(NTag, { size: 'small', round: true, bordered: false, type: meta.type }, () => meta.label)
+    return h(NTag, { size: 'small', round: true, bordered: false, type: meta.type }, () => h('span', { class: 'inline-flex items-center gap-1' }, [h(SvgIcon, { icon: meta.icon, class: 'text-xs' }), meta.label]))
   } },
   { title: '系统', key: 'name', width: 130, render: (row: BorrowSystemInfo) => h('div', {}, [
     h('div', { class: 'text-white/85 font-medium' }, row.name),
@@ -1324,6 +1354,18 @@ const borrowDispatchColumns = [
   { title: '阶段', key: 'stage', width: 110, render: (row: BorrowDispatchInfo) => {
     const meta = borrowStageMeta(borrowDispatchStage(row))
     return h(NTag, { size: 'small', round: true, bordered: false, type: meta.type }, () => meta.label)
+  } },
+  { title: '进度', key: 'progress', width: 115, render: (row: BorrowDispatchInfo) => {
+    const pctValue = progressPct(row.status === 'completed' ? 1 : row.progress || 0)
+    return h('div', { class: 'borrow-table-progress' }, [
+      h('div', { class: 'borrow-table-progress__track' }, h('div', { class: 'borrow-table-progress__fill', style: { width: `${pctValue}%` } })),
+      h('span', { class: 'font-mono text-[10px] text-white/45' }, `${pctValue}%`),
+    ])
+  } },
+  { title: '结果', key: 'hasResult', width: 82, render: (row: BorrowDispatchInfo) => {
+    if (row.status === 'completed') return h(NTag, { size: 'small', round: true, bordered: false, type: row.hasResult ? 'success' : 'warning' }, () => row.hasResult ? '已回传' : '待缓存')
+    if (row.status === 'failed') return h(NTag, { size: 'small', round: true, bordered: false, type: 'warning' }, () => row.jobStatus === 'pending' ? '回落' : '失败')
+    return h('span', { class: 'text-[11px] text-white/30' }, '生成中')
   } },
   { title: '状态', key: 'status', width: 105, render: (row: BorrowDispatchInfo) => h('div', { class: 'text-xs text-white/60' }, [
     h('div', row.status),
@@ -1605,49 +1647,62 @@ onUnmounted(() => { if (autoRefreshTimer) clearInterval(autoRefreshTimer) })
 
         <!-- 借调算力 card -->
         <div class="borrow-radar relative overflow-hidden rounded-2xl border border-cyan-400/15 bg-white/[0.03] p-5 backdrop-blur-xl">
-          <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-            <div class="space-y-1">
-              <div class="flex items-center gap-2">
-                <SvgIcon icon="ri:share-forward-box-line" class="text-lg text-cyan-300" />
-                <p class="text-sm font-bold text-white/90">借调算力</p>
-                <NTag size="small" round :bordered="false" :type="borrowSettings.dispatchEnabled ? 'success' : 'default'">
-                  主控 {{ borrowSettings.dispatchEnabled ? '开启' : '关闭' }}
-                </NTag>
-                <NTag size="small" round :bordered="false" :type="borrowSettings.providerEnabled ? 'success' : 'default'">
-                  被借 {{ borrowSettings.providerEnabled ? '开启' : '关闭' }}
-                </NTag>
+          <div class="borrow-command-layout">
+            <div class="borrow-command-main">
+              <div class="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div class="flex items-center gap-2">
+                    <SvgIcon icon="ri:share-forward-box-line" class="text-lg text-cyan-300" />
+                    <p class="text-sm font-bold text-white/90">借调算力</p>
+                    <NTag size="small" round :bordered="false" :type="borrowHealthMeta.type">
+                      <SvgIcon :icon="borrowHealthMeta.icon" class="mr-1 text-xs" />{{ borrowHealthMeta.label }}
+                    </NTag>
+                  </div>
+                  <p class="mt-1 text-xs text-white/40">{{ borrowHealthMeta.hint }} · {{ borrowGlobalMode }}</p>
+                </div>
+                <div class="flex flex-wrap gap-2">
+                  <NTag size="small" round :bordered="false" :type="borrowSettings.dispatchEnabled ? 'success' : 'default'">主控 {{ borrowSettings.dispatchEnabled ? '派发中' : '回收中' }}</NTag>
+                  <NTag size="small" round :bordered="false" :type="borrowSettings.providerEnabled ? 'success' : 'default'">被借 {{ borrowSettings.providerEnabled ? '开启' : '关闭' }}</NTag>
+                </div>
               </div>
-              <p class="text-xs text-white/40">全局冗余 {{ borrowSettings.globalRedundantSlots || 0 }} · 空闲 {{ borrowSettings.globalFreeSlots || 0 }} · 活跃借调 {{ borrowSettings.activeDispatches || 0 }} · 子系统 {{ borrowSettings.enabledSystems || 0 }}/{{ borrowSettings.totalSystems || 0 }}</p>
+              <div class="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                <div v-for="tile in borrowControlTiles" :key="tile.key" class="borrow-metric-tile" :class="`borrow-tone-${tile.tone}`">
+                  <div class="flex items-center justify-between gap-2">
+                    <span class="inline-flex items-center gap-1 text-[11px] text-white/45">
+                      <SvgIcon :icon="tile.icon" class="text-xs" />{{ tile.label }}
+                    </span>
+                    <span class="text-lg font-bold text-white/90">{{ tile.value }}</span>
+                  </div>
+                  <p class="mt-1 text-[10px] text-white/35">{{ tile.sub }}</p>
+                  <div class="borrow-mini-meter mt-2"><span :style="{ width: tile.pct + '%' }" /></div>
+                </div>
+              </div>
             </div>
-            <div class="grid flex-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
-              <div class="rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2">
-                <div class="mb-1 flex items-center justify-between gap-2">
-                  <span class="text-xs text-white/70">主控借调</span>
-                  <NSwitch :value="borrowSettings.dispatchEnabled" :loading="borrowSaving" @update:value="(v: boolean) => saveBorrowSettings({ dispatchEnabled: v })" />
+            <div class="borrow-switch-grid">
+              <div class="borrow-switch-row">
+                <div>
+                  <p class="text-xs font-medium text-white/75">主控借调</p>
+                  <p class="text-[10px] text-white/35">开启后按全局上限派发</p>
                 </div>
-                <NInputNumber v-model:value="borrowSettings.maxGlobal" size="small" :min="1" :max="100" @blur="saveBorrowSettings({ maxGlobal: borrowSettings.maxGlobal })" />
+                <NSwitch :value="borrowSettings.dispatchEnabled" :loading="borrowSaving" @update:value="(v: boolean) => saveBorrowSettings({ dispatchEnabled: v })" />
               </div>
-              <div class="rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2">
-                <div class="mb-1 flex items-center justify-between gap-2">
-                  <span class="text-xs text-white/70">允许被借</span>
-                  <NSwitch :value="borrowSettings.providerEnabled" :loading="borrowSaving" @update:value="(v: boolean) => saveBorrowSettings({ providerEnabled: v })" />
+              <NInputNumber v-model:value="borrowSettings.maxGlobal" size="small" :min="1" :max="100" @blur="saveBorrowSettings({ maxGlobal: borrowSettings.maxGlobal })" />
+              <div class="borrow-switch-row">
+                <div>
+                  <p class="text-xs font-medium text-white/75">允许被借</p>
+                  <p class="text-[10px] text-white/35">本机有冗余时共享</p>
                 </div>
+                <NSwitch :value="borrowSettings.providerEnabled" :loading="borrowSaving" @update:value="(v: boolean) => saveBorrowSettings({ providerEnabled: v })" />
+              </div>
+              <div class="grid grid-cols-2 gap-2">
                 <NInputNumber v-model:value="borrowSettings.providerMaxConcurrency" size="small" :min="0" :max="100" @blur="saveBorrowSettings({ providerMaxConcurrency: borrowSettings.providerMaxConcurrency })" />
+                <NInputNumber v-model:value="borrowSettings.providerReserveSlots" size="small" :min="0" :max="100" @blur="saveBorrowSettings({ providerReserveSlots: borrowSettings.providerReserveSlots })" />
               </div>
-              <div class="rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2">
-                <span class="text-xs text-white/70">主控借调阈值</span>
-                <div class="mt-1 grid grid-cols-2 gap-2">
-                  <NInputNumber v-model:value="borrowSettings.pendingThreshold" size="small" :min="1" :max="10000" @blur="saveBorrowSettings({ pendingThreshold: borrowSettings.pendingThreshold })" />
-                  <NInputNumber v-model:value="borrowSettings.localUsageThreshold" size="small" :min="0" :max="100" @blur="saveBorrowSettings({ localUsageThreshold: borrowSettings.localUsageThreshold })" />
-                </div>
+              <div class="grid grid-cols-2 gap-2">
+                <NInputNumber v-model:value="borrowSettings.pendingThreshold" size="small" :min="1" :max="10000" @blur="saveBorrowSettings({ pendingThreshold: borrowSettings.pendingThreshold })" />
+                <NInputNumber v-model:value="borrowSettings.localUsageThreshold" size="small" :min="0" :max="100" @blur="saveBorrowSettings({ localUsageThreshold: borrowSettings.localUsageThreshold })" />
               </div>
-              <div class="rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2">
-                <span class="text-xs text-white/70">被借保留槽 / 本机冗余</span>
-                <div class="mt-1 grid grid-cols-[86px_1fr] items-center gap-2">
-                  <NInputNumber v-model:value="borrowSettings.providerReserveSlots" size="small" :min="0" :max="100" @blur="saveBorrowSettings({ providerReserveSlots: borrowSettings.providerReserveSlots })" />
-                  <div class="borrow-mini-meter"><span :style="{ width: Math.min(100, (borrowSettings.providerAvailableSlots || 0) * 12) + '%' }" /></div>
-                </div>
-              </div>
+              <p class="text-[10px] text-white/30">阈值：主控排队 / 本机占用%；被借：最大并发 / 保留槽</p>
             </div>
           </div>
         </div>
@@ -2120,6 +2175,39 @@ onUnmounted(() => { if (autoRefreshTimer) clearInterval(autoRefreshTimer) })
 
             <!-- Borrow Tab -->
             <NTabPane name="borrow" :tab="`借调算力 (${borrowSystems.length})`">
+              <div class="borrow-ops-board mb-4">
+                <div class="borrow-ops-head">
+                  <div>
+                    <div class="flex items-center gap-2">
+                      <SvgIcon icon="ri:radar-line" class="text-base text-cyan-300" />
+                      <p class="text-sm font-bold text-white/90">借调运行看板</p>
+                      <NTag size="small" round :bordered="false" :type="borrowHealthMeta.type">{{ borrowHealthMeta.label }}</NTag>
+                    </div>
+                    <p class="mt-1 text-[11px] text-white/35">活跃 {{ borrowDispatchActiveCount }} · 完成 {{ borrowSettings.completedDispatches || 0 }} · 失败 {{ borrowSettings.failedDispatches || 0 }}</p>
+                  </div>
+                  <div class="flex flex-wrap gap-2">
+                    <NButton size="small" secondary class="glass-btn" @click="fetchBorrow">
+                      <SvgIcon icon="ri:refresh-line" class="mr-1" />刷新借调
+                    </NButton>
+                    <NButton size="small" :type="borrowSettings.dispatchEnabled ? 'warning' : 'primary'" ghost :loading="borrowSaving" @click="saveBorrowSettings({ dispatchEnabled: !borrowSettings.dispatchEnabled })">
+                      <SvgIcon :icon="borrowSettings.dispatchEnabled ? 'ri:pause-circle-line' : 'ri:play-circle-line'" class="mr-1" />
+                      {{ borrowSettings.dispatchEnabled ? '停止派新' : '开启派发' }}
+                    </NButton>
+                  </div>
+                </div>
+                <div class="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                  <div v-for="tile in borrowControlTiles" :key="tile.key" class="borrow-metric-tile" :class="`borrow-tone-${tile.tone}`">
+                    <div class="flex items-center justify-between gap-2">
+                      <span class="inline-flex items-center gap-1 text-[11px] text-white/45">
+                        <SvgIcon :icon="tile.icon" class="text-xs" />{{ tile.label }}
+                      </span>
+                      <span class="text-lg font-bold text-white/90">{{ tile.value }}</span>
+                    </div>
+                    <p class="mt-1 text-[10px] text-white/35">{{ tile.sub }}</p>
+                    <div class="borrow-mini-meter mt-2"><span :style="{ width: tile.pct + '%' }" /></div>
+                  </div>
+                </div>
+              </div>
               <div class="mb-4 grid gap-3 rounded-xl border border-white/[0.08] bg-white/[0.03] p-3 lg:grid-cols-[1fr_1.4fr_120px_100px_92px]">
                 <NInput v-model:value="borrowSystemForm.name" size="small" placeholder="系统名称" />
                 <NInput v-model:value="borrowSystemForm.endpoint" size="small" placeholder="https://sub.example.com" />
@@ -2142,7 +2230,7 @@ onUnmounted(() => { if (autoRefreshTimer) clearInterval(autoRefreshTimer) })
                 <NButton size="small" secondary class="glass-btn" @click="fetchBorrow">刷新借调</NButton>
               </div>
               <div class="table-shell overflow-hidden rounded-xl border border-white/[0.08]">
-                <NDataTable :columns="borrowDispatchColumns" :data="borrowDispatches" :loading="borrowLoading" :scroll-x="1000" size="small" />
+                <NDataTable :columns="borrowDispatchColumns" :data="borrowDispatches" :loading="borrowLoading" :scroll-x="1180" size="small" />
               </div>
             </NTabPane>
 
@@ -2851,6 +2939,63 @@ curl http://101.35.158.183/v1/videos/generations/vgen_seedance_xxx \
   animation: borrowRadarSweep 5s linear infinite;
   pointer-events: none;
 }
+.borrow-command-layout {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 320px);
+  gap: 14px;
+}
+.borrow-command-main,
+.borrow-switch-grid,
+.borrow-ops-board {
+  border: 1px solid rgba(255,255,255,0.08);
+  background: rgba(2,6,23,0.22);
+  box-shadow: inset 0 0 28px rgba(34,211,238,0.04);
+}
+.borrow-command-main,
+.borrow-switch-grid {
+  border-radius: 14px;
+  padding: 14px;
+}
+.borrow-switch-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.borrow-switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.borrow-metric-tile {
+  min-height: 82px;
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.08);
+  background: rgba(255,255,255,0.03);
+  padding: 10px;
+  transition: transform .2s ease, border-color .2s ease, background .2s ease;
+}
+.borrow-metric-tile:hover {
+  transform: translateY(-1px);
+  background: rgba(255,255,255,0.045);
+}
+.borrow-tone-emerald { border-color: rgba(16,185,129,0.24); }
+.borrow-tone-cyan { border-color: rgba(34,211,238,0.24); }
+.borrow-tone-blue { border-color: rgba(96,165,250,0.22); }
+.borrow-tone-amber { border-color: rgba(245,158,11,0.28); }
+.borrow-tone-slate { border-color: rgba(148,163,184,0.16); }
+.borrow-ops-board {
+  border-radius: 14px;
+  padding: 14px;
+}
+.borrow-ops-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
 .borrow-channel-cell { display: flex; flex-direction: column; gap: 5px; min-width: 86px; }
 .borrow-channel-track, .borrow-mini-meter {
   height: 6px;
@@ -3017,6 +3162,24 @@ curl http://101.35.158.183/v1/videos/generations/vgen_seedance_xxx \
 .borrow-flow-lane:hover {
   transform: translateY(-1px);
 }
+.borrow-table-progress {
+  display: grid;
+  grid-template-columns: minmax(54px, 1fr) 34px;
+  align-items: center;
+  gap: 7px;
+}
+.borrow-table-progress__track {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.08);
+}
+.borrow-table-progress__fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, rgba(34,211,238,0.55), rgba(16,185,129,0.9));
+  transition: width .35s ease;
+}
 @keyframes borrowSpin {
   to { transform: rotate(360deg); }
 }
@@ -3028,6 +3191,12 @@ curl http://101.35.158.183/v1/videos/generations/vgen_seedance_xxx \
   to { transform: translateX(100%); }
 }
 @media (max-width: 900px) {
+  .borrow-command-layout {
+    grid-template-columns: 1fr;
+  }
+  .borrow-ops-head {
+    flex-direction: column;
+  }
   .borrow-topology-grid {
     grid-template-columns: 1fr;
   }
