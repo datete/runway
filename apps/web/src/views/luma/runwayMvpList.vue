@@ -4,7 +4,6 @@ import { NButton, NCheckbox, NDrawer, NDrawerContent, NEmpty, NModal, NPaginatio
 import { homeStore } from '@/store'
 import { SvgIcon } from '@/components/common'
 import { useRunwayJwt } from '@/composables/useRunwayJwt'
-import RunwayAdminPanel from './RunwayAdminPanel.vue'
 import RunwayLoginModal from './RunwayLoginModal.vue'
 
 interface RunwayJob {
@@ -51,7 +50,6 @@ const message = useMessage()
 const { headers: authHeaders, token: jwtToken, role: jwtRole, username: jwtUsername, removeToken } = useRunwayJwt()
 
 const showLoginModal = ref(!jwtToken.value)
-const showAdminPanel = ref(false)
 
 // Device management
 const showDevicePanel = ref(false)
@@ -900,15 +898,17 @@ const handleLogout = () => {
   showLoginModal.value = true
 }
 
+const requestAdminPanel = () => {
+  showLoginModal.value = false
+  homeStore.setMyData({ act: 'ShowAdmin', actData: { at: Date.now() } })
+}
+
 watch(
   () => homeStore.myData.act,
   (act) => {
     if (act === 'RunwayMvpRefresh') {
       fetchJobs()
       page.value = 1
-    }
-    if (act === 'ShowAdmin') {
-      showAdminPanel.value = true
     }
   },
 )
@@ -929,7 +929,6 @@ onUnmounted(() => {
 
 <template>
   <RunwayLoginModal v-model:show="showLoginModal" @loggedIn="fetchJobs" />
-  <RunwayAdminPanel v-model:show="showAdminPanel" />
 
   <div class="runway-list-root min-h-[280px] rounded-2xl border border-white/10 bg-white/5 p-4 shadow-xl backdrop-blur-xl">
     <!-- Not logged in -->
@@ -959,7 +958,7 @@ onUnmounted(() => {
           <button
             v-if="jwtRole === 'admin'"
             class="glass-btn flex items-center gap-1.5 rounded-lg border border-sky-400/20 bg-sky-500/10 px-3 py-1.5 text-xs font-medium text-sky-300 backdrop-blur transition-all hover:border-sky-400/40 hover:bg-sky-500/20 hover:shadow-lg hover:shadow-sky-500/10"
-            @click="showAdminPanel = true"
+            @click="requestAdminPanel"
           >
             <SvgIcon icon="ri:settings-3-line" class="text-sm" />
             管理后台

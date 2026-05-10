@@ -6,7 +6,7 @@ import KlingInput from '../kling/kgInput.vue'
 import PikaInput from './pikaInput.vue'
 import { mlog } from '@/api'
 import { gptServerStore, homeStore } from '@/store'
-import { ref } from 'vue'
+import { nextTick, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import PixInput from './pixInput.vue'
 import RunwayBatch from './RunwayBatch.vue'
@@ -29,8 +29,10 @@ const handleLogout = () => {
   window.location.reload()
 }
 
-const openAdmin = () => {
-  homeStore.setMyData({ act: 'ShowAdmin' })
+const openAdmin = async () => {
+  homeStore.setMyData({ act: '', actData: {} })
+  await nextTick()
+  homeStore.setMyData({ act: 'ShowAdmin', actData: { at: Date.now() } })
 }
 
 const initLoad = () => {

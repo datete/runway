@@ -9,8 +9,9 @@ import PixList from "./pixList.vue"
 import VideoList from "../video/list.vue"
 import RunwayQueue from "./RunwayQueue.vue"
 import RunwayLoginModal from "./RunwayLoginModal.vue"
+import RunwayAdminPanel from "./RunwayAdminPanel.vue"
 import { UserCenter, QuotaBar } from "@/components/common"
-import { gptServerStore } from "@/store"
+import { gptServerStore, homeStore } from "@/store"
 import { computed, ref, watch } from "vue"
 import { useRunwayJwt } from "@/composables/useRunwayJwt"
 import { useRunwayUser } from "@/composables/useRunwayUser"
@@ -21,10 +22,24 @@ const { username } = useRunwayUser()
 const showPanel = ref(false)
 const showLogin = ref(!jwtToken.value)
 const showUserCenter = ref(false)
+const showAdminPanel = ref(false)
 
 watch(jwtToken, (v) => {
   showLogin.value = !v
 })
+
+const openAdminPanel = () => {
+  showLogin.value = false
+  showAdminPanel.value = true
+}
+
+watch(
+  () => homeStore.myData.act,
+  (act) => {
+    if (act === "ShowAdmin")
+      openAdminPanel()
+  },
+)
 
 const handleLoggedIn = () => {
   showLogin.value = false
@@ -109,5 +124,6 @@ const displayName = computed(() => username.value || "用户")
 
     <!-- UserCenter drawer -->
     <UserCenter v-model:show="showUserCenter" />
+    <RunwayAdminPanel v-model:show="showAdminPanel" />
   </div>
 </template>

@@ -1426,7 +1426,7 @@ onUnmounted(() => { if (autoRefreshTimer) clearInterval(autoRefreshTimer) })
 </script>
 
 <template>
-  <NDrawer :show="props.show" placement="right" :width="drawerWidth" @update:show="emit('update:show', $event)">
+  <NDrawer :show="props.show" placement="right" :width="drawerWidth" :show-mask="false" @update:show="emit('update:show', $event)">
     <NDrawerContent closable class="admin-drawer-content">
       <template #header>
         <div class="flex items-center gap-3">
