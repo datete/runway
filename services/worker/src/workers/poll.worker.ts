@@ -173,6 +173,38 @@ new Worker('runway-poll', async (job: Job) => {
       return;
     }
 
+    const startedAtMs = dbJob.startedAt ? new Date(dbJob.startedAt).getTime() : 0;
+    const activeMinutes = startedAtMs ? (Date.now() - startedAtMs) / 60000 : 0;
+    if (startedAtMs && activeMinutes > MAX_PROCESSING_MINUTES) {
+      console.warn(
+        `[poll-worker] job ${jobId.slice(0,8)} poll failed for ${Math.round(activeMinutes)}min, ` +
+        `switching account: ${errMsg}`
+      );
+      let cancelled = false;
+      if (accountId && remoteTaskId) {
+        cancelled = await cancelRemoteBeforeRetry(accountId, jobId, remoteTaskId, 'poll timeout');
+      }
+      if (!cancelled) {
+        console.warn(`[poll-worker] job ${jobId.slice(0,8)} remote cancel not confirmed after poll timeout; releasing local slot`);
+      }
+      await prisma.runwayJob.update({
+        where: { id: jobId },
+        data: {
+          status: 'pending',
+          remoteTaskId: null,
+          errorMessage: `Poll timeout after ${Math.round(activeMinutes)} minutes, switching account`,
+          startedAt: null,
+          accountId: null,
+        } as any,
+      });
+      if (accountId) {
+        await accountPool.release(accountId, jobId);
+        await connection.set(`job:avoid-account:${jobId}:${accountId}`, '1', 'EX', 600);
+      }
+      await triggerSubmit(humanSubmitDelay());
+      return;
+    }
+
     console.warn(`[poll-worker] getTask error for job ${jobId.slice(0,8)}: ${errMsg}, retry in ${INTERVAL_ERROR/1000}s`);
     await pollQueue.add('poll', {
       jobId, remoteTaskId, accountId,
