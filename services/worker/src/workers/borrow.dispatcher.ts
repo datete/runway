@@ -10,10 +10,12 @@ const DISPATCH_PENDING_THRESHOLD_KEY = "borrow:dispatch:pending-threshold";
 const DISPATCH_USAGE_THRESHOLD_KEY = "borrow:dispatch:local-usage-threshold";
 const DISPATCH_COOLDOWN_KEY = "borrow:dispatch:cooldown";
 const DISPATCH_FAILURE_KEY = "borrow:dispatch:failure-count";
+const DISPATCH_LOCK_KEY = "borrow:dispatch:lock";
 const DISPATCH_INTERVAL_MS = Number(process.env.BORROW_DISPATCH_INTERVAL_MS) || 15000;
 const POLL_INTERVAL_MS = Number(process.env.BORROW_POLL_INTERVAL_MS) || 20000;
 const FETCH_TIMEOUT_MS = Number(process.env.BORROW_FETCH_TIMEOUT_MS) || 15000;
 const RESULT_CACHE_TIMEOUT_MS = Number(process.env.BORROW_RESULT_CACHE_TIMEOUT_MS) || 120000;
+const DISPATCH_LOCK_TTL_MS = Math.max(30000, DISPATCH_INTERVAL_MS * 3, FETCH_TIMEOUT_MS * 2);
 const REMOTE_NO_TASK_STALE_MINUTES = Math.max(3, Number(process.env.BORROW_REMOTE_NO_TASK_STALE_MINUTES) || 10);
 const VIDEOS_DIR = process.env.RUNWAY_VIDEOS_DIR || "/root/runway/uploads/videos";
 
@@ -301,6 +303,22 @@ async function dispatchOne(system: BorrowSystem, job: any) {
 }
 
 async function dispatchTick() {
+  const lockToken = uuidv4();
+  const locked = await redis.set(DISPATCH_LOCK_KEY, lockToken, "PX", DISPATCH_LOCK_TTL_MS, "NX");
+  if (locked !== "OK") return;
+  try {
+    await dispatchTickLocked();
+  } finally {
+    await redis.eval(
+      `if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) else return 0 end`,
+      1,
+      DISPATCH_LOCK_KEY,
+      lockToken,
+    ).catch((e: any) => console.warn(`[borrow] release dispatch lock failed: ${e?.message || e}`));
+  }
+}
+
+async function dispatchTickLocked() {
   const settings = await getSettings();
   if (!settings.enabled) return;
   if (await redis.get(DISPATCH_COOLDOWN_KEY)) return;
