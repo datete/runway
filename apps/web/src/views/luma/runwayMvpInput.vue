@@ -4,6 +4,7 @@ import { NAlert, NDrawer, NDrawerContent, NInput, NSpin, NSlider, NSwitch, useMe
 import { SvgIcon } from '@/components/common'
 import { homeStore } from '@/store'
 import { useRunwayJwt } from '@/composables/useRunwayJwt'
+import NetworkLoadBadge from './NetworkLoadBadge.vue'
 
 interface UploadedImage {
   id: string
@@ -1313,6 +1314,8 @@ onUnmounted(() => {
         </div>
       </div>
     </div>
+
+    <NetworkLoadBadge />
 
     <div class="section-divider" />
 

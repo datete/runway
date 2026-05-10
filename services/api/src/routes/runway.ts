@@ -24,6 +24,12 @@ const STRICT_MINOR_GUARD = process.env.RUNWAY_ALLOW_MINOR_PROMPTS !== "true";
 const SAFETY_FAILURE_DAILY_LIMIT = Math.max(1, Number(process.env.RUNWAY_SAFETY_FAILURE_DAILY_LIMIT) || 3);
 const SAFETY_FAILURE_WINDOW_SECONDS = Math.max(300, Number(process.env.RUNWAY_SAFETY_FAILURE_WINDOW_SECONDS) || 24 * 60 * 60);
 
+type NetworkSample = {
+  name: string;
+  rxBytes: number;
+  txBytes: number;
+};
+
 type DownloadTokenPayload = {
   kind: "single" | "batch";
   userId: string;
@@ -32,6 +38,39 @@ type DownloadTokenPayload = {
   ids?: string[];
   createdAt: number;
 };
+
+function readNetworkSamples(): NetworkSample[] {
+  const text = fs.readFileSync("/proc/net/dev", "utf8");
+  return text
+    .split("\n")
+    .slice(2)
+    .map((line) => {
+      const [rawName, rawStats] = line.split(":");
+      const name = rawName?.trim();
+      const fields = rawStats?.trim().split(/\s+/) || [];
+      if (!name || fields.length < 16) return null;
+      const rxBytes = Number(fields[0]);
+      const txBytes = Number(fields[8]);
+      if (!Number.isFinite(rxBytes) || !Number.isFinite(txBytes)) return null;
+      return { name, rxBytes, txBytes };
+    })
+    .filter(Boolean) as NetworkSample[];
+}
+
+function isPrimaryNetworkInterface(name: string): boolean {
+  if (name === "lo") return false;
+  return !/^(docker|br-|veth|virbr|tun|tap|zt|tailscale|flannel|cni|kube|wg)/.test(name);
+}
+
+function networkTotals(samples: NetworkSample[]) {
+  return samples.reduce(
+    (total, item) => ({
+      rxBytes: total.rxBytes + item.rxBytes,
+      txBytes: total.txBytes + item.txBytes,
+    }),
+    { rxBytes: 0, txBytes: 0 },
+  );
+}
 
 type PromptRisk = { blocked: boolean; reason?: string; keywords?: string[] };
 
@@ -403,6 +442,23 @@ async function streamBatchZip(jobs: any[], res: any) {
   await writeZipBuffer(res, state, eocd);
   res.end();
 }
+
+runwayRouter.get("/system/network", (_req, res) => {
+  try {
+    const samples = readNetworkSamples();
+    const primary = samples.filter((item) => isPrimaryNetworkInterface(item.name));
+    const interfaces = primary.length > 0 ? primary : samples.filter((item) => item.name !== "lo");
+    res.setHeader("Cache-Control", "no-store");
+    res.json({
+      ok: true,
+      ts: Date.now(),
+      total: networkTotals(interfaces),
+      interfaces,
+    });
+  } catch (e: any) {
+    res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
+});
 
 // Jobs routes — require auth
 runwayRouter.post("/jobs", authMiddleware, (req, res) => ctrl.createJob(req, res));

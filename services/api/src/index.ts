@@ -60,7 +60,7 @@ app.use((req, res, next) => {
 
 // Request logger
 app.use((req, _res, next) => {
-  if (!req.url.startsWith('/assets') && !req.url.startsWith('/favicon'))
+  if (!req.url.startsWith('/assets') && !req.url.startsWith('/favicon') && !req.url.startsWith('/api/runway/system/network'))
     console.log(`[req] ${req.method} ${req.url}`);
   next();
 });
